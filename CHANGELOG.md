@@ -41,6 +41,19 @@ reaches its first tagged release.
 - Tracked a known design gap (plugin interface-versioning, MLR §6) in
   `docs/BUILD.md`.
 
+### Security
+
+- **SSRF guard on `http_fetch`** — `zu_tools.net.check_url` denies loopback /
+  link-local (incl. cloud metadata `169.254.169.254`) / private / reserved
+  targets and non-http(s) schemes by default, validating the initial URL and
+  every redirect hop (redirects are followed manually). Opt out for local dev
+  with `ZU_HTTP_ALLOW_PRIVATE=1` or `HttpFetch(allow_private=True)`.
+- **Security checklist** added to the PR template (SSRF, parameterized SQL,
+  `safe_load`, secrets, untrusted input, new-dependency justification).
+- **`pip-audit`** added as a CI job for supply-chain visibility.
+- **Plugin trust model** documented in `SECURITY.md` — plugins are code, not
+  config; discovery imports them with full process privileges.
+
 ### Next
 
 - Step 3: SQLite `EventSink` + the append-before-notify bus + a projection.
