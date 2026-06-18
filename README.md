@@ -39,15 +39,17 @@ with a one-line config change.
 
 ## Status
 
-Early. The core is being built in the open in nine steps (see
-[`docs/BUILD.md`](docs/BUILD.md)). **Steps 1–8 are done and green:** the typed
-contracts, the six ports, the plugin registry, a scripted (fake) model provider,
-the event spine (SQLite sink + append-before-notify bus + projection), the
-deterministic interpreter loop with tier-1 tools and budgets, the escalation
-ladder and the tier-2 browser, validation against the event log (schema +
-grounding), the real `anthropic` and `openai-compatible` model adapters, and the
-**config system** — `zu run task.yaml` wires a whole run from a file, with the
-model a one-line swap. Next (step 9): the quickstart, examples, and killer demo.
+The v1 core is complete: all **nine build steps are done and green** (see
+[`docs/BUILD.md`](docs/BUILD.md)) — the typed contracts, the six ports, the
+plugin registry, a scripted (fake) model provider, the event spine (SQLite sink
++ append-before-notify bus + projection), the deterministic interpreter loop
+with tier-1 tools and budgets, the escalation ladder and the tier-2 browser,
+validation against the event log (schema + grounding), the real `anthropic` and
+`openai-compatible` model adapters, the **config system** (`zu run task.yaml`
+wires a whole run from a file, the model a one-line swap), and the **killer
+demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
+with zero setup. What remains is breadth behind the existing ports (see the
+deferred items in `docs/BUILD.md`), not new core.
 
 ## Quickstart (for contributors today)
 
@@ -70,6 +72,17 @@ sinks       sqlite
 Every built-in above is registered through the **same** plugin API you'd use for your
 own — which is how we prove the plugin system is real, not a second-class add-on.
 
+See the whole arc in one run — zero setup, no API key, no Docker:
+
+```bash
+uv run python examples/killer_demo.py
+```
+
+It fetches a JS-heavy page, **fails on JavaScript, escalates to a browser**, and
+returns **validated** structured data, then prints the queryable event log — all
+three pillars in one run. Add `--provider anthropic --model claude-sonnet-4-6`
+(with a key set) to watch a real model make the same escalation decision.
+
 Run a task from a config file — the model, plugins, and event sink are all
 declarative, and swapping models is a one-line edit to the `provider` block:
 
@@ -78,12 +91,14 @@ cp examples/zu.example.yaml zu.yaml          # pick the model + plugins
 uv run zu run examples/task.example.yaml -c zu.yaml
 ```
 
-## The five-minute promise (the target for v1)
+## The five-minute promise (real today)
 
-A developer runs `pip install`, writes a few lines, and watches an agent fetch a
-page, **fail on a JavaScript site, escalate to a browser, and return validated
-structured data** — with the event log queryable afterward. That single arc
-demonstrates all three pillars in one run.
+A developer runs one command and watches an agent fetch a page, **fail on a
+JavaScript site, escalate to a browser, and return validated structured data** —
+with the event log queryable afterward. That single arc demonstrates all three
+pillars in one run, and it ships as [`examples/killer_demo.py`](examples/killer_demo.py):
+deterministic with the fake model and saved fixtures, or pointed at any real
+model with one flag.
 
 ## Architecture in one breath
 

@@ -7,6 +7,26 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — build step 9: the killer demo (v1 core complete)
+
+`examples/killer_demo.py` — the whole arc in one run, demonstrating all three
+pillars: an agent fetches a JS-heavy page, **fails on JavaScript**, a *detector*
+(not the model) **escalates to a browser**, the result is **validated** against
+what the run actually fetched (schema + grounding), and the entire run is a
+queryable event log.
+
+- **Zero setup.** Runs deterministically with the fake model and saved fixtures
+  — no API key, no network, no Docker — so a new person reaches a working result
+  immediately. Point it at a real model (`--provider`/`--model`) to watch a live
+  model make the same escalation decision; still no Docker (the page is
+  fixtured), proving "run on any model" with only a key.
+- The real-model path selects the provider through the **same `zu_cli.config`
+  surface** step 8 added, so the demo and `zu run` share one wiring path.
+- Quickstart, README, and `examples/README.md` updated to lead with the demo;
+  3 new tests run it offline (as a subprocess — the literal "clean machine" path
+  — and by inspecting the produced event log). This completes the nine-step v1
+  core; what remains is breadth behind the existing ports (see BUILD.md).
+
 ### Added — build step 8: the config system + `zu run`
 
 A run is now wired by a file, not by code. `zu run task.yaml -c zu.yaml` loads a
