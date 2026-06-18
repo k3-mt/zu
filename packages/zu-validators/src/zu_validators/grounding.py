@@ -12,7 +12,6 @@ value such as ``"5"`` is not spuriously grounded by ``"1985"``.
 
 from __future__ import annotations
 
-import re
 from typing import Iterator
 
 from zu_core.contracts import Result
@@ -30,15 +29,44 @@ def _grounded(leaf_norm: str, corpus: str) -> bool:
 
     Plain substring containment is too lenient: a short value like ``"5"`` would
     match incidentally inside ``"1985"`` and let a fabricated number pass. We
-    require the value not to be flanked by alphanumerics on either side, so it
-    matches as a standalone token, not as a fragment of a longer one. The flank
-    class is ``[0-9a-z]`` only (the corpus is already lowercased), so punctuation
-    boundaries still count — ``"$9.00"`` between ``>`` and ``<`` still grounds,
-    and ``"5"`` inside ``"1985"`` does not."""
+    require the value to appear as a standalone token, not a fragment of a longer
+    one, on two axes:
+
+    - **Alphanumeric flanks** (Unicode-aware via ``str.isalnum``): ``"5"`` inside
+      ``"1985"`` or ``"caf"`` inside ``"café"`` does not ground, while ``"$9.00"``
+      between ``>`` and ``<`` still does — punctuation is a boundary.
+    - **Number fragments across a decimal/thousands separator**: a ``.`` or ``,``
+      flanked by a digit on the *outer* side means the value is part of a larger
+      number, so ``"14"`` is not grounded by ``"3.14"`` nor ``"3"`` by ``"3.14"``
+      — but ``"5"`` in ``"Qty: 5."`` (the dot ends a sentence) still grounds.
+    """
     if not leaf_norm:
         return True
-    pattern = r"(?<![0-9a-z])" + re.escape(leaf_norm) + r"(?![0-9a-z])"
-    return re.search(pattern, corpus) is not None
+    n = len(leaf_norm)
+    start = 0
+    while True:
+        i = corpus.find(leaf_norm, start)
+        if i == -1:
+            return False
+        if _standalone(corpus, i, i + n):
+            return True
+        start = i + 1
+
+
+def _standalone(corpus: str, lo: int, hi: int) -> bool:
+    """Are the chars flanking ``corpus[lo:hi]`` token boundaries, not part of a
+    longer alphanumeric token or a larger number?"""
+    before = corpus[lo - 1] if lo > 0 else ""
+    after = corpus[hi] if hi < len(corpus) else ""
+    if before.isalnum() or after.isalnum():
+        return False
+    # A decimal/thousands separator adjacent to a digit on its outer side means
+    # this match is a slice of a larger number (e.g. "14" inside "3.14").
+    if before in ".," and corpus[lo - 2 : lo - 1].isdigit():
+        return False
+    if after in ".," and corpus[hi + 1 : hi + 2].isdigit():
+        return False
+    return True
 
 
 def _leaf_strings(value: object) -> Iterator[str]:

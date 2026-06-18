@@ -41,7 +41,10 @@ def test_schema_passes_valid_result() -> None:
 def test_schema_fails_missing_required() -> None:
     r = Result(status=Status.SUCCESS, value={})
     v = SchemaValidator().check(r, _ctx())
+    # A plain data mismatch must be RETRY (the model can correct it) — NOT
+    # TERMINAL; the loop branches on this severity, so lock it, not just "fired".
     assert v is not None and v.detector == "schema"
+    assert v.severity == Severity.RETRY
 
 
 def test_grounding_fails_invented_value() -> None:
@@ -86,6 +89,28 @@ def test_grounding_rejects_short_value_inside_larger_token() -> None:
     assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"rating": 5}), standalone) is None
 
 
+def test_grounding_rejects_value_inside_a_decimal() -> None:
+    # A decimal point is a token boundary for *words*, but a fabricated number
+    # must not be grounded by a fragment of a larger number: "14" is not on a
+    # page that only says "$3.14", nor is "3".
+    page = _ctx({"html": "<span class='price'>$3.14</span>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"n": 14}), page) is not None
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"n": 3}), page) is not None
+    # The whole decimal still grounds, and so does an integer the dot merely ends
+    # a sentence after (the dot is not flanked by a digit on its outer side).
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"p": "3.14"}), page) is None
+    qty = _ctx({"html": "<p>Qty: 5.</p>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"q": 5}), qty) is None
+
+
+def test_grounding_is_unicode_token_aware() -> None:
+    # The flank check is Unicode-aware (str.isalnum), so a value is not grounded
+    # as a fragment of a non-ASCII word.
+    page = _ctx({"html": "<p>café société</p>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"w": "caf"}), page) is not None
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"w": "café"}), page) is None
+
+
 def test_schema_error_is_terminal_not_a_crash() -> None:
     # An invalid output_schema (from the TaskSpec) raises jsonschema.SchemaError
     # internally; the validator must turn it into a TERMINAL verdict, never let
@@ -96,6 +121,20 @@ def test_schema_error_is_terminal_not_a_crash() -> None:
     v = SchemaValidator().check(r, ctx)
     assert v is not None and v.severity == Severity.TERMINAL
     assert "invalid output_schema" in (v.detail or "")
+
+
+def test_unresolvable_ref_is_terminal_not_a_crash() -> None:
+    # A schema with an unresolvable $ref raises a *referencing* error that is NOT
+    # a subclass of jsonschema.SchemaError — it would escape the old handlers and
+    # crash the ladder. It must become a TERMINAL verdict like any other broken
+    # schema, since the output_schema is untrusted TaskSpec input.
+    for bad in ({"$ref": "#/nope"}, {"$ref": "http://evil.example/x"}):
+        spec = TaskSpec(query="x", output_schema=bad)
+        ctx = RunContext(spec=spec, observation=None)
+        r = Result(status=Status.SUCCESS, value={"a": 1})
+        v = SchemaValidator().check(r, ctx)
+        assert v is not None and v.severity == Severity.TERMINAL
+        assert "invalid output_schema" in (v.detail or "")
 
 
 # --- grounding against the real event log, inside the loop -------------------

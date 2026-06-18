@@ -148,6 +148,32 @@ async def test_capabilities_present(make) -> None:
     assert make("text", []).capabilities.native_tools is True
 
 
+async def test_openai_usage_includes_total_tokens() -> None:
+    # The neutral usage dict the cost projection reads carries total_tokens for
+    # the OpenAI shape (Anthropic omits it; the loop sums input+output either way).
+    r = await make_openai("text", []).complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert r.usage["total_tokens"] == 15
+
+
+async def test_native_tools_false_raises_not_implemented() -> None:
+    # The prompt-based tool fallback for non-native-tool models is deferred
+    # (BUILD.md); the adapter must raise clearly, never silently guess.
+    p = OpenAICompatibleProvider(model="local", native_tools=False, client=object())
+    with pytest.raises(NotImplementedError):
+        await p.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+
+
+def test_orphan_tool_result_raises_not_silent() -> None:
+    # A tool result with no preceding tool call is a malformed history; both
+    # translators must fail loudly here rather than fabricate an id that the
+    # provider would reject downstream as an opaque 400.
+    bad = [{"role": "tool", "name": "http_fetch", "content": "{}"}]
+    with pytest.raises(ValueError):
+        to_anthropic_messages(bad)
+    with pytest.raises(ValueError):
+        to_openai_messages(bad)
+
+
 # --- request translation (provider-specific wire shapes) ----------------------
 
 

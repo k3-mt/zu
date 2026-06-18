@@ -20,10 +20,14 @@ real model providers are (build step 7).
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from zu_core.ports import ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 class DockerUnavailableError(RuntimeError):
@@ -90,11 +94,48 @@ class LocalDockerBackend:
             # is enforced. A tier that needs the public web opts in via spec.
             network_disabled=not spec.get("network", False),
             mem_limit=spec.get("mem_limit", "1g"),
+            # Privilege hardening, secure by default: this container runs an
+            # untrusted, model-chosen URL. Drop all Linux capabilities and forbid
+            # privilege escalation; a browser image that genuinely needs a cap
+            # (e.g. SYS_ADMIN for Chromium's sandbox) opts back in via cap_add,
+            # and pids_limit caps a fork bomb. read_only is opt-in (a browser
+            # needs a writable /tmp), exposed so a locked-down image can set it.
+            cap_drop=spec.get("cap_drop", ["ALL"]),
+            cap_add=spec.get("cap_add", []),
+            security_opt=spec.get("security_opt", ["no-new-privileges"]),
+            pids_limit=spec.get("pids_limit", 256),
+            read_only=spec.get("read_only", False),
             # Don't keep the container around after it stops; we also destroy
             # explicitly, but this is the backstop against a leak on crash.
             auto_remove=False,
         )
+        await self._await_running(container)
         return _Sandbox(container=container, image=image)
+
+    async def _await_running(self, container: Any) -> None:
+        """Poll until the container reports ``running`` (or exits), bounded by
+        ``startup_timeout_s`` — so a render never execs into a not-yet-ready or
+        already-dead container. Defensive about SDK shape so a minimal injected
+        client (no reload/status) is simply treated as ready."""
+        reload = getattr(container, "reload", None)
+        if reload is None:
+            return  # injected stub without a lifecycle; nothing to wait on
+        deadline = time.monotonic() + self.startup_timeout_s
+        while True:
+            await asyncio.to_thread(reload)
+            status = getattr(container, "status", "running")
+            if status == "running":
+                return
+            if status in ("exited", "dead"):
+                raise DockerUnavailableError(
+                    f"render container entered status {status!r} before becoming ready"
+                )
+            if time.monotonic() >= deadline:
+                raise DockerUnavailableError(
+                    f"render container not running after {self.startup_timeout_s}s "
+                    f"(last status {status!r})"
+                )
+            await asyncio.sleep(0.05)
 
     async def exec(self, sandbox: _Sandbox, call: ToolCall) -> dict:
         """Run the tool call inside the container and return its observation."""
@@ -115,9 +156,14 @@ class LocalDockerBackend:
             return {"status": 200, "html": text}
 
     async def destroy(self, sandbox: _Sandbox) -> None:
-        """Stop and remove the container. Best-effort: teardown failures are
-        swallowed so they can't mask the render's own result or error."""
+        """Stop and remove the container. Best-effort: a teardown failure must
+        not raise over the render's own result, but it IS logged at WARNING — a
+        silent swallow turns a leaked container into an invisible resource leak."""
         try:
             await asyncio.to_thread(sandbox.container.remove, force=True)
-        except Exception:  # noqa: BLE001 - teardown must not raise over the result
-            pass
+        except Exception as exc:  # noqa: BLE001 - teardown must not raise over the result
+            logger.warning(
+                "failed to remove render container %s: %s",
+                getattr(sandbox.container, "id", "?"),
+                exc,
+            )

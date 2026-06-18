@@ -42,6 +42,15 @@ def _resolve_ips(host: str) -> set[str]:
 
 def _ip_blocked_reason(ip_str: str) -> str | None:
     ip = ipaddress.ip_address(ip_str)
+    # Unwrap IPv6 forms that embed an IPv4 address (``::ffff:169.254.169.254``,
+    # 6to4 ``2002::/16``) and re-check the inner address, so a mapped/tunnelled
+    # internal target can't slip past the IPv4 rules below. We don't rely on
+    # stdlib classification of these — it was also buggy before CPython 3.11.10 /
+    # 3.12.4 (CVE-2024-4032), so this closes the gap regardless of patch level.
+    if isinstance(ip, ipaddress.IPv6Address):
+        inner = ip.ipv4_mapped or ip.sixtofour
+        if inner is not None:
+            return _ip_blocked_reason(str(inner))
     if ip.is_loopback:
         return "loopback"
     if ip.is_link_local:
@@ -54,6 +63,11 @@ def _ip_blocked_reason(ip_str: str) -> str | None:
         return "multicast"
     if ip.is_unspecified:
         return "unspecified"
+    # Default-deny backstop: anything not globally routable (NAT64, Teredo,
+    # benchmarking ranges, future-reserved space the enumerated checks miss) is
+    # refused rather than allowed by omission.
+    if not ip.is_global:
+        return "non-global"
     return None
 
 

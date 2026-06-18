@@ -32,6 +32,20 @@ def test_error_terminal_on_404() -> None:
     assert v is not None and v.severity is Severity.TERMINAL
 
 
+def test_error_terminal_on_permanent_client_errors() -> None:
+    # 410 Gone / 451 / 400 / 405 won't be fixed by a retry — they're terminal.
+    for status in (400, 405, 410, 451):
+        v = ErrorDetector().inspect(_ctx({"status": status, "html": ""}))
+        assert v is not None and v.severity is Severity.TERMINAL, status
+
+
+def test_error_retry_on_transient() -> None:
+    # 429 (rate limit) and 5xx are transient — RETRY, not TERMINAL.
+    for status in (429, 500, 503):
+        v = ErrorDetector().inspect(_ctx({"status": status, "html": ""}))
+        assert v is not None and v.severity is Severity.RETRY, status
+
+
 def test_js_shell_fires_on_empty_spa() -> None:
     html = '<html><body><div id="root"></div><script src="/app.js"></script></body></html>'
     v = JsShellDetector().inspect(_ctx({"html": html}))

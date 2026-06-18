@@ -31,6 +31,10 @@ class ScriptedProvider:
         ])
     """
 
+    # No real model behind the fake provider, so cost attribution records None
+    # (satisfies the ModelProvider ``model`` contract; real adapters set an id).
+    model: str | None = None
+
     def __init__(
         self,
         moves: list[ModelResponse],

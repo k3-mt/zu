@@ -16,6 +16,11 @@ from zu_tools.net import BlockedURLError, check_url
         "http://10.0.0.5/",
         "http://192.168.1.1/",
         "https://[::1]/",  # IPv6 loopback
+        "http://[::ffff:169.254.169.254]/",  # IPv4-mapped metadata (mapped-IPv6 bypass)
+        "http://[::ffff:127.0.0.1]/",  # IPv4-mapped loopback
+        "http://[::ffff:10.0.0.1]/",  # IPv4-mapped private
+        "http://[2002:a9fe:a9fe::]/",  # 6to4-wrapped 169.254.x.x
+        "http://[64:ff9b::a9fe:a9fe]/",  # NAT64-wrapped metadata (non-global backstop)
     ],
 )
 def test_blocks_internal_targets(url: str) -> None:

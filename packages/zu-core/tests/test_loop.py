@@ -129,6 +129,7 @@ class _RecordingProvider:
     def __init__(self, moves: list[dict]) -> None:
         self._inner = ScriptedProvider.from_moves(moves)
         self.capabilities = self._inner.capabilities
+        self.model = self._inner.model  # satisfies the ModelProvider contract
         self.seen: list[list[dict]] = []
         self.tools_seen: list[list[str]] = []  # tool names offered each turn
 
@@ -169,6 +170,37 @@ async def test_per_turn_tool_call_cap() -> None:
     result = await run_task(spec, provider, _registry_with_tools(), EventBus())
     assert result.status == Status.TERMINAL
     assert result.reason == "budget:max_tool_calls"
+
+
+async def test_max_tokens_is_an_inclusive_cap() -> None:
+    # Landing *exactly* on max_tokens stops the run (the cap is a ceiling, not a
+    # threshold to exceed) — a turn at the boundary must not buy another turn.
+    move = ModelResponse(
+        tool_calls=[ToolCall(name="http_fetch", args={"url": "http://x.test/"})],
+        finish=Finish.TOOL_CALLS,
+        usage={"input_tokens": 100, "output_tokens": 20},  # exactly 120
+    )
+    provider = ScriptedProvider([move, move])
+    spec = TaskSpec(query="boundary", budget=Budget(max_tokens=120))
+    result = await run_task(spec, provider, _registry_with_tools(), EventBus())
+    assert result.status == Status.TERMINAL
+    assert result.reason == "budget:max_tokens"
+
+
+async def test_truncated_response_with_tool_calls_is_terminal() -> None:
+    # A response truncated mid-generation (finish=LENGTH) must not have its
+    # (possibly cut-off, malformed) tool calls dispatched — truncation is caught
+    # before any action is taken.
+    truncated = ModelResponse(
+        tool_calls=[ToolCall(name="http_fetch", args={"url": "http://x.test/"})],
+        finish=Finish.LENGTH,
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), ScriptedProvider([truncated]), _registry_with_tools(), bus)
+    assert result.status == Status.TERMINAL
+    assert result.reason == "model truncated (length)"
+    # nothing was dispatched: no tool ran
+    assert not [e for e in await bus.query() if e.type == "harness.tool.returned"]
 
 
 async def test_fetched_content_stored_once() -> None:
@@ -407,6 +439,10 @@ async def test_turn_usage_is_recorded_for_cost() -> None:
     assert len(turns) == 2
     assert turns[0].payload["tier"] == 1
     assert turns[0].payload["usage"] == {"input_tokens": 100, "output_tokens": 20}
+    # The model id is recorded for per-model cost attribution; the fake provider
+    # has no real model, so it is explicitly None (real adapters set an id).
+    assert "model" in turns[0].payload
+    assert turns[0].payload["model"] is None
     # the basis of cost: total tokens, summed straight from the log
     total = sum(
         t.payload["usage"].get("input_tokens", 0) + t.payload["usage"].get("output_tokens", 0)

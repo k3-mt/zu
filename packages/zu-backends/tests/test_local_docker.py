@@ -19,11 +19,17 @@ _RENDERED = "<html><body><h1>Rendered</h1></body></html>"
 
 
 class _FakeContainer:
-    def __init__(self, exit_code: int, output: bytes) -> None:
+    def __init__(self, exit_code: int, output: bytes, status: str = "running") -> None:
         self._exit_code = exit_code
         self._output = output
         self.removed = False
         self.exec_calls: list[list[str]] = []
+        self.id = "fake-container-id"
+        self.status = status
+        self.reloads = 0
+
+    def reload(self) -> None:
+        self.reloads += 1
 
     def exec_run(self, cmd):
         self.exec_calls.append(cmd)
@@ -87,6 +93,30 @@ async def test_network_enabled_when_requested() -> None:
     await backend.launch({"image": "img", "network": True})
     assert client.containers.run_kwargs is not None
     assert client.containers.run_kwargs["network_disabled"] is False
+
+
+async def test_container_is_hardened_by_default() -> None:
+    # The tier-2 container runs an untrusted, model-chosen URL: it must drop all
+    # caps, forbid privilege escalation, and bound pids by default.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img"})
+    kw = client.containers.run_kwargs
+    assert kw is not None
+    assert kw["cap_drop"] == ["ALL"]
+    assert kw["security_opt"] == ["no-new-privileges"]
+    assert kw["pids_limit"] == 256
+    assert container.reloads >= 1  # readiness was actually awaited
+
+
+async def test_dead_container_fails_fast() -> None:
+    # If the container exits before becoming ready, launch raises rather than
+    # execing into a dead container.
+    container = _FakeContainer(exit_code=0, output=b"", status="exited")
+    backend = LocalDockerBackend(client=_FakeClient(container), startup_timeout_s=1)
+    with pytest.raises(DockerUnavailableError):
+        await backend.launch({"image": "img"})
 
 
 async def test_nonzero_exit_becomes_error_observation() -> None:

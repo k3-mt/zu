@@ -62,7 +62,17 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
             else:
                 out.append({"role": "assistant", "content": m.get("content", "")})
         elif role == "tool":
-            tid = pending_ids.pop(0) if pending_ids else f"toolu_orphan_{counter}"
+            if not pending_ids:
+                # A tool result with no preceding tool call to match it: the
+                # neutral history is malformed (results out of order, or more
+                # results than calls). Fabricating an id here would only surface
+                # as an opaque provider 400 ("tool_result references unknown
+                # tool_use_id"); fail loudly and locally instead.
+                raise ValueError(
+                    "tool result has no matching tool call in the message history "
+                    "(an assistant tool-call turn must immediately precede its results)"
+                )
+            tid = pending_ids.pop(0)
             pending_results.append(
                 {"type": "tool_result", "tool_use_id": tid, "content": m.get("content", "")}
             )
@@ -101,7 +111,14 @@ def to_openai_messages(messages: list[dict]) -> list[dict]:
             else:
                 out.append({"role": "assistant", "content": m.get("content", "")})
         elif role == "tool":
-            tid = pending_ids.pop(0) if pending_ids else f"call_orphan_{counter}"
+            if not pending_ids:
+                # See to_anthropic_messages: a tool result with no matching call
+                # is a malformed history; fail locally, not as a provider 400.
+                raise ValueError(
+                    "tool result has no matching tool call in the message history "
+                    "(an assistant tool-call turn must immediately precede its results)"
+                )
+            tid = pending_ids.pop(0)
             out.append({"role": "tool", "tool_call_id": tid, "content": m.get("content", "")})
     return out
 

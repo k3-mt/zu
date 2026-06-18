@@ -50,6 +50,16 @@ def test_bad_key_length() -> None:
         AesGcmCodec(b"too-short")
 
 
+def test_tampered_ciphertext_is_rejected() -> None:
+    # Flipping a single bit of the stored blob must fail the GCM tag check, so a
+    # tampered-at-rest payload is rejected, not silently decrypted to garbage.
+    codec = AesGcmCodec(_KEY)
+    body = bytearray(codec.encode_body("hello", aad=b"event-1"))
+    body[-1] ^= 0x01  # corrupt the last byte (inside the auth tag)
+    with pytest.raises(InvalidTag):
+        codec.decode_body(bytes(body), aad=b"event-1")
+
+
 async def test_sink_roundtrip_with_encryption() -> None:
     sink = SqliteSink(":memory:", codec=AesGcmCodec(_KEY))
     ev = _event(uuid4())

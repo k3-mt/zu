@@ -223,7 +223,7 @@ async def run_task(
         # --- budget checkpoints (time / tokens) before spending a model call ---
         if time.monotonic() - start > budget.wall_time_s:
             return await run.terminal("budget:wall_time_s")
-        if tokens > budget.max_tokens:
+        if tokens >= budget.max_tokens:
             return await run.terminal("budget:max_tokens")
 
         # Recompute per turn so a tier climbed last turn takes effect now: the
@@ -249,10 +249,16 @@ async def run_task(
         )
         # Re-check after the call so a turn that itself overshoots is caught,
         # not just a subsequent one.
-        if tokens > budget.max_tokens:
+        if tokens >= budget.max_tokens:
             return await run.terminal("budget:max_tokens")
         if time.monotonic() - start > budget.wall_time_s:
             return await run.terminal("budget:wall_time_s")
+
+        # A truncated response is unusable whether it finalised OR called tools:
+        # tool-call arguments cut off mid-generation are exactly the malformed
+        # untrusted output we must not dispatch. Check before acting on anything.
+        if resp.finish == Finish.LENGTH:
+            return await run.terminal("model truncated (length)")
 
         # --- the model chose actions: dispatch tools, then detector checkpoints ---
         if resp.tool_calls:
@@ -285,8 +291,7 @@ async def run_task(
             continue
 
         # --- the model finalised: validate, then complete / retry / halt ---
-        if resp.finish == Finish.LENGTH:
-            return await run.terminal("model truncated (length)")
+        # (truncation is already handled above, before any dispatch.)
         value = _parse_value(resp.text)
         if value is None:
             return await run.terminal("model finalised with no answer")

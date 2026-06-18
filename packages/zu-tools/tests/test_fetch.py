@@ -41,3 +41,15 @@ async def test_initial_url_still_ssrf_checked() -> None:
     fetch = HttpFetch(allow_private=False, transport=_transport(b"unused"))
     with pytest.raises(BlockedURLError):
         await fetch(None, "http://127.0.0.1/")
+
+
+async def test_redirect_to_internal_is_blocked() -> None:
+    # The classic SSRF bypass: a public URL that 302s to an internal address.
+    # The per-hop re-check must refuse the Location before requesting it. This
+    # exercises the redirect loop end-to-end, not just check_url in isolation.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
+
+    fetch = HttpFetch(allow_private=False, transport=httpx.MockTransport(handler))
+    with pytest.raises(BlockedURLError):
+        await fetch(None, "http://8.8.8.8/")  # public start, internal redirect target

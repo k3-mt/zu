@@ -51,6 +51,13 @@ class ModelResponse(BaseModel):
 class ModelProvider(Protocol):
     capabilities: Capabilities
 
+    # The model id this provider calls, recorded into harness.turn.completed so
+    # cost is attributable per model. None for the fake provider (no real model).
+    # A read-only property so an adapter's concrete ``str`` attribute satisfies
+    # it (covariant) without every implementer widening its own type.
+    @property
+    def model(self) -> str | None: ...
+
     async def complete(self, req: ModelRequest) -> ModelResponse: ...
 
 

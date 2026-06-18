@@ -7,6 +7,45 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — security & quality audit of build steps 5–7
+
+A focused review of the three newest build steps, with each finding verified by
+executing the code and locked with a test (148 passed, 2 skipped live; mypy
+clean). The two high-severity items were live bypasses, not theoretical:
+
+- **grounding bypass on numbers (high).** The anti-hallucination matcher treated
+  a decimal point as a token boundary, so a fabricated `14` was "grounded" by a
+  page reading `$3.14` (likewise `3`). Rewrote `_grounded` to be Unicode-aware
+  (`str.isalnum`) and to reject a number that is a fragment of a larger number
+  across a `.`/`,` separator, while still grounding the whole decimal and an
+  integer that merely ends a sentence.
+- **malformed `output_schema` crashed the run (high).** An unresolvable `$ref`
+  in the (untrusted) task schema raised a *referencing* error that is not a
+  `jsonschema.SchemaError`, so it escaped the validator and crashed the ladder.
+  Any unusable schema is now caught and returned as a TERMINAL verdict.
+- **SSRF: IPv4-in-IPv6 forms.** `check_url` now unwraps IPv4-mapped (`::ffff:`)
+  and 6to4 addresses and re-checks the inner IPv4, with a default-deny backstop
+  for anything non-global (NAT64, Teredo, future-reserved) — closing the gap
+  regardless of the CPython patch level. The redirect-hop re-check is now tested
+  end-to-end through `HttpFetch`.
+- **tier-2 container privilege hardening.** `local-docker` now launches the
+  untrusted-URL render container with `cap_drop=["ALL"]`, `no-new-privileges`,
+  and a `pids_limit` by default (a browser image opts caps back in via spec), and
+  `startup_timeout_s` is now honoured (readiness wait, fail-fast on a dead
+  container) instead of being a dead parameter; teardown failures are logged.
+- **truncated responses.** A `finish=length` response with tool calls is now
+  caught before dispatch (cut-off tool arguments are never executed); the token
+  budget is an inclusive ceiling.
+- **provider robustness.** A tool result with no matching tool call now raises
+  locally in the message translators instead of fabricating an id that the
+  provider would reject as an opaque 400; `ModelProvider.model` is part of the
+  port contract (recorded for per-model cost attribution).
+- **`error` detector.** 400/405/410/451 are terminal (a retry can't fix them);
+  429/5xx stay retryable.
+- **test honesty.** Added coverage that actually exercises each fix and the
+  previously-untested documented stub (`native_tools=False`), GCM tamper
+  detection, and the schema RETRY-vs-TERMINAL severity distinction.
+
 ### Added — build steps 1–2 (the runnable core with a fake brain)
 
 - **Workspace** — uv workspace of seven small packages (`zu-core`,
