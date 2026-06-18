@@ -54,9 +54,23 @@ reaches its first tagged release.
 - **Plugin trust model** documented in `SECURITY.md` — plugins are code, not
   config; discovery imports them with full process privileges.
 
+### Added — build step 3 (the event spine)
+
+- **SQLite `EventSink`** (`zu_backends.sqlite_sink`) — append-only system of
+  record. Each row stores the event's full JSON, so `query` rebuilds an event
+  **identical** to what was written; indexed columns are for filtering only.
+  The query filter is allowlisted and fully parameterized (injection-safe).
+- **Append-before-notify bus** (`zu_core.bus.EventBus`) — persists to the sink
+  before notifying any subscriber, and **isolates a crashing subscriber** (one
+  crash doesn't stop the rest; recorded on `subscriber_failures`). Depends only
+  on the `EventSink` port. Handles sync and async subscribers.
+- **Session-store projection** (`zu_core.projections.SessionStore`) — the first
+  projection: per-task event history + derived view (turn count, last event).
+- **Event taxonomy** (`zu_core.events`) — the small, stable set of `harness.*` /
+  `data.*` event-type constants the emitters will share.
+
 ### Next
 
-- Step 3: SQLite `EventSink` + the append-before-notify bus + a projection.
 - Step 4: the interpreter loop + tier-1 tools, tested against the fake model.
 - Steps 5–9: detectors & one escalation step, tier-2 browser via local-docker,
   schema + grounding validation, real model adapters, config + CLI wiring, and

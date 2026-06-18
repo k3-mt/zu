@@ -6,7 +6,10 @@ no domain branching, and no knowledge of any specific tool or provider.
 
 from __future__ import annotations
 
+from . import events
+from .bus import EventBus, SubscriberFailure
 from .contracts import Budget, Event, Result, Status, TaskSpec
+from .projections import SessionStore
 from .ports import (
     Capabilities,
     Detector,
@@ -43,6 +46,11 @@ __all__ = [
     "Result",
     "Status",
     "TaskSpec",
+    # event bus + taxonomy + projections
+    "EventBus",
+    "SubscriberFailure",
+    "SessionStore",
+    "events",
     # ports
     "Capabilities",
     "Detector",
