@@ -61,7 +61,12 @@ class RenderDom:
         backend = self._resolve_backend()
         # Lease a sandbox for the render and always tear it down — a browser
         # container is expensive and must not leak even if the render raises.
-        sandbox = await backend.launch({"image": self.image, "tier": self.tier})
+        # ``network`` is required: a browser with egress disabled cannot fetch
+        # the page it is asked to render. The sandbox is *where* egress is
+        # controlled (vs. tier 1's host-level SSRF guard); scoping that egress
+        # to the target — an allowlist / DNS-pinned connection — is the deferred
+        # SandboxBackend egress-policy work (see BUILD.md).
+        sandbox = await backend.launch({"image": self.image, "tier": self.tier, "network": True})
         try:
             obs = await backend.exec(sandbox, ToolCall(name=self.name, args={"url": url}))
         finally:

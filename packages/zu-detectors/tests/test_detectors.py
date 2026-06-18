@@ -52,6 +52,15 @@ def test_js_shell_fires_despite_large_inline_script() -> None:
     assert v is not None and v.severity is Severity.ESCALATE
 
 
+def test_js_shell_fires_on_unterminated_script() -> None:
+    # Malformed/streamed HTML: a <script> that is never closed. A browser treats
+    # everything after it as script text, so the visible-text test must too —
+    # the page is still a shell, not real content.
+    html = '<html><body><div id="root"></div><script>var x=1;' + ("a();" * 2000)
+    v = JsShellDetector().inspect(_ctx({"html": html}))
+    assert v is not None and v.severity is Severity.ESCALATE
+
+
 def test_js_shell_passes_on_small_but_real_page() -> None:
     # A mount point with genuine prose is rendered content, not a shell.
     html = (

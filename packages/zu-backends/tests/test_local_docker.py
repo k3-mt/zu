@@ -78,6 +78,17 @@ async def test_network_disabled_by_default() -> None:
     assert client.containers.run_kwargs["network_disabled"] is True
 
 
+async def test_network_enabled_when_requested() -> None:
+    # render_dom launches with network=True so the browser can fetch the page;
+    # the backend must translate that into an un-disabled container network.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "network": True})
+    assert client.containers.run_kwargs is not None
+    assert client.containers.run_kwargs["network_disabled"] is False
+
+
 async def test_nonzero_exit_becomes_error_observation() -> None:
     container = _FakeContainer(exit_code=1, output=b"boom")
     obs = await _render(container)

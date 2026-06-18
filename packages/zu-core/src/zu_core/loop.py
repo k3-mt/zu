@@ -234,6 +234,19 @@ async def run_task(
         turn = await run.emit(ev.TURN_STARTED, {"step": step + 1}, parent=run.root)
         resp = await provider.complete(ModelRequest(messages=messages, tools=tool_schemas))
         tokens += _usage_tokens(resp.usage)
+        # Record this call's usage, tier, and model into the log so cost is
+        # reconstructable after the fact (a read-side projection sums these);
+        # ``model`` is whatever the provider exposes (None for the fake one).
+        await run.emit(
+            ev.TURN_COMPLETED,
+            {
+                "step": step + 1,
+                "tier": ladder.current,
+                "model": getattr(provider, "model", None),
+                "usage": dict(resp.usage),
+            },
+            parent=turn,
+        )
         # Re-check after the call so a turn that itself overshoots is caught,
         # not just a subsequent one.
         if tokens > budget.max_tokens:
@@ -366,11 +379,18 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
 async def _detector_checkpoint(
     run: _Run, turn, detectors: list, observation: Any, scopes: set[Scope]
 ) -> Verdict | None:
-    """Run the in-scope detectors; emit DETECTOR_FIRED for any verdict. Returns
-    the first *halting* verdict (ESCALATE or TERMINAL) for the caller to act on
-    — ESCALATE climbs a tier, TERMINAL ends the run. RETRY/WARN are recorded
-    and the run continues (the model sees the observation and decides)."""
+    """Run every in-scope detector, emit DETECTOR_FIRED for each verdict, and
+    return the *worst* halting verdict (ESCALATE or TERMINAL) for the caller to
+    act on — TERMINAL ends the run, ESCALATE climbs a tier. RETRY/WARN are
+    recorded and the run continues (the model sees the observation and decides).
+
+    Picking the worst (not the first) matters: detectors run in registry order,
+    so a page that is both fatal and escalatable — e.g. a 404 with an empty body
+    firing both ``error`` (TERMINAL) and ``empty`` (ESCALATE) — must terminate,
+    never waste a tier climb just because ``empty`` happened to sort first. This
+    mirrors the ON_FINAL ladder, which already takes the worst verdict."""
     ctx = run.ctx(observation)
+    verdicts: list[Verdict] = []
     for d in detectors:
         if getattr(d, "scope", None) not in scopes:
             continue
@@ -383,8 +403,10 @@ async def _detector_checkpoint(
             parent=turn,
             source=verdict.detector,
         )
-        if verdict.severity in (Severity.ESCALATE, Severity.TERMINAL):
-            return verdict
+        verdicts.append(verdict)
+    worst = _worst(verdicts)
+    if worst is not None and worst.severity in (Severity.ESCALATE, Severity.TERMINAL):
+        return worst
     return None
 
 

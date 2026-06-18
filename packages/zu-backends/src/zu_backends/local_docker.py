@@ -19,6 +19,7 @@ real model providers are (build step 7).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,7 +79,11 @@ class LocalDockerBackend:
         host-level SSRF guard) and return an opaque handle."""
         image = spec["image"]
         client = self._docker()
-        container = client.containers.run(
+        # The Docker SDK is synchronous and a container launch is seconds-long;
+        # run it in a worker thread so it never blocks the event loop (and other
+        # concurrent runs) for the duration. Same rationale for exec/destroy.
+        container = await asyncio.to_thread(
+            client.containers.run,
             image,
             detach=True,
             # No network by default: the sandbox is where a tier's egress policy
@@ -94,7 +99,9 @@ class LocalDockerBackend:
     async def exec(self, sandbox: _Sandbox, call: ToolCall) -> dict:
         """Run the tool call inside the container and return its observation."""
         url = call.args["url"]
-        exit_code, output = sandbox.container.exec_run([_RENDER_ENTRYPOINT, url])
+        exit_code, output = await asyncio.to_thread(
+            sandbox.container.exec_run, [_RENDER_ENTRYPOINT, url]
+        )
         text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
         if exit_code != 0:
             return {"status": 500, "html": "", "error": f"render failed (exit {exit_code}): {text[:500]}"}
@@ -111,6 +118,6 @@ class LocalDockerBackend:
         """Stop and remove the container. Best-effort: teardown failures are
         swallowed so they can't mask the render's own result or error."""
         try:
-            sandbox.container.remove(force=True)
+            await asyncio.to_thread(sandbox.container.remove, force=True)
         except Exception:  # noqa: BLE001 - teardown must not raise over the result
             pass

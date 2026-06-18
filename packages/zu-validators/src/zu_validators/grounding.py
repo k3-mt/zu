@@ -3,11 +3,16 @@
 The anti-making-things-up check: a value the agent reports that is nowhere in
 the content the run actually fetched fails grounding. It reads the run's
 content from the event log via RunContext, so it proves provenance, not just
-plausibility. Finalized against the event log in build step 6.
+plausibility.
+
+Matching is token-boundary-aware (build step 6): a value must appear in the
+retrieved content as a standalone token, not merely as a substring, so a short
+value such as ``"5"`` is not spuriously grounded by ``"1985"``.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Iterator
 
 from zu_core.contracts import Result
@@ -18,6 +23,22 @@ def _normalize(s: str) -> str:
     """Collapse whitespace and lowercase so trivial formatting differences
     between an extracted value and the page text don't cause false failures."""
     return " ".join(s.split()).lower()
+
+
+def _grounded(leaf_norm: str, corpus: str) -> bool:
+    """Is the normalized value present in the corpus on token boundaries?
+
+    Plain substring containment is too lenient: a short value like ``"5"`` would
+    match incidentally inside ``"1985"`` and let a fabricated number pass. We
+    require the value not to be flanked by alphanumerics on either side, so it
+    matches as a standalone token, not as a fragment of a longer one. The flank
+    class is ``[0-9a-z]`` only (the corpus is already lowercased), so punctuation
+    boundaries still count — ``"$9.00"`` between ``>`` and ``<`` still grounds,
+    and ``"5"`` inside ``"1985"`` does not."""
+    if not leaf_norm:
+        return True
+    pattern = r"(?<![0-9a-z])" + re.escape(leaf_norm) + r"(?![0-9a-z])"
+    return re.search(pattern, corpus) is not None
 
 
 def _leaf_strings(value: object) -> Iterator[str]:
@@ -71,7 +92,7 @@ class GroundingValidator:
         corpus = _normalize(_retrieved_corpus(ctx))
         for field, value in result.value.items():
             for leaf in _leaf_strings(value):
-                if _normalize(leaf) not in corpus:
+                if not _grounded(_normalize(leaf), corpus):
                     return Verdict(
                         severity=Severity.RETRY,
                         detector=self.name,

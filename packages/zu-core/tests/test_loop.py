@@ -60,10 +60,12 @@ async def test_loop_fetch_then_finalise() -> None:
     assert types == [
         "harness.task.started",
         "harness.turn.started",
+        "harness.turn.completed",  # per-call usage recorded right after the model call
         "harness.tool.invoked",
         "data.source.fetched",  # the fetch carried html -> a data event
         "harness.tool.returned",
         "harness.turn.started",
+        "harness.turn.completed",
         "data.record.extracted",
         "harness.task.completed",
     ]
@@ -349,6 +351,87 @@ async def test_escalation_climbs_to_tier2_and_succeeds() -> None:
     assert types[-1] == "harness.task.completed"
 
 
+async def test_escalation_via_real_builtin_detectors() -> None:
+    # End-to-end through the *real* built-in detectors (empty/error/js-shell/
+    # bot-wall registered together), not a hand-rolled one: a JS-shell page must
+    # drive the climb via js-shell's own logic, with the others coexisting.
+    from zu_detectors.bot_wall import BotWallDetector
+    from zu_detectors.empty import EmptyDetector
+    from zu_detectors.error import ErrorDetector
+    from zu_detectors.js_shell import JsShellDetector
+    from zu_tools.render import RenderDom
+
+    backend = _FakeBackend(_RENDERED)
+    reg = Registry()
+    reg.register("tools", "http_fetch", _shell_fetch())
+    reg.register("tools", "render_dom", RenderDom(backend=backend))
+    for name, det in [
+        ("empty", EmptyDetector()),
+        ("error", ErrorDetector()),
+        ("js-shell", JsShellDetector()),
+        ("bot-wall", BotWallDetector()),
+    ]:
+        reg.register("detectors", name, det)
+
+    provider = ScriptedProvider.from_moves(
+        [
+            {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},
+            {"tool": "render_dom", "args": {"url": "http://spa.test/"}},
+            {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
+        ]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), provider, reg, bus)
+
+    assert result.status == Status.SUCCESS
+    assert backend.launched and backend.destroyed == 1
+    escalated = [e for e in await bus.query() if e.type == "harness.task.escalated"]
+    assert len(escalated) == 1 and escalated[0].payload["reason"] == "js-shell"
+
+
+async def test_turn_usage_is_recorded_for_cost() -> None:
+    # Cost is reconstructable from the log alone: each model call emits a
+    # harness.turn.completed carrying its tier and the provider's usage dict.
+    moves = [
+        ModelResponse(
+            tool_calls=[ToolCall(name="http_fetch", args={"url": "http://example.test/"})],
+            finish=Finish.TOOL_CALLS,
+            usage={"input_tokens": 100, "output_tokens": 20},
+        ),
+        ModelResponse(text='{"ok": true}', finish=Finish.STOP, usage={"input_tokens": 50, "output_tokens": 10}),
+    ]
+    bus = EventBus()
+    await run_task(TaskSpec(query="x"), ScriptedProvider(moves), _registry_with_tools(), bus)
+
+    turns = [e for e in await bus.query() if e.type == "harness.turn.completed"]
+    assert len(turns) == 2
+    assert turns[0].payload["tier"] == 1
+    assert turns[0].payload["usage"] == {"input_tokens": 100, "output_tokens": 20}
+    # the basis of cost: total tokens, summed straight from the log
+    total = sum(
+        t.payload["usage"].get("input_tokens", 0) + t.payload["usage"].get("output_tokens", 0)
+        for t in turns
+    )
+    assert total == 180
+
+
+async def test_turn_completed_attributes_tokens_to_the_right_tier() -> None:
+    # After a climb, usage is attributed to the tier that produced it — the
+    # per-tier breakdown a savings (cheap-tier-first) calculation needs.
+    backend = _FakeBackend(_RENDERED)
+    provider = ScriptedProvider.from_moves(
+        [
+            {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},  # tier 1
+            {"tool": "render_dom", "args": {"url": "http://spa.test/"}},  # tier 2 (after climb)
+            {"text": '{"x": 1}', "finish": "stop"},
+        ]
+    )
+    bus = EventBus()
+    await run_task(TaskSpec(query="x"), provider, _registry_with_tiers(backend), bus)
+    tiers = [e.payload["tier"] for e in await bus.query() if e.type == "harness.turn.completed"]
+    assert tiers == [1, 2, 2]  # turn 1 at tier 1; climbed, so the rest at tier 2
+
+
 async def test_tier2_tool_is_withheld_before_escalation() -> None:
     # The ladder is enforced on dispatch, not just on what the model is shown:
     # calling a tier-2 tool before any escalation hits the unknown-tool branch.
@@ -366,6 +449,65 @@ async def test_tier2_tool_is_withheld_before_escalation() -> None:
     assert backend.launched == []  # the browser was never leased
     returned = next(e for e in await bus.query() if e.type == "harness.tool.returned")
     assert "unknown tool" in returned.payload["observation"]["error"]
+
+
+async def test_checkpoint_acts_on_worst_verdict_not_first() -> None:
+    # Regression: a checkpoint must act on the WORST verdict, not the first one
+    # in registry order. 'a-escalate' sorts before 'z-terminal', so iteration
+    # sees ESCALATE first — but TERMINAL must still win, and both must be
+    # recorded (every detector inspects the observation).
+    class Esc:
+        name = "a-escalate"
+        scope = Scope.PER_OBSERVATION
+
+        def inspect(self, ctx) -> Verdict:
+            return Verdict(severity=Severity.ESCALATE, detector=self.name, detail="x")
+
+    class Term:
+        name = "z-terminal"
+        scope = Scope.PER_OBSERVATION
+
+        def inspect(self, ctx) -> Verdict:
+            return Verdict(severity=Severity.TERMINAL, detector=self.name, detail="y")
+
+    reg = _registry_with_tools()
+    reg.register("detectors", "a-escalate", Esc())
+    reg.register("detectors", "z-terminal", Term())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "http_fetch", "args": {"url": "http://example.test/"}}, {"text": "{}", "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), provider, reg, bus)
+    assert result.status == Status.TERMINAL
+    assert result.reason == "z-terminal"
+    fired = {e.payload["detector"] for e in await bus.query() if e.type == "harness.detector.fired"}
+    assert fired == {"a-escalate", "z-terminal"}  # both recorded, worst acted on
+
+
+async def test_404_empty_page_terminates_not_escalates() -> None:
+    # The real-built-in trigger for the same bug: a 404 with an empty body fires
+    # both `error` (TERMINAL) and `empty` (ESCALATE, sorts first). It must
+    # terminate on the 404, never waste a tier climb on a dead page.
+    from zu_detectors.empty import EmptyDetector
+    from zu_detectors.error import ErrorDetector
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="")
+
+    reg = Registry()
+    reg.register(
+        "tools", "http_fetch", HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
+    )
+    reg.register("detectors", "empty", EmptyDetector())
+    reg.register("detectors", "error", ErrorDetector())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "http_fetch", "args": {"url": "http://x.test/"}}, {"text": "{}", "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), provider, reg, bus)
+    assert result.status == Status.TERMINAL
+    assert result.reason == "error"
+    assert not [e for e in await bus.query() if e.type == "harness.task.escalated"]
 
 
 async def test_escalation_exhausted_when_no_higher_tier() -> None:

@@ -31,3 +31,6 @@ zu.yaml.local
 .env
 .env.*
 !.env.example
+
+# Microsoft Office temp/lock files
+~$*

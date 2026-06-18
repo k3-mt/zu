@@ -233,8 +233,58 @@ each with a test (suite + mypy green):
   the network. The live Docker path is opt-in, exercised the way real providers
   are (step 7).
 
+### Build step 5 — follow-up fixes (post-review)
+
+A review of step 5 surfaced two real bugs and several deferred-gap closures;
+fixed here, each with a regression test (suite + mypy green):
+
+- **Checkpoint acts on the worst verdict, not the first.** A detector checkpoint
+  now picks the worst verdict among all firing detectors (mirroring the ON_FINAL
+  ladder), so a fatal page can't waste a tier climb just because an ESCALATE
+  detector sorted ahead of a TERMINAL one — e.g. a 404 with an empty body now
+  terminates on `error` instead of escalating on `empty`.
+- **`render_dom` grants the browser network egress.** The tier-2 launch spec now
+  requests `network`, so the real `local-docker` render can actually reach the
+  page (the container otherwise had networking disabled and could load nothing).
+- **`local-docker` no longer blocks the event loop.** The synchronous Docker SDK
+  calls (`run`/`exec_run`/`remove`) run via `asyncio.to_thread`, so a
+  seconds-long container launch doesn't stall the loop or concurrent runs.
+- **`js-shell` handles unterminated scripts.** Visible-text extraction now
+  consumes an unclosed `<script>`/`<style>` to end-of-input (browser-correct),
+  so a shell with a truncated/streamed bundle still escalates.
+- **`harness.task.escalated` contract documented.** The climb
+  (`from_tier`/`to_tier`) and exhaustion (`exhausted: true`) shapes of the event
+  are now an explicit, documented contract in `events.py`.
+
+### Added — build step 6 (validation: schema + grounding)
+
+- **`schema` validator** — the result must satisfy the task's `output_schema`
+  (JSON Schema via `jsonschema`). A mismatch is `RETRY` (the model can correct);
+  a malformed schema in the `TaskSpec` is `TERMINAL`, caught so it never crashes
+  the validation ladder.
+- **`grounding` validator — the anti-hallucination check.** Every extracted
+  scalar (strings *and* numbers) must appear in the content the run actually
+  retrieved, read from the `data.source.fetched` events via `RunContext` — so it
+  proves provenance, not plausibility. Matching is normalized (whitespace/case)
+  and **token-boundary-aware**, so a short value like `"5"` is not spuriously
+  grounded by `"1985"`.
+- **Proven against the real event log, inside the loop.** At finalise the loop
+  passes no observation, so grounding reads the log itself: a fabricated price
+  fails (`RETRY`), the loop feeds the failure back, and the corrected, grounded
+  value succeeds — end to end, offline.
+
+### Added — cost instrumentation (foundation for cost & savings)
+
+- **Per-turn usage in the event log.** Each model call now emits
+  `harness.turn.completed` with `{step, tier, model, usage}`, so token usage and
+  the tier/model that produced it are reconstructable from the canonical log
+  after the fact. This is the raw material for a cost/savings projection (a
+  read-side `EventSink` subscriber, deferred): actual cost = Σ usage × price;
+  savings = the counterfactual of running every task at the top tier minus the
+  actual tiered cost. Pricing metadata rides in with the real adapters (step 7)
+  and config (step 8); recording usage now means runs are costable from day one.
+
 ### Next
 
-- Steps 6–9: schema + grounding validation against the event log, real model
-  adapters (`anthropic` + `openai-compatible`), config + `zu run task.yaml`
-  wiring, and the quickstart / killer demo.
+- Steps 7–9: real model adapters (`anthropic` + `openai-compatible`), config +
+  `zu run task.yaml` wiring, and the quickstart / killer demo.

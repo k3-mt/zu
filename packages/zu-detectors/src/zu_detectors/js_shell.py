@@ -23,7 +23,11 @@ from . import _html_of
 _SHELL_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__NEXT_DATA__")
 
 # Strip the elements whose contents are never visible text before measuring.
-_NONVISIBLE = re.compile(r"<(script|style|template|noscript)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
+# ``\s*`` in the close tag tolerates ``</script >``; the second pattern handles
+# an *unterminated* script/style — a browser treats everything after an unclosed
+# <script> as script text, so the heuristic does too (consume to end of input).
+_NONVISIBLE = re.compile(r"<(script|style|template|noscript)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED = re.compile(r"<(script|style|template|noscript)\b.*\Z", re.IGNORECASE | re.DOTALL)
 _TAGS = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
 
@@ -36,6 +40,7 @@ def _visible_text(html: str) -> str:
     """Human-visible text: drop script/style/template/noscript bodies, strip
     the remaining tags, and collapse whitespace."""
     without_code = _NONVISIBLE.sub(" ", html)
+    without_code = _UNCLOSED.sub(" ", without_code)
     text = _TAGS.sub(" ", without_code)
     return _WS.sub(" ", text).strip()
 

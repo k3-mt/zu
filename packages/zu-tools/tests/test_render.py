@@ -56,6 +56,14 @@ async def test_sandbox_is_destroyed_even_when_render_raises() -> None:
     assert backend.destroyed == 1
 
 
+async def test_render_requests_network_egress() -> None:
+    # Regression: the browser must be granted egress, or it cannot fetch the
+    # page it is asked to render. render_dom must request network in its spec.
+    backend = _FakeBackend()
+    await RenderDom(backend=backend).__call__(ctx=None, url="http://spa.test/")
+    assert backend.launched[0].get("network") is True
+
+
 def test_render_dom_is_tier_2() -> None:
     # The attribute the loop's ladder reads to withhold it until escalation.
     assert RenderDom().tier == 2
