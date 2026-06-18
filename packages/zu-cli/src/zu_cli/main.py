@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import typer
 
-from zu_core.registry import GROUPS, Registry
+from zu_core.registry import GROUPS, REGISTRY
 
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
@@ -25,7 +25,9 @@ def run(task_file: str) -> None:
 @app.command()
 def plugins() -> None:
     """List every plugin Zu can discover (providers, tools, detectors, ...)."""
-    reg = Registry()
+    # The shared process registry, so this lists the same plugins the loop sees
+    # (entry points plus any decorator-registered in-process).
+    reg = REGISTRY
     failures = reg.discover()
     for kind in GROUPS:
         names = reg.names(kind)

@@ -25,6 +25,7 @@ class Budget(BaseModel):
     max_steps: int = 20
     max_tokens: int = 200_000
     wall_time_s: int = 120
+    max_tool_calls: int = 32  # per single model response — caps a runaway turn
 
 
 class TaskSpec(BaseModel):
@@ -47,7 +48,20 @@ class Result(BaseModel):
 
 
 class Event(BaseModel):
-    """The append-only record envelope. Frozen: an event never changes once written."""
+    """The append-only record envelope.
+
+    Frozen at the envelope level: no field may be *reassigned* once an event is
+    built. The durable record is immutable in the strongest sense — a sink
+    serialises the event to JSON at ``append`` time, so what lands in the
+    canonical store can never change afterward.
+
+    One boundary to know: ``frozen`` does not deep-freeze the ``payload`` dict's
+    *contents* (``event.payload[k] = ...`` is not blocked). Deep-freezing every
+    payload was rejected deliberately — payloads carry large fetched HTML on the
+    hot path and copying/freezing them per event is too costly. The invariant is
+    therefore: **treat a published event's payload as read-only.** Do not mutate
+    it in place; the canonical on-disk copy is already immutable regardless.
+    """
 
     model_config = {"frozen": True}
 

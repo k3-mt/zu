@@ -20,6 +20,7 @@ Large reads never materialise the whole log: ``stream`` pages by keyset
 from __future__ import annotations
 
 import sqlite3
+import threading
 from typing import AsyncIterator
 
 from zu_core.codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
@@ -60,8 +61,13 @@ class SqliteSink:
     ) -> None:
         self.path = path
         # Single writer connection (WAL single-writer model). check_same_thread
-        # off so an async runtime's worker threads may use it; the event loop
-        # serialises access (append/query do no internal await).
+        # off so an async runtime's worker threads may use it. A sqlite3
+        # connection is not safe for concurrent use, so every DB access is
+        # serialised by self._lock — this makes the off-event-loop case (e.g.
+        # the planned move of these sync calls onto an executor thread) correct
+        # by construction, not by the convention "no await between execute and
+        # commit". The lock is uncontended on a single event loop.
+        self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -80,22 +86,23 @@ class SqliteSink:
         event_id = str(event.event_id)
         blob = encode_payload(self._codec, event.model_dump_json(), _aad(event_id))
         # Idempotent: a duplicate event_id is a no-op (scoped to that constraint).
-        self._conn.execute(
-            "INSERT INTO events "
-            "(event_id, trace_id, task_id, parent_id, type, source, data) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(event_id) DO NOTHING",
-            (
-                event_id,
-                str(event.trace_id),
-                str(event.task_id),
-                str(event.parent_id) if event.parent_id is not None else None,
-                event.type,
-                event.source,
-                blob,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO events "
+                "(event_id, trace_id, task_id, parent_id, type, source, data) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(event_id) DO NOTHING",
+                (
+                    event_id,
+                    str(event.trace_id),
+                    str(event.task_id),
+                    str(event.parent_id) if event.parent_id is not None else None,
+                    event.type,
+                    event.source,
+                    blob,
+                ),
+            )
+            self._conn.commit()
 
     def _where(self, flt: dict) -> tuple[str, list]:
         validate_filter(flt)
@@ -123,7 +130,8 @@ class SqliteSink:
         if limit is not None:
             sql += " LIMIT ?"
             args.append(limit)
-        rows = self._conn.execute(sql, args).fetchall()
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
         return [self._row_to_event(r) for r in rows]
 
     async def stream(
@@ -134,11 +142,12 @@ class SqliteSink:
         where, base_params = self._where(flt or {})
         after = 0
         while True:
-            rows = self._conn.execute(
-                f"SELECT seq, event_id, data FROM events "
-                f"WHERE seq > ?{where} ORDER BY seq ASC LIMIT ?",
-                [after, *base_params, batch_size],
-            ).fetchall()
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT seq, event_id, data FROM events "
+                    f"WHERE seq > ?{where} ORDER BY seq ASC LIMIT ?",
+                    [after, *base_params, batch_size],
+                ).fetchall()
             if not rows:
                 return
             for r in rows:
@@ -149,13 +158,15 @@ class SqliteSink:
 
     async def count(self, flt: dict | None = None) -> int:
         where, params = self._where(flt or {})
-        row = self._conn.execute(
-            f"SELECT COUNT(*) AS n FROM events WHERE 1=1{where}", params
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM events WHERE 1=1{where}", params
+            ).fetchone()
         return int(row["n"])
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 __all__ = ["SqliteSink", "ALLOWED_EVENT_FILTERS"]

@@ -40,10 +40,11 @@ with a one-line config change.
 ## Status
 
 Early. The core is being built in the open in nine steps (see
-[`docs/BUILD.md`](docs/BUILD.md)). **Steps 1–2 are done and green:** the typed
-contracts, the six ports, the plugin registry, and a scripted (fake) model provider
-that makes the whole runtime testable offline. The interpreter loop, escalation,
-tier-2 browser, validation, and real model adapters are next.
+[`docs/BUILD.md`](docs/BUILD.md)). **Steps 1–4 are done and green:** the typed
+contracts, the six ports, the plugin registry, a scripted (fake) model provider,
+the event spine (SQLite sink + append-before-notify bus + projection), and the
+deterministic interpreter loop with tier-1 tools and budgets. Escalation and the
+tier-2 browser, validation against the event log, and real model adapters are next.
 
 ## Quickstart (for contributors today)
 

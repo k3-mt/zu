@@ -97,6 +97,32 @@ async def test_query_rejects_unknown_filter() -> None:
         await sink.query({"payload": "anything"})
 
 
+def test_concurrent_threads_do_not_corrupt(tmp_path) -> None:
+    """The shared connection (check_same_thread=False) is serialised by an
+    internal lock, so appends from many threads — each on its own event loop,
+    the planned executor-offload case — don't race or corrupt the log."""
+    import asyncio
+    import threading
+
+    db = str(tmp_path / "zu.db")
+    sink = SqliteSink(db)
+    per_thread, n_threads = 25, 8
+
+    def worker() -> None:
+        task = uuid4()
+        for _ in range(per_thread):
+            asyncio.run(sink.append(_event(task)))
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert asyncio.run(sink.count()) == per_thread * n_threads
+    sink.close()
+
+
 async def test_persists_across_connections(tmp_path) -> None:
     db = str(tmp_path / "zu.db")
     ev = _event(uuid4())

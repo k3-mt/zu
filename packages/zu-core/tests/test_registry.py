@@ -57,6 +57,25 @@ def test_all_groups_present() -> None:
         assert reg.names(kind) == []  # empty until discover()/register()
 
 
+def test_name_collision_is_warned_not_silent(caplog) -> None:
+    """A second plugin shadowing a name (e.g. a typosquat on a built-in) must
+    log a warning — last-write-wins is kept, but never silently."""
+    reg = Registry()
+    reg.register("tools", "http_fetch", "BUILTIN")
+    with caplog.at_level("WARNING", logger="zu.registry"):
+        reg.register("tools", "http_fetch", "SHADOW")
+    assert reg.get("tools", "http_fetch") == "SHADOW"  # last write wins
+    assert any("collision" in r.message for r in caplog.records)
+
+
+def test_re_registering_same_object_is_quiet(caplog) -> None:
+    reg = Registry()
+    reg.register("tools", "t", "OBJ")
+    with caplog.at_level("WARNING", logger="zu.registry"):
+        reg.register("tools", "t", "OBJ")  # idempotent, not a collision
+    assert not caplog.records
+
+
 class _FakeEP:
     def __init__(self, name: str, loader) -> None:
         self.name = name

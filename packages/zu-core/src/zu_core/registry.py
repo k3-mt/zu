@@ -5,12 +5,21 @@ Plugins enter it three ways, in increasing distance from the core:
   2. in-process, via a decorator            (quick local work, no packaging)
   3. by reference in config                 (build step 8 — import path)
 All three resolve into the same registry.
+
+``REGISTRY`` is the process-wide default registry. The decorators
+(``@zu.tool`` etc.), ``zu plugins``, and ``run_task`` (when no registry is
+passed) all operate on this one instance, so a decorator-registered plugin is
+visible to the loop and the CLI without any extra wiring. Pass an explicit
+``Registry`` to isolate (the tests do this); otherwise the default is shared.
 """
 
 from __future__ import annotations
 
+import logging
 from importlib.metadata import entry_points
 from typing import Any, NamedTuple
+
+log = logging.getLogger("zu.registry")
 
 GROUPS = {
     "providers": "zu.providers",
@@ -48,14 +57,26 @@ class Registry:
         for kind, group in GROUPS.items():
             for ep in entry_points(group=group):
                 try:
-                    self._items[kind][ep.name] = ep.load()
+                    obj = ep.load()
                 except Exception as exc:  # noqa: BLE001 - isolate any broken plugin
                     self.failures.append(LoadFailure(kind=kind, name=ep.name, error=exc))
+                    continue
+                self.register(kind, ep.name, obj)
         return self.failures
 
     def register(self, kind: str, name: str, obj: Any) -> None:
         if kind not in self._items:
             raise KeyError(f"unknown plugin kind: {kind!r}")
+        existing = self._items[kind].get(name)
+        if existing is not None and existing is not obj:
+            # A name collision means one plugin is shadowing another (e.g. a
+            # typosquat on a built-in like 'http_fetch'). Last-write-wins is
+            # preserved for back-compat, but the collision must not be silent —
+            # surface it so a caller can see what overrode what.
+            log.warning(
+                "plugin name collision on %s:%s — %r is overriding %r",
+                kind, name, obj, existing,
+            )
         self._items[kind][name] = obj
 
     def get(self, kind: str, name: str) -> Any:

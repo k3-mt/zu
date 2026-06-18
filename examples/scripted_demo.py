@@ -1,9 +1,9 @@
-"""A tiny, fully-offline tour of what Zu can do *today* (build steps 1–2).
+"""A tiny, fully-offline tour of what Zu can do *today* (build steps 1–4).
 
-No API keys, no network. It shows two things that already work: plugin
-discovery across every port, and the ScriptedProvider (the fake model) playing
-a fixed script back in order — the foundation that makes the whole runtime
-testable offline before any real model is wired in.
+No API keys, no network. It shows the two halves of the runtime that already
+work: plugin discovery across every port, and the interpreter loop driving a
+fake model + a fixtured page to a validated Result, with the whole run captured
+in the event log.
 
     uv run python examples/scripted_demo.py
 """
@@ -12,9 +12,17 @@ from __future__ import annotations
 
 import asyncio
 
-from zu_core.ports import ModelRequest
+import httpx
+
+from zu_core.bus import EventBus
+from zu_core.contracts import TaskSpec
+from zu_core.loop import run_task
 from zu_core.registry import GROUPS, Registry
 from zu_providers.scripted import ScriptedProvider
+from zu_tools.fetch import HttpFetch
+from zu_tools.parse import HtmlParse
+
+_PAGE = "<html><body><h1>Acme Widget</h1><span class='price'>$9.00</span></body></html>"
 
 
 def show_plugins() -> None:
@@ -25,30 +33,38 @@ def show_plugins() -> None:
         print(f"  {kind:11} {', '.join(reg.names(kind)) or '—'}")
 
 
-async def play_a_script() -> None:
-    print("\nThe fake model plays a fixed script back in order:")
-    model = ScriptedProvider.from_moves(
+def _fixtured_registry() -> Registry:
+    """A registry whose http_fetch returns a saved page — no network."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_PAGE)
+
+    reg = Registry()
+    reg.register("tools", "http_fetch", HttpFetch(allow_private=True, transport=httpx.MockTransport(handler)))
+    reg.register("tools", "html_parse", HtmlParse())
+    return reg
+
+
+async def run_a_task() -> None:
+    print("\nThe loop drives the fake model + a saved page to a validated Result:")
+    provider = ScriptedProvider.from_moves(
         [
             {"tool": "http_fetch", "args": {"url": "https://example.com/product/123"}},
-            {"tool": "html_parse", "args": {"selector": ".price"}},
-            {"text": "the price is $9.00", "finish": "stop"},
+            {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
         ]
     )
-    req = ModelRequest(messages=[{"role": "user", "content": "extract the price"}])
-    step = 1
-    while not model.exhausted:
-        resp = await model.complete(req)
-        if resp.tool_calls:
-            call = resp.tool_calls[0]
-            print(f"  step {step}: call {call.name}({call.args})")
-        else:
-            print(f"  step {step}: finish -> {resp.text!r}")
-        step += 1
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="extract the title and price"), provider, _fixtured_registry(), bus)
+
+    print(f"  result : {result.status.value} -> {result.value}")
+    print("  events :")
+    for e in await bus.query():
+        print(f"    {e.type:28} (source={e.source})")
 
 
 def main() -> None:
     show_plugins()
-    asyncio.run(play_a_script())
+    asyncio.run(run_a_task())
 
 
 if __name__ == "__main__":

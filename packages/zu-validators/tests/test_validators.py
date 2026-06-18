@@ -8,7 +8,7 @@ the entry-point contract now.
 from __future__ import annotations
 
 from zu_core.contracts import Result, Status, TaskSpec
-from zu_core.ports import RunContext
+from zu_core.ports import RunContext, Severity
 from zu_core.registry import Registry
 from zu_validators.grounding import GroundingValidator
 from zu_validators.schema import SchemaValidator
@@ -47,6 +47,36 @@ def test_grounding_passes_value_on_page() -> None:
     r = Result(status=Status.SUCCESS, value={"price": "$9.00"})
     ctx = _ctx({"html": "<span class='price'>$9.00</span>"})
     assert GroundingValidator().check(r, ctx) is None
+
+
+def test_grounding_checks_numeric_values() -> None:
+    # A fabricated *number* must not pass ungrounded (the old code skipped
+    # every non-string value, so invented prices/counts sailed through).
+    invented = Result(status=Status.SUCCESS, value={"stock": 4096})
+    ctx = _ctx({"html": "<span>in stock: 7</span>"})
+    assert GroundingValidator().check(invented, ctx) is not None
+
+    real = Result(status=Status.SUCCESS, value={"stock": 7})
+    assert GroundingValidator().check(real, ctx) is None
+
+
+def test_grounding_normalizes_whitespace() -> None:
+    # Whitespace/case differences between the value and the page shouldn't fail.
+    r = Result(status=Status.SUCCESS, value={"title": "Hello   World"})
+    ctx = _ctx({"html": "<h1>hello world</h1>"})
+    assert GroundingValidator().check(r, ctx) is None
+
+
+def test_schema_error_is_terminal_not_a_crash() -> None:
+    # An invalid output_schema (from the TaskSpec) raises jsonschema.SchemaError
+    # internally; the validator must turn it into a TERMINAL verdict, never let
+    # it escape and crash the validation ladder.
+    spec = TaskSpec(query="x", output_schema={"type": "not-a-real-type"})
+    ctx = RunContext(spec=spec, observation=None)
+    r = Result(status=Status.SUCCESS, value={"a": 1})
+    v = SchemaValidator().check(r, ctx)
+    assert v is not None and v.severity == Severity.TERMINAL
+    assert "invalid output_schema" in (v.detail or "")
 
 
 def test_validators_discoverable() -> None:
