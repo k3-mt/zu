@@ -69,6 +69,33 @@ reaches its first tagged release.
 - **Event taxonomy** (`zu_core.events`) — the small, stable set of `harness.*` /
   `data.*` event-type constants the emitters will share.
 
+### Changed — step 3 hardening (single source of truth, scale, encryption seam)
+
+- **Single source of truth.** The bus no longer keeps an in-memory mirror
+  alongside the sink. There is exactly one canonical `EventSink` (the source of
+  truth), and reads (`query`/`stream`/`count`) delegate to it. The canonical
+  store defaults to a new in-memory `MemoryEventSink` and is swapped for a
+  durable one by config; secondary destinations (a shipper, another sink)
+  attach via `bus.add_destination(...)` as isolated subscribers.
+- **Bounded memory.** `subscriber_failures` is a bounded deque; `SessionStore`
+  now keeps compact per-task facts (counts, last event, a small recent window)
+  instead of every event, with `evict()` / `evict_on_terminal` — O(active
+  tasks), not O(events). Full history comes from the canonical store.
+- **Idempotent append.** SQLite uses `INSERT … ON CONFLICT(event_id) DO
+  NOTHING` (and `MemoryEventSink` dedupes by `event_id`); a retried publish
+  never duplicates.
+- **Streaming reads.** `stream()` pages by keyset (`WHERE seq > ? … LIMIT`),
+  never OFFSET, never `fetchall` — memory is bounded by `batch_size` regardless
+  of log size. `query()` gains `limit`/`after_seq`; added `count()`.
+- **Durability config (researched).** SQLite sink now sets `journal_mode=WAL`,
+  `synchronous=FULL`, and `busy_timeout`, with a single writer connection.
+- **`parent_id IS NULL` queryable.** A filter value of `None` matches NULL
+  (e.g. `{"parent_id": None}` selects root events).
+- **Encryption-at-rest seam.** Payload codec at the storage boundary:
+  plaintext `IdentityCodec` default; optional AES-256-GCM via
+  `zu-backends[encryption]` (AAD-bound to `event_id`, version-tagged blobs for
+  mixed-codec reads). Managed keys (KMS/rotation) deferred behind a key seam.
+
 ### Next
 
 - Step 4: the interpreter loop + tier-1 tools, tested against the fake model.

@@ -49,6 +49,30 @@ initial URL and every redirect hop. It is a host-level backstop, not full
 containment — DNS-rebinding (a check/connect TOCTOU window) is closed properly
 by the SandboxBackend's network-egress policy, not by the denylist.
 
+## Encryption at rest
+
+The event log can hold untrusted web content and extracted PII. Encryption is a
+**configurable codec at the storage boundary**, not a fixed cipher:
+
+- The default codec is **plaintext** (`IdentityCodec`) — zero dependencies,
+  fully queryable on disk. Appropriate for local development.
+- A real **AES-256-GCM** codec ships behind `zu-backends[encryption]`
+  (`pip install zu-backends[encryption]`); pass it to a durable sink
+  (`SqliteSink(path, codec=AesGcmCodec.from_env())`). It encrypts the payload
+  blob, binds the row's `event_id` as associated data (so ciphertext can't be
+  moved between rows), and leaves indexed metadata columns plaintext so the log
+  stays queryable.
+- Every stored blob carries a one-byte codec version tag, so a log can mix
+  plaintext and encrypted rows and still read back — encryption can be turned
+  on for an existing log without rewriting history.
+
+**Not yet provided (future stage):** managed keys. The current codec takes a
+32-byte key from the environment, which suits a single-tenant/local deployment.
+KMS-backed envelope encryption, per-tenant data keys, and key rotation are the
+right tools for a hosted/regulated deployment and slot in behind a key-provider
+seam without changing the on-disk format. Until then, for regulated data,
+combine the AES codec with OS/disk-level encryption and strict key handling.
+
 ## Supported versions
 
 Pre-1.0: the latest `main` is the supported version. Once we tag releases, this

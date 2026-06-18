@@ -8,7 +8,7 @@ a concrete adapter — which is what makes every adapter replaceable.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -130,6 +130,26 @@ class SandboxBackend(Protocol):
 
 @runtime_checkable
 class EventSink(Protocol):
+    """The canonical event store — the single source of truth for a run.
+
+    ``append`` is idempotent on ``event_id`` (re-appending the same event is a
+    no-op), so a retried publish never duplicates a record. A filter value of
+    ``None`` matches ``IS NULL`` (e.g. ``{"parent_id": None}`` selects roots).
+
+    Reads come in two shapes so a large log never has to be materialised at
+    once: ``query`` for a bounded window (always pass ``limit`` for big logs),
+    and ``stream`` for memory-safe iteration over the whole result via keyset
+    pagination.
+    """
+
     async def append(self, event: Any) -> None: ...
 
-    async def query(self, flt: dict) -> list: ...
+    async def query(
+        self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0
+    ) -> list: ...
+
+    def stream(
+        self, flt: dict | None = None, *, batch_size: int = 500
+    ) -> AsyncIterator[Any]: ...
+
+    async def count(self, flt: dict | None = None) -> int: ...

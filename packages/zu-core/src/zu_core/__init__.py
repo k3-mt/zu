@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from . import events
 from .bus import EventBus, SubscriberFailure
+from .codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from .contracts import Budget, Event, Result, Status, TaskSpec
-from .projections import SessionStore
+from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
+from .projections import SessionState, SessionStore
+from .sinks import MemoryEventSink
 from .ports import (
     Capabilities,
     Detector,
@@ -46,11 +49,20 @@ __all__ = [
     "Result",
     "Status",
     "TaskSpec",
-    # event bus + taxonomy + projections
+    # event bus + taxonomy + projections + sinks + codec
     "EventBus",
     "SubscriberFailure",
     "SessionStore",
+    "SessionState",
+    "MemoryEventSink",
     "events",
+    "ALLOWED_EVENT_FILTERS",
+    "event_matches",
+    "validate_filter",
+    "IdentityCodec",
+    "PayloadCodec",
+    "encode_payload",
+    "decode_payload",
     # ports
     "Capabilities",
     "Detector",

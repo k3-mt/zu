@@ -1,26 +1,32 @@
-"""The event bus — append-before-notify (build step 3).
+"""The event bus — one source of truth, projected to destinations (step 3).
 
-The bus is the spine. On every publish it:
+There is exactly **one canonical event store** (an ``EventSink``) — the single
+source of truth for a run. The bus, on every publish:
 
-  1. **appends to the EventSink first** — durability before any side effect, so
-     the log is the source of truth; if the process dies mid-notify the record
-     already exists.
-  2. **then notifies every subscriber** (projections), isolating each one — a
-     subscriber that raises does not stop the others, and its failure is
-     recorded (on ``subscriber_failures``) rather than disappearing.
+  1. **appends to the canonical store first** — durability before any side
+     effect. If that write fails, the failure propagates: you cannot have a run
+     whose source of truth is missing a record.
+  2. **then fans out to destinations** — projections (derived read models like
+     the session store) and secondary sinks (a shipper to OTel, a central log).
+     Each destination is isolated: one that raises does not stop the others,
+     and its failure is recorded (bounded) rather than disappearing.
 
-The bus depends only on the ``EventSink`` *port*, never on a concrete sink, so
-SQLite, Postgres, or the hosted central log are all swappable behind it.
+The canonical store defaults to an in-memory sink and is swapped for a durable
+one (SQLite, Postgres, the hosted central log) by configuration — same port,
+same semantics. Reads (`query`/`stream`/`count`) delegate to the canonical
+store, so there is never a second, divergent copy of the log in the bus.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
-from typing import Awaitable, Callable, NamedTuple
+from collections import deque
+from typing import AsyncIterator, Awaitable, Callable, NamedTuple
 
 from .contracts import Event
 from .ports import EventSink
+from .sinks import MemoryEventSink
 
 log = logging.getLogger("zu.bus")
 
@@ -28,7 +34,7 @@ Subscriber = Callable[[Event], "Awaitable[None] | None"]
 
 
 class SubscriberFailure(NamedTuple):
-    """A subscriber that raised while handling an event — recorded, not lost."""
+    """A destination that raised while handling an event — recorded, not lost."""
 
     subscriber: Subscriber
     event: Event
@@ -36,22 +42,42 @@ class SubscriberFailure(NamedTuple):
 
 
 class EventBus:
-    def __init__(self, sink: EventSink | None = None) -> None:
-        self._sink = sink
+    def __init__(
+        self,
+        sink: EventSink | None = None,
+        *,
+        max_recorded_failures: int = 1000,
+    ) -> None:
+        # The single source of truth. Defaults to in-memory; configure a durable
+        # sink for production. Never accompanied by a second in-bus copy.
+        self.sink: EventSink = sink if sink is not None else MemoryEventSink()
         self._subscribers: list[Subscriber] = []
-        self._log: list[Event] = []
-        self.subscriber_failures: list[SubscriberFailure] = []
+        # Bounded so a long-lived bus can't leak memory via recorded failures.
+        self.subscriber_failures: deque[SubscriberFailure] = deque(
+            maxlen=max_recorded_failures
+        )
 
     def subscribe(self, fn: Subscriber) -> None:
+        """Register a destination: a projection or any per-event handler."""
         self._subscribers.append(fn)
 
-    async def publish(self, event: Event) -> None:
-        # 1. append-before-notify: persist to the durable log first.
-        if self._sink is not None:
-            await self._sink.append(event)
-        self._log.append(event)
+    def add_destination(self, sink: EventSink) -> None:
+        """Project the stream to a secondary sink (e.g. a shipper), isolated.
 
-        # 2. notify every subscriber, isolating any crash.
+        The secondary sink is a destination, not the source of truth: its
+        failures are isolated like any other subscriber's, never propagated.
+        """
+
+        async def _ship(event: Event) -> None:
+            await sink.append(event)
+
+        self.subscribe(_ship)
+
+    async def publish(self, event: Event) -> None:
+        # 1. canonical store first; a failure here propagates (source of truth).
+        await self.sink.append(event)
+
+        # 2. fan out to destinations, isolating any crash.
         for fn in self._subscribers:
             try:
                 result = fn(event)
@@ -59,8 +85,19 @@ class EventBus:
                     await result
             except Exception as exc:  # noqa: BLE001 - one crash must not stop the rest
                 self.subscriber_failures.append(SubscriberFailure(fn, event, exc))
-                log.warning("subscriber %r failed on %s: %s", fn, event.type, exc)
+                log.warning("destination %r failed on %s: %s", fn, event.type, exc)
 
-    @property
-    def log(self) -> list[Event]:
-        return list(self._log)
+    # --- reads delegate to the single source of truth ---------------------
+
+    async def query(
+        self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0
+    ) -> list[Event]:
+        return await self.sink.query(flt, limit=limit, after_seq=after_seq)
+
+    def stream(
+        self, flt: dict | None = None, *, batch_size: int = 500
+    ) -> AsyncIterator[Event]:
+        return self.sink.stream(flt, batch_size=batch_size)
+
+    async def count(self, flt: dict | None = None) -> int:
+        return await self.sink.count(flt)

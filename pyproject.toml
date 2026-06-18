@@ -40,6 +40,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "mypy>=1.8",
+    "cryptography>=42",   # exercises zu-backends[encryption] in CI
 ]
 
 [tool.pytest.ini_options]

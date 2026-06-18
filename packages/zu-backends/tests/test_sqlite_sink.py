@@ -1,9 +1,9 @@
 """Build step 3 — the SQLite EventSink.
 
-Proves the event log is a faithful system of record: an event read back is
-*identical* to what was written (nothing lost or mangled), queries filter and
-order correctly, the filter is injection-safe, and the log survives across
-connections.
+Proves the event log is a faithful, durable system of record: an event read
+back is identical to what was written; append is idempotent; queries filter
+(incl. null parent), order, paginate, and stream without loading everything;
+and the log survives across connections.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ from zu_core.contracts import Event
 from zu_backends.sqlite_sink import SqliteSink
 
 
-def _event(task_id, type="harness.task.started", **payload) -> Event:
+def _event(task_id, type="harness.task.started", parent=None, **payload) -> Event:
     return Event(
         trace_id=uuid4(),
         task_id=task_id,
+        parent_id=parent,
         type=type,
         source="loop",
         payload=payload or {"k": "v", "n": 1, "nested": {"a": [1, 2, 3]}},
@@ -31,32 +32,69 @@ async def test_read_back_is_identical() -> None:
     ev = _event(uuid4())
     await sink.append(ev)
     back = await sink.query({"task_id": ev.task_id})
-    assert len(back) == 1
-    assert back[0] == ev  # full equality: id, ts (tz-aware), payload, everything
+    assert back == [ev]  # full equality: id, ts (tz-aware), payload, everything
 
 
-async def test_query_filters_and_orders_by_insertion() -> None:
+async def test_append_is_idempotent() -> None:
+    sink = SqliteSink(":memory:")
+    ev = _event(uuid4())
+    await sink.append(ev)
+    await sink.append(ev)  # ON CONFLICT(event_id) DO NOTHING
+    assert await sink.count() == 1
+    assert await sink.query({"event_id": ev.event_id}) == [ev]
+
+
+async def test_filter_by_parent_id_null() -> None:
+    sink = SqliteSink(":memory:")
+    root = _event(uuid4(), parent=None)
+    child = _event(root.task_id, parent=uuid4())
+    await sink.append(root)
+    await sink.append(child)
+    roots = await sink.query({"parent_id": None})
+    assert [e.event_id for e in roots] == [root.event_id]
+
+
+async def test_query_orders_and_paginates() -> None:
+    sink = SqliteSink(":memory:")
+    task = uuid4()
+    evs = [_event(task) for _ in range(5)]
+    for e in evs:
+        await sink.append(e)
+
+    assert [e.event_id for e in await sink.query({"task_id": task})] == [
+        e.event_id for e in evs
+    ]
+    first_two = await sink.query({"task_id": task}, limit=2)
+    assert [e.event_id for e in first_two] == [evs[0].event_id, evs[1].event_id]
+    after_two = await sink.query({"task_id": task}, after_seq=2)
+    assert [e.event_id for e in after_two] == [e.event_id for e in evs[2:]]
+
+
+async def test_stream_pages_without_loading_all() -> None:
+    sink = SqliteSink(":memory:")
+    task = uuid4()
+    evs = [_event(task) for _ in range(10)]
+    for e in evs:
+        await sink.append(e)
+    # batch_size smaller than the set forces multiple keyset pages
+    streamed = [e async for e in sink.stream({"task_id": task}, batch_size=3)]
+    assert [e.event_id for e in streamed] == [e.event_id for e in evs]
+
+
+async def test_count() -> None:
     sink = SqliteSink(":memory:")
     t1, t2 = uuid4(), uuid4()
-    a = _event(t1, type="harness.task.started")
-    b = _event(t2, type="harness.turn.started")
-    c = _event(t1, type="harness.task.completed")
-    for ev in (a, b, c):
-        await sink.append(ev)
-
-    only_t1 = await sink.query({"task_id": t1})
-    assert [e.event_id for e in only_t1] == [a.event_id, c.event_id]  # order preserved
-
-    by_type = await sink.query({"type": "harness.turn.started"})
-    assert [e.event_id for e in by_type] == [b.event_id]
-
-    assert len(await sink.query()) == 3  # no filter -> everything
+    await sink.append(_event(t1))
+    await sink.append(_event(t1))
+    await sink.append(_event(t2))
+    assert await sink.count() == 3
+    assert await sink.count({"task_id": t1}) == 2
 
 
 async def test_query_rejects_unknown_filter() -> None:
     sink = SqliteSink(":memory:")
     with pytest.raises(ValueError):
-        await sink.query({"payload": "anything"})  # not on the allowlist
+        await sink.query({"payload": "anything"})
 
 
 async def test_persists_across_connections(tmp_path) -> None:

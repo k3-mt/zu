@@ -7,6 +7,7 @@ dependencies = ["zu-core"]
 
 [project.optional-dependencies]
 docker = ["docker>=7"]
+encryption = ["cryptography>=42"]
 
 [project.entry-points."zu.backends"]
 local-docker = "zu_backends.local_docker:LocalDockerBackend"
