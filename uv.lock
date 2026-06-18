@@ -1441,8 +1441,10 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anthropic" },
     { name = "cryptography" },
     { name = "mypy" },
+    { name = "openai" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -1460,8 +1462,10 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anthropic", specifier = ">=0.40" },
     { name = "cryptography", specifier = ">=42" },
     { name = "mypy", specifier = ">=1.8" },
+    { name = "openai", specifier = ">=1.40" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]

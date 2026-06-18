@@ -284,7 +284,30 @@ fixed here, each with a regression test (suite + mypy green):
   actual tiered cost. Pricing metadata rides in with the real adapters (step 7)
   and config (step 8); recording usage now means runs are costable from day one.
 
+### Added — build step 7 (the real model adapters)
+
+- **`anthropic` adapter** — translates the neutral `ModelRequest` into a Messages
+  API call via the official `anthropic` SDK and parses the response back, so the
+  core never imports a model SDK. Default model `claude-opus-4-8`; the API key is
+  resolved from the environment *inside* the adapter, never placed in the model's
+  context or in config.
+- **`openai-compatible` adapter** — one adapter, pointed at a different base URL,
+  reaches OpenAI, OpenRouter, and local servers (Ollama/vLLM) via the `openai`
+  SDK. Base URL and key from the environment. (The prompt-based tool fallback for
+  models without native tool-calling is deferred — see BUILD.md.)
+- **Neutral tool-call id matching.** The loop's neutral history carries no
+  tool-call ids (results match by order); the adapters synthesize ids on the
+  assistant turn and assign them to results FIFO, satisfying both wire formats
+  (`tool_use.id` ↔ `tool_result.tool_use_id`; `tool_calls[].id` ↔ `tool_call_id`).
+- **One shared checklist, two adapters, proven offline.** Both adapters pass the
+  same checklist — text finalize, tool call, length, usage, capabilities — each
+  exercised against its *real* SDK via an `httpx.MockTransport` returning canned
+  provider JSON (no network). The `anthropic` adapter also drives the real loop
+  end to end (fetch → finalise). A live call against each API is opt-in
+  (`ZU_LIVE_ANTHROPIC` / `ZU_LIVE_OPENAI`), so it never blocks CI.
+
 ### Next
 
-- Steps 7–9: real model adapters (`anthropic` + `openai-compatible`), config +
-  `zu run task.yaml` wiring, and the quickstart / killer demo.
+- Steps 8–9: config + `zu run task.yaml` wiring (swap the model by changing one
+  config line; bind a per-model price table for the cost/savings projection),
+  and the quickstart / killer demo.

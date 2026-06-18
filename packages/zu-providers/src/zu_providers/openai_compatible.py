@@ -2,16 +2,39 @@
 
 One adapter, pointed at a different base URL, reaches OpenRouter, OpenAI, and
 local servers (Ollama, vLLM) — covering a vast range of models, including open
-ones. If a model lacks native tool-calling, the adapter transparently falls
-back to a prompt-based tool protocol (inject schemas into the prompt, parse a
-structured action out of the text) so the same harness still works.
+ones. It translates Zu's neutral ``ModelRequest`` into a Chat Completions call
+via the official ``openai`` SDK and parses the response back, so the rest of
+the runtime never imports a model SDK. Base URL and key are resolved from the
+environment *inside* the adapter, never placed in the model's context.
 
-Importable now for discovery; wired in build step 7.
+The client is injectable (an ``AsyncOpenAI`` with a mock transport) so the
+translation and parsing are proven offline against the real SDK; a live call is
+opt-in. This adapter and ``anthropic`` pass one shared checklist — identical
+neutral behaviour from two different wire formats.
+
+A model without native tool-calling would need the prompt-based tool fallback
+(inject schemas into the prompt, parse a structured action out of the text);
+that path is deferred (see BUILD.md). The native path is what ships here.
 """
 
 from __future__ import annotations
 
-from zu_core.ports import Capabilities, ModelRequest, ModelResponse
+import json
+import os
+from typing import Any
+
+from zu_core.ports import Capabilities, Finish, ModelRequest, ModelResponse, ToolCall
+
+from ._messages import openai_tool, to_openai_messages
+
+# OpenAI finish_reason -> neutral Finish (tool_calls handled by presence of calls).
+_FINISH = {
+    "stop": Finish.STOP,
+    "tool_calls": Finish.TOOL_CALLS,
+    "function_call": Finish.TOOL_CALLS,
+    "length": Finish.LENGTH,
+    "content_filter": Finish.STOP,
+}
 
 
 class OpenAICompatibleProvider:
@@ -21,16 +44,64 @@ class OpenAICompatibleProvider:
         base_url_env: str = "OPENAI_BASE_URL",
         api_key_env: str = "OPENAI_API_KEY",
         native_tools: bool = True,
+        max_tokens: int | None = None,
+        client: Any = None,
     ) -> None:
         self.model = model
         self.base_url_env = base_url_env
         self.api_key_env = api_key_env
+        self.max_tokens = max_tokens
+        self._client = client
         self.capabilities = Capabilities(native_tools=native_tools)
 
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            import openai
+
+            # Local servers (Ollama/vLLM) need no key; the SDK still wants a
+            # non-empty string, so fall back to a placeholder. Base URL is
+            # optional (defaults to OpenAI) and read from the env when set.
+            key = os.environ.get(self.api_key_env) or "not-needed"
+            base_url = os.environ.get(self.base_url_env) or None
+            self._client = openai.AsyncOpenAI(api_key=key, base_url=base_url)
+        return self._client
+
     async def complete(self, req: ModelRequest) -> ModelResponse:
-        raise NotImplementedError(
-            "OpenAICompatibleProvider is build step 7. Translate ModelRequest -> "
-            "the Chat Completions schema; when capabilities.native_tools is False, "
-            "use the prompt-based tool fallback. Base URL and key come from the "
-            "named environment variables."
-        )
+        if not self.capabilities.native_tools:
+            raise NotImplementedError(
+                "prompt-based tool fallback for non-native-tool models is deferred "
+                "(see BUILD.md); set native_tools=True to use the Chat Completions path."
+            )
+        client = self._ensure_client()
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": to_openai_messages(req.messages),
+        }
+        if req.tools:
+            kwargs["tools"] = [openai_tool(t) for t in req.tools]
+        max_tokens = req.params.get("max_tokens", self.max_tokens)
+        if max_tokens is not None:
+            kwargs["max_tokens"] = int(max_tokens)
+        resp = await client.chat.completions.create(**kwargs)
+        return _to_model_response(resp)
+
+
+def _to_model_response(resp: Any) -> ModelResponse:
+    choice = resp.choices[0]
+    msg = choice.message
+    calls: list[ToolCall] = []
+    for tc in msg.tool_calls or []:
+        try:
+            args = json.loads(tc.function.arguments or "{}")
+        except (ValueError, TypeError):
+            args = {}
+        calls.append(ToolCall(name=tc.function.name, args=args if isinstance(args, dict) else {}))
+    finish = Finish.TOOL_CALLS if calls else _FINISH.get(choice.finish_reason, Finish.STOP)
+    usage: dict = {}
+    if resp.usage is not None:
+        usage = {
+            "input_tokens": resp.usage.prompt_tokens,
+            "output_tokens": resp.usage.completion_tokens,
+            "total_tokens": resp.usage.total_tokens,
+        }
+    return ModelResponse(text=msg.content or None, tool_calls=calls, finish=finish, usage=usage)

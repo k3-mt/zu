@@ -41,6 +41,8 @@ dev = [
     "pytest-asyncio>=0.23",
     "mypy>=1.8",
     "cryptography>=42",   # exercises zu-backends[encryption] in CI
+    "anthropic>=0.40",    # exercises zu-providers[anthropic] in CI
+    "openai>=1.40",       # exercises zu-providers[openai] in CI
 ]
 
 [tool.pytest.ini_options]
