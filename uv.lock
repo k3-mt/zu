@@ -1398,6 +1398,7 @@ source = { editable = "packages/zu-tools" }
 dependencies = [
     { name = "httpx" },
     { name = "selectolax" },
+    { name = "zu-backends" },
     { name = "zu-core" },
 ]
 
@@ -1405,6 +1406,7 @@ dependencies = [
 requires-dist = [
     { name = "httpx" },
     { name = "selectolax" },
+    { name = "zu-backends", editable = "packages/zu-backends" },
     { name = "zu-core", editable = "packages/zu-core" },
 ]
 

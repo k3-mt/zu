@@ -1,9 +1,13 @@
-"""Build step 4 — the interpreter loop + tier-1 tools + budgets.
+"""Build steps 4–5 — the interpreter loop, tier-1 tools, and the escalation step.
 
 Proves the loop drives provider -> tool -> observation -> finalise with the
 ScriptedProvider (fake model) and a fixtured page, **deterministically**: the
 same Result and the same sequence of event types every run, with no network.
 Budgets, tool-error isolation, and the detector checkpoint are exercised too.
+
+Step 5 adds the escalation ladder: a JS-shell page makes tier 1 escalate, the
+loop climbs to tier 2, and the same job succeeds with a (scripted) browser —
+no Docker, no real browser, the same fixture discipline as everywhere else.
 """
 
 from __future__ import annotations
@@ -124,9 +128,11 @@ class _RecordingProvider:
         self._inner = ScriptedProvider.from_moves(moves)
         self.capabilities = self._inner.capabilities
         self.seen: list[list[dict]] = []
+        self.tools_seen: list[list[str]] = []  # tool names offered each turn
 
     async def complete(self, req):
         self.seen.append([dict(m) for m in req.messages])
+        self.tools_seen.append([t["name"] for t in req.tools])
         return await self._inner.complete(req)
 
 
@@ -248,3 +254,134 @@ async def test_detector_escalate_halts_loop() -> None:
     assert result.status == Status.ESCALATE
     assert result.reason == "always"
     assert any(e.type == "harness.detector.fired" for e in await bus.query())
+
+
+# --- build step 5: detectors + the escalation step + tier-2 render_dom -------
+
+# A JS shell: a mount point plus scripts and no real content — the canonical
+# tier-1 give-up signal the js-shell detector fires on.
+_SHELL = '<html><body><div id="root"></div><script src="/app.js"></script></body></html>'
+# What the same URL yields once a real browser runs the JavaScript.
+_RENDERED = "<html><body><h1>Acme Widget</h1><span class='price'>$9.00</span></body></html>"
+
+
+class _FakeBackend:
+    """A scripted SandboxBackend: no Docker, no browser — it returns a saved
+    rendered page, freezing tier 2 the way the ScriptedProvider freezes the
+    model. Records the lifecycle so the test can assert launch/destroy ran."""
+
+    name = "fake-sandbox"
+
+    def __init__(self, rendered: str) -> None:
+        self._rendered = rendered
+        self.launched: list[dict] = []
+        self.destroyed = 0
+
+    async def launch(self, spec: dict):
+        self.launched.append(spec)
+        return {"id": "sbx-1", "spec": spec}
+
+    async def exec(self, sandbox, call: ToolCall) -> dict:
+        return {"status": 200, "html": self._rendered, "url": call.args["url"]}
+
+    async def destroy(self, sandbox) -> None:
+        self.destroyed += 1
+
+
+def _shell_fetch() -> HttpFetch:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_SHELL)
+
+    return HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
+
+
+def _registry_with_tiers(backend: _FakeBackend):
+    from zu_core.registry import Registry
+    from zu_detectors.js_shell import JsShellDetector
+    from zu_tools.render import RenderDom
+
+    reg = Registry()
+    reg.register("tools", "http_fetch", _shell_fetch())          # tier 1
+    reg.register("tools", "render_dom", RenderDom(backend=backend))  # tier 2
+    reg.register("detectors", "js-shell", JsShellDetector())
+    return reg
+
+
+async def test_escalation_climbs_to_tier2_and_succeeds() -> None:
+    # The step-5 story: tier-1 fetch returns a JS shell -> js-shell detector
+    # escalates -> the loop climbs to tier 2 -> render_dom (a browser) returns
+    # the real page -> the model finalises. The same job, one tier higher.
+    backend = _FakeBackend(_RENDERED)
+    provider = _RecordingProvider(
+        [
+            {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},   # tier 1: shell
+            {"tool": "render_dom", "args": {"url": "http://spa.test/"}},   # tier 2: real DOM
+            {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
+        ]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="get title and price"), provider, _registry_with_tiers(backend), bus)
+
+    assert result.status == Status.SUCCESS
+    assert result.value == {"title": "Acme Widget", "price": "$9.00"}
+
+    # The browser tier was actually leased and torn down.
+    assert backend.launched and backend.destroyed == 1
+    assert backend.launched[0]["tier"] == 2
+
+    # render_dom was withheld at tier 1 and only offered after the climb.
+    assert "render_dom" not in provider.tools_seen[0]
+    assert "render_dom" in provider.tools_seen[-1]
+
+    # The escalation is recorded as a tier climb, not a terminal escalation.
+    escalated = [e for e in await bus.query() if e.type == "harness.task.escalated"]
+    assert len(escalated) == 1
+    assert escalated[0].payload == {
+        "reason": "js-shell",
+        "detail": escalated[0].payload["detail"],
+        "from_tier": 1,
+        "to_tier": 2,
+    }
+    assert "exhausted" not in escalated[0].payload
+    # The detector fired and the run completed at the higher tier.
+    types = [e.type for e in await bus.query()]
+    assert "harness.detector.fired" in types
+    assert types[-1] == "harness.task.completed"
+
+
+async def test_tier2_tool_is_withheld_before_escalation() -> None:
+    # The ladder is enforced on dispatch, not just on what the model is shown:
+    # calling a tier-2 tool before any escalation hits the unknown-tool branch.
+    backend = _FakeBackend(_RENDERED)
+    provider = ScriptedProvider.from_moves(
+        [
+            {"tool": "render_dom", "args": {"url": "http://spa.test/"}},  # not yet unlocked
+            {"text": "{}", "finish": "stop"},
+        ]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), provider, _registry_with_tiers(backend), bus)
+
+    assert result.status == Status.SUCCESS  # the loop didn't crash
+    assert backend.launched == []  # the browser was never leased
+    returned = next(e for e in await bus.query() if e.type == "harness.tool.returned")
+    assert "unknown tool" in returned.payload["observation"]["error"]
+
+
+async def test_escalation_exhausted_when_no_higher_tier() -> None:
+    # With max_tier pinned to 1, an escalating detector has nowhere to climb,
+    # so the run ends with an ESCALATE Result naming the detector (and the
+    # event records the exhaustion rather than a climb).
+    backend = _FakeBackend(_RENDERED)
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "http_fetch", "args": {"url": "http://spa.test/"}}, {"text": "{}", "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(
+        TaskSpec(query="x", max_tier=1), provider, _registry_with_tiers(backend), bus
+    )
+    assert result.status == Status.ESCALATE
+    assert result.reason == "js-shell"
+    escalated = next(e for e in await bus.query() if e.type == "harness.task.escalated")
+    assert escalated.payload["exhausted"] is True
+    assert backend.launched == []  # never climbed, so tier 2 was never leased

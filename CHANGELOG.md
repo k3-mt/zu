@@ -196,10 +196,45 @@ each with a test (suite + mypy green):
 - **Demo updated.** `examples/scripted_demo.py` now drives the real `run_task`
   loop (it predated the loop and hand-rolled a mini-driver).
 
+### Added — build step 5 (the escalation ladder)
+
+- **Tiered tools.** Tools now carry a `tier` (added to the `Tool` port); the
+  loop offers the model only the tools at or below the run's current tier —
+  tier 1 (`http_fetch`, `html_parse`) to start. The ladder is enforced on
+  dispatch too, so a call to a not-yet-unlocked tool is an unknown-tool
+  observation, not a capability the model can grab early.
+- **Escalation is a step, not the end.** A detector `ESCALATE` no longer halts
+  the run: with headroom it **climbs one tier** — emitting
+  `harness.task.escalated` with `from_tier`/`to_tier`, unlocking the higher
+  tier's tools, and telling the model to retry the same job. Only when there is
+  no tier left to climb to does the run end with an `ESCALATE` Result (the event
+  then carries `exhausted: true`). The climb ceiling is the lower of the task's
+  `max_tier` and the highest tier any registered tool occupies, so the loop
+  never climbs to an empty tier.
+- **`render_dom` (tier 2).** The browser tool is wired against the
+  `SandboxBackend` port: it leases a sandbox, execs the render, and always tears
+  the sandbox down (a browser container never leaks, even on error). It
+  normalises its observation to the same shape `http_fetch` produces, so
+  detectors stay tool-agnostic. Default backend is `local-docker`, imported
+  lazily so a tier-1-only run never touches it.
+- **`local-docker` SandboxBackend.** The real container lifecycle
+  (run → exec → remove) against the Docker SDK (optional `zu-backends[docker]`,
+  imported lazily so discovery never needs a daemon). Network is disabled by
+  default — the sandbox is where a tier's egress policy lives. A clear
+  `DockerUnavailableError` replaces an opaque import failure when the SDK or
+  daemon is absent.
+- **`js-shell` heuristic finalized.** The shell test now measures *visible* text
+  (script/style/template/noscript bodies stripped, tags removed) instead of raw
+  HTML length, so a shell padded with a large inline bundle still escalates and a
+  small-but-real page does not.
+- **Fixture discipline held.** The escalation story is proven offline: a
+  scripted `SandboxBackend` replays a saved rendered page, freezing tier 2 the
+  way the `ScriptedProvider` freezes the model and `httpx.MockTransport` freezes
+  the network. The live Docker path is opt-in, exercised the way real providers
+  are (step 7).
+
 ### Next
 
-- Step 5: wire the real detectors + one escalation step, and tier-2
-  `render_dom` via the `local-docker` backend.
-- Steps 6–9: schema + grounding validation against the event log,
-  schema + grounding validation, real model adapters, config + CLI wiring, and
-  the quickstart / killer demo.
+- Steps 6–9: schema + grounding validation against the event log, real model
+  adapters (`anthropic` + `openai-compatible`), config + `zu run task.yaml`
+  wiring, and the quickstart / killer demo.

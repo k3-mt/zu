@@ -1,16 +1,34 @@
-"""render_dom — the tier-2 browser tool (build step 5).
+"""render_dom — the tier-2 browser tool.
 
-Runs a headless browser inside a sandbox (via the SandboxBackend port) and
-returns the rendered DOM — the escalation target when a JavaScript page
-defeats the tier-1 http_fetch. Importable now for discovery; the live render
-is wired in build step 5 behind the local-docker backend.
+The escalation target when a JavaScript page defeats the tier-1 ``http_fetch``:
+it renders the URL in a real headless browser (JS executed) and returns the
+resulting DOM. The browser does not run in this process — it runs inside a
+sandbox obtained through the :class:`SandboxBackend` port, so the live,
+unpredictable part (a real browser) is isolated behind a seam the tests can
+freeze, exactly as ``http_fetch`` isolates the network behind an httpx
+transport.
+
+By default the sandbox is the local-docker backend, so an installed Zu renders
+out of the box. A test (or build step 8 config) injects a different backend —
+including a scripted one that returns a saved rendered page, which is how the
+escalation ladder is proven offline.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+from zu_core.ports import SandboxBackend, ToolCall
+
+# The sandbox image is a spec detail, not a hard-coded constant in the loop:
+# the backend launches it. A Playwright/Chromium image is the default tier-2
+# environment; swap it via RenderDom(image=...) without touching the loop.
+_DEFAULT_IMAGE = "zu/render-chromium:latest"
+
 
 class RenderDom:
     name = "render_dom"
+    tier = 2  # unlocked only after a detector escalates off tier 1
     schema = {
         "name": "render_dom",
         "description": "Render a URL in a headless browser and return the DOM after JS executes.",
@@ -25,8 +43,34 @@ class RenderDom:
         "More expensive than http_fetch; use when a page needs JavaScript."
     )
 
-    async def __call__(self, ctx, url: str) -> dict:
-        raise NotImplementedError(
-            "render_dom is build step 5: drive a headless browser via the "
-            "SandboxBackend port (local-docker adapter) and return the rendered DOM."
-        )
+    def __init__(self, backend: SandboxBackend | None = None, image: str = _DEFAULT_IMAGE) -> None:
+        # backend None -> the local-docker default, imported lazily so this
+        # module (and tier-1-only deployments) need not pull in the backend
+        # package or a Docker client until a render is actually attempted.
+        self._backend = backend
+        self.image = image
+
+    def _resolve_backend(self) -> SandboxBackend:
+        if self._backend is None:
+            from zu_backends.local_docker import LocalDockerBackend
+
+            self._backend = LocalDockerBackend()
+        return self._backend
+
+    async def __call__(self, ctx: Any, url: str) -> dict:
+        backend = self._resolve_backend()
+        # Lease a sandbox for the render and always tear it down — a browser
+        # container is expensive and must not leak even if the render raises.
+        sandbox = await backend.launch({"image": self.image, "tier": self.tier})
+        try:
+            obs = await backend.exec(sandbox, ToolCall(name=self.name, args={"url": url}))
+        finally:
+            await backend.destroy(sandbox)
+        # Normalise to the same observation shape http_fetch produces, so the
+        # loop's content handling and the detectors are tool-agnostic.
+        return {
+            "status": obs.get("status", 200),
+            "html": obs.get("html", ""),
+            "url": obs.get("url", url),
+            "rendered": True,
+        }

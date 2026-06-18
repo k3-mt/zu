@@ -7,6 +7,7 @@ from selectolax.parser import HTMLParser
 
 class HtmlParse:
     name = "html_parse"
+    tier = 1  # pure CPU on already-fetched HTML; no escalation needed to use it
     schema = {
         "name": "html_parse",
         "description": "Parse HTML and return text matched by a CSS selector.",

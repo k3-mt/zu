@@ -3,10 +3,17 @@
 The canonical escalation trigger: tier-1 http_fetch returns HTML that is
 essentially a <div id="root"></div> plus scripts, with no real text content.
 That is the signal to give up on the cheap tier and climb to a browser.
-Heuristics here are finalized against the graded fixture set in build step 5.
+
+The test is structural, not size-based: a page is a shell when it has a known
+SPA mount point *and* almost no human-visible text once scripts and styles are
+removed. Measuring visible text (rather than raw HTML length) is what step 5
+finalizes — a shell padded with a large inline bundle is still a shell, and a
+small page that happens to be real content is not escalated.
 """
 
 from __future__ import annotations
+
+import re
 
 from zu_core.ports import RunContext, Scope, Severity, Verdict
 
@@ -14,6 +21,23 @@ from . import _html_of
 
 # Common SPA mount points / framework markers.
 _SHELL_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__NEXT_DATA__")
+
+# Strip the elements whose contents are never visible text before measuring.
+_NONVISIBLE = re.compile(r"<(script|style|template|noscript)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
+_TAGS = re.compile(r"<[^>]+>")
+_WS = re.compile(r"\s+")
+
+# Below this many characters of visible text, a page with a mount point is
+# treated as an unrendered shell. Tuned against the graded fixture set.
+_MIN_VISIBLE_TEXT = 64
+
+
+def _visible_text(html: str) -> str:
+    """Human-visible text: drop script/style/template/noscript bodies, strip
+    the remaining tags, and collapse whitespace."""
+    without_code = _NONVISIBLE.sub(" ", html)
+    text = _TAGS.sub(" ", without_code)
+    return _WS.sub(" ", text).strip()
 
 
 class JsShellDetector:
@@ -26,10 +50,8 @@ class JsShellDetector:
             return None
         lowered = html.lower()
         looks_like_shell = any(m.lower() in lowered for m in _SHELL_MARKERS)
-        script_heavy = lowered.count("<script") >= 1
-        # crude visible-text proxy: strip tags is overkill here; use length of
-        # text outside scripts as a later refinement (step 5).
-        thin = len(html) < 4000
+        script_heavy = "<script" in lowered
+        thin = len(_visible_text(html)) < _MIN_VISIBLE_TEXT
         if looks_like_shell and script_heavy and thin:
             return Verdict(
                 severity=Severity.ESCALATE,

@@ -97,6 +97,12 @@ class Tool(Protocol):
     name: str
     schema: dict
     prompt_fragment: str
+    # The escalation ladder: a tool is only offered to the model once the run
+    # has climbed to its tier. Tier 1 is the cheap default (http_fetch); a
+    # higher tier (a browser via render_dom) is unlocked by a detector ESCALATE.
+    # The loop reads it defensively (``getattr(tool, "tier", 1)``) so a tool
+    # that omits it is treated as tier 1.
+    tier: int
 
     async def __call__(self, ctx: RunContext, **kwargs: Any) -> dict: ...
 

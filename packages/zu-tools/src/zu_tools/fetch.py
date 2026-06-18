@@ -16,6 +16,7 @@ _DEFAULT_MAX_BYTES = 5_000_000
 
 class HttpFetch:
     name = "http_fetch"
+    tier = 1  # the cheapest action; offered from the start of every run
     schema = {
         "name": "http_fetch",
         "description": "Fetch a URL and return its raw HTML.",

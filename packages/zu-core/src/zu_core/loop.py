@@ -1,4 +1,4 @@
-"""The interpreter loop (build step 4).
+"""The interpreter loop (build steps 4–5).
 
 The read-eval-print interpreter of the runtime: ask the provider for an action,
 dispatch the tool by name, run detectors on the observation, repeat until the
@@ -7,14 +7,20 @@ It is provider-, tool-, and detector-agnostic — it only knows the ports and th
 one registry. The detector checkpoints are where escalation is decided; the
 model may signal an action, never acquire a capability itself.
 
+The tier ladder (build step 5): tools carry a ``tier``, and the loop only
+offers the model the tools at or below the run's current tier — tier 1
+(``http_fetch``) to start. A detector ESCALATE is not the end of the run; it is
+a *step* that climbs one tier, unlocking a higher-capability tool (a browser via
+``render_dom``) and letting the model retry the same job. The run only ends with
+an ESCALATE Result when there is no higher tier left to climb to.
+
 Determinism (the step-4 promise): with the ``ScriptedProvider`` and a fixtured
 tool, the loop produces the **same Result every run**. Event ids and timestamps
 differ run-to-run by design, so determinism is asserted on the Result and the
 *sequence* of event types, never on event ids.
 
-Detectors and validators are pulled from the registry, so this loop already has
-the checkpoints steps 5 (escalation) and 6 (validation) plug into — when none
-are registered (the step-4 case) the checkpoints are inert.
+Detectors and validators are pulled from the registry, so the checkpoints are
+inert when none are registered (the step-4 case).
 """
 
 from __future__ import annotations
@@ -94,6 +100,44 @@ def _worst(verdicts: list[Verdict]) -> Verdict | None:
     return max(verdicts, key=lambda v: _RANK[v.severity], default=None)
 
 
+def _tier_of(tool: Any) -> int:
+    """A tool's tier; defaults to 1 so a tool that omits it is the cheap tier."""
+    return int(getattr(tool, "tier", 1))
+
+
+class _Ladder:
+    """The escalation ladder: which tools are offered at the current tier, and
+    the climb a detector ESCALATE triggers.
+
+    The ceiling is the *lower* of the task's ``max_tier`` and the highest tier
+    any registered tool actually occupies — so the loop never climbs to an
+    empty tier (which would just re-offer the same tools and escalate again).
+    With only tier-1 tools registered, the ceiling is 1 and an ESCALATE has
+    nowhere to climb: it ends the run, which is the step-4 behaviour preserved.
+    """
+
+    def __init__(self, tools: dict[str, Any], max_tier: int) -> None:
+        self._all = tools
+        self.current = 1
+        top = max((_tier_of(t) for t in tools.values()), default=1)
+        self.ceiling = min(max_tier, top)
+
+    def active(self) -> dict[str, Any]:
+        """The tools the model may use right now: tier <= current tier."""
+        return {n: t for n, t in self._all.items() if _tier_of(t) <= self.current}
+
+    def schemas(self) -> list[dict]:
+        return [t.schema for t in self.active().values() if getattr(t, "schema", None)]
+
+    @property
+    def can_climb(self) -> bool:
+        return self.current < self.ceiling
+
+    def climb(self) -> int:
+        self.current += 1
+        return self.current
+
+
 class _Run:
     """Per-run state: one trace id, the growing event list, and the emitter."""
 
@@ -132,8 +176,13 @@ class _Run:
         await self.emit(ev.TASK_TERMINAL, {"reason": reason}, parent=self.root)
         return Result(status=Status.TERMINAL, reason=reason)
 
-    async def escalate(self, reason: str) -> Result:
-        await self.emit(ev.TASK_ESCALATED, {"reason": reason}, parent=self.root)
+    async def escalate(self, reason: str, tier: int) -> Result:
+        # Escalation with no higher tier to climb to: the run ends ESCALATE.
+        # ``exhausted`` distinguishes this terminal event from the climb event
+        # (which carries from_tier/to_tier) on the same TASK_ESCALATED type.
+        await self.emit(
+            ev.TASK_ESCALATED, {"reason": reason, "tier": tier, "exhausted": True}, parent=self.root
+        )
         return Result(status=Status.ESCALATE, reason=reason)
 
 
@@ -160,10 +209,12 @@ async def run_task(
     detectors = [_materialize(registry.get("detectors", n)) for n in registry.names("detectors")]
     validators = [_materialize(registry.get("validators", n)) for n in registry.names("validators")]
 
+    # The tier ladder gates which tools the model sees; the run starts at tier 1.
+    ladder = _Ladder(tools, spec.max_tier)
+
     run.root = await run.emit(ev.TASK_STARTED, {"query": spec.query, "target": spec.target})
 
-    messages = _initial_messages(spec, tools.values())
-    tool_schemas = [t.schema for t in tools.values() if getattr(t, "schema", None)]
+    messages = _initial_messages(spec, ladder.active().values())
 
     start = time.monotonic()
     tokens = 0
@@ -174,6 +225,11 @@ async def run_task(
             return await run.terminal("budget:wall_time_s")
         if tokens > budget.max_tokens:
             return await run.terminal("budget:max_tokens")
+
+        # Recompute per turn so a tier climbed last turn takes effect now: the
+        # model is offered exactly the tools unlocked at the current tier.
+        active = ladder.active()
+        tool_schemas = ladder.schemas()
 
         turn = await run.emit(ev.TURN_STARTED, {"step": step + 1}, parent=run.root)
         resp = await provider.complete(ModelRequest(messages=messages, tools=tool_schemas))
@@ -195,17 +251,24 @@ async def run_task(
                     "tool_calls": [{"name": c.name, "args": c.args} for c in resp.tool_calls],
                 }
             )
+            halting: Verdict | None = None
             for call in resp.tool_calls:
-                obs = await _invoke(run, turn, tools, call.name, call.args)
+                obs = await _invoke(run, turn, active, call.name, call.args)
                 messages.append(
                     {"role": "tool", "name": call.name, "content": json.dumps(obs, default=str)}
                 )
-                halt = await _detector_checkpoint(run, turn, detectors, obs, {Scope.PER_OBSERVATION})
+                halting = await _detector_checkpoint(run, turn, detectors, obs, {Scope.PER_OBSERVATION})
+                if halting is not None:
+                    break  # stop dispatching this turn's remaining calls; act on it
+            if halting is None:
+                halting = await _detector_checkpoint(run, turn, detectors, None, {Scope.PER_TURN})
+            if halting is not None:
+                if halting.severity == Severity.TERMINAL:
+                    return await run.terminal(halting.detector)
+                # ESCALATE: climb a tier (loop continues) or end the run.
+                halt = await _escalate(run, ladder, messages, halting)
                 if halt is not None:
                     return halt
-            halt = await _detector_checkpoint(run, turn, detectors, None, {Scope.PER_TURN})
-            if halt is not None:
-                return halt
             continue
 
         # --- the model finalised: validate, then complete / retry / halt ---
@@ -227,7 +290,12 @@ async def run_task(
             if verdict.severity == Severity.TERMINAL:
                 return await run.terminal(verdict.detector)
             if verdict.severity == Severity.ESCALATE:
-                return await run.escalate(verdict.detector)
+                # An on-final escalation climbs too: unlock the higher tier and
+                # let the model retry, rather than ending on the first failure.
+                halt = await _escalate(run, ladder, messages, verdict)
+                if halt is not None:
+                    return halt
+                continue
             if verdict.severity == Severity.RETRY:
                 # feed the failure back and let the model correct (next turn,
                 # bounded by the step budget); WARN falls through to success.
@@ -266,7 +334,11 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
     """Dispatch one tool call to an observation. A missing tool or a raising
     tool (e.g. an SSRF block) becomes an error observation, never a crash —
     the same isolation principle the bus applies to subscribers. Unexpected
-    failures are logged so a real bug isn't silently disguised as data."""
+    failures are logged so a real bug isn't silently disguised as data.
+
+    ``tools`` is the *active* set for the current tier, so a call to a tool
+    that hasn't been unlocked yet falls into the unknown-tool branch — the
+    ladder is enforced on dispatch, not just on what the model is shown."""
     await run.emit(ev.TOOL_INVOKED, {"tool": name, "args": args}, parent=turn, source=name)
     tool = tools.get(name)
     if tool is None:
@@ -293,10 +365,11 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
 
 async def _detector_checkpoint(
     run: _Run, turn, detectors: list, observation: Any, scopes: set[Scope]
-) -> Result | None:
-    """Run the in-scope detectors; emit DETECTOR_FIRED for any verdict. Only
-    ESCALATE / TERMINAL halt the loop — RETRY/WARN are recorded and the run
-    continues (the model sees the observation and decides)."""
+) -> Verdict | None:
+    """Run the in-scope detectors; emit DETECTOR_FIRED for any verdict. Returns
+    the first *halting* verdict (ESCALATE or TERMINAL) for the caller to act on
+    — ESCALATE climbs a tier, TERMINAL ends the run. RETRY/WARN are recorded
+    and the run continues (the model sees the observation and decides)."""
     ctx = run.ctx(observation)
     for d in detectors:
         if getattr(d, "scope", None) not in scopes:
@@ -310,11 +383,46 @@ async def _detector_checkpoint(
             parent=turn,
             source=verdict.detector,
         )
-        if verdict.severity == Severity.ESCALATE:
-            return await run.escalate(verdict.detector)
-        if verdict.severity == Severity.TERMINAL:
-            return await run.terminal(verdict.detector)
+        if verdict.severity in (Severity.ESCALATE, Severity.TERMINAL):
+            return verdict
     return None
+
+
+async def _escalate(
+    run: _Run, ladder: _Ladder, messages: list[dict], verdict: Verdict
+) -> Result | None:
+    """Act on an ESCALATE verdict. Climb one tier if there is headroom — emit
+    the escalation step, unlock the higher tier, and tell the model what is now
+    available — returning None so the loop retries the job. With no tier left to
+    climb to, end the run with an ESCALATE Result (the reason is the detector)."""
+    if not ladder.can_climb:
+        return await run.escalate(verdict.detector, ladder.current)
+    frm = ladder.current
+    to = ladder.climb()
+    await run.emit(
+        ev.TASK_ESCALATED,
+        {"reason": verdict.detector, "detail": verdict.detail, "from_tier": frm, "to_tier": to},
+        parent=run.root,
+        source=verdict.detector,
+    )
+    messages.append({"role": "user", "content": _escalation_notice(to, ladder.active(), verdict)})
+    return None
+
+
+def _escalation_notice(tier: int, active: dict, verdict: Verdict) -> str:
+    """Tell the model the previous tier was insufficient and which tools the
+    climb just unlocked, so a real model retries with the new capability. The
+    ScriptedProvider ignores it; the wording is for the step-7 providers."""
+    unlocked = "\n".join(
+        f"- {t.prompt_fragment}"
+        for t in active.values()
+        if _tier_of(t) == tier and getattr(t, "prompt_fragment", None)
+    )
+    return (
+        f"The previous attempt was insufficient ({verdict.detector}: {verdict.detail}). "
+        f"Escalated to tier {tier}. Newly available tools:\n{unlocked}\n"
+        "Retry the task using them."
+    )
 
 
 def _finalise_verdict(

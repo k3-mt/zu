@@ -43,6 +43,25 @@ def test_js_shell_passes_on_real_content() -> None:
     assert JsShellDetector().inspect(_ctx({"html": html})) is None
 
 
+def test_js_shell_fires_despite_large_inline_script() -> None:
+    # A shell padded with a big inline bundle is still a shell: the visible-text
+    # test sees through the script, where a raw-length check would be fooled.
+    bundle = "var x=1;" * 2000  # ~16 KB of code, zero visible text
+    html = f'<html><body><div id="app"></div><script>{bundle}</script></body></html>'
+    v = JsShellDetector().inspect(_ctx({"html": html}))
+    assert v is not None and v.severity is Severity.ESCALATE
+
+
+def test_js_shell_passes_on_small_but_real_page() -> None:
+    # A mount point with genuine prose is rendered content, not a shell.
+    html = (
+        '<html><body><div id="root">'
+        "<h1>Acme Widget</h1><p>The finest widget, in stock and ready to ship today.</p>"
+        "</div><script src=/app.js></script></body></html>"
+    )
+    assert JsShellDetector().inspect(_ctx({"html": html})) is None
+
+
 def test_bot_wall_fires_on_captcha() -> None:
     v = BotWallDetector().inspect(_ctx({"html": "<h1>Just a moment...</h1> please verify you are human"}))
     assert v is not None and v.severity is Severity.ESCALATE
