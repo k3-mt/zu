@@ -26,6 +26,7 @@ from .ports import (
 )
 from .registry import (
     REGISTRY,
+    LoadFailure,
     Registry,
     backend,
     detector,
@@ -60,6 +61,7 @@ __all__ = [
     "Verdict",
     # registry
     "REGISTRY",
+    "LoadFailure",
     "Registry",
     "backend",
     "detector",

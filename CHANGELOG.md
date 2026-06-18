@@ -30,6 +30,17 @@ reaches its first tagged release.
 - **Repo health** — README, Apache-2.0 LICENSE + NOTICE, CONTRIBUTING,
   CODE_OF_CONDUCT, GOVERNANCE, MAINTAINERS, SECURITY, issue/PR templates, docs.
 
+### Hardened
+
+- **Resilient plugin discovery** — `Registry.discover()` isolates a plugin
+  whose entry point raises on load, recording it as a `LoadFailure` (returned
+  and on `reg.failures`) instead of crashing all discovery. `zu plugins`
+  surfaces failures on stderr.
+- **Mutable-default cleanup** — port models use `Field(default_factory=...)`
+  for `dict`/`list` defaults.
+- Tracked a known design gap (plugin interface-versioning, MLR §6) in
+  `docs/BUILD.md`.
+
 ### Next
 
 - Step 3: SQLite `EventSink` + the append-before-notify bus + a projection.

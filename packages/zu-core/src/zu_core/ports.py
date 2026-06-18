@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .contracts import Result
 
@@ -25,7 +25,7 @@ class Finish(str, Enum):
 
 class ToolCall(BaseModel):
     name: str
-    args: dict = {}
+    args: dict = Field(default_factory=dict)
 
 
 class Capabilities(BaseModel):
@@ -36,15 +36,15 @@ class Capabilities(BaseModel):
 
 class ModelRequest(BaseModel):
     messages: list[dict]
-    tools: list[dict] = []
-    params: dict = {}
+    tools: list[dict] = Field(default_factory=list)
+    params: dict = Field(default_factory=dict)
 
 
 class ModelResponse(BaseModel):
     text: str | None = None
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     finish: Finish = Finish.STOP
-    usage: dict = {}
+    usage: dict = Field(default_factory=dict)
 
 
 @runtime_checkable
@@ -89,7 +89,7 @@ class RunContext(BaseModel):
     spec: Any
     # Populated by the loop (build step 4); kept Any so the core stays small.
     observation: Any = None
-    events: list = []
+    events: list = Field(default_factory=list)
 
 
 @runtime_checkable

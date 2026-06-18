@@ -10,7 +10,7 @@ All three resolve into the same registry.
 from __future__ import annotations
 
 from importlib.metadata import entry_points
-from typing import Any
+from typing import Any, NamedTuple
 
 GROUPS = {
     "providers": "zu.providers",
@@ -22,15 +22,36 @@ GROUPS = {
 }
 
 
+class LoadFailure(NamedTuple):
+    """A plugin whose entry point failed to import/load during discovery."""
+
+    kind: str
+    name: str
+    error: Exception
+
+
 class Registry:
     def __init__(self) -> None:
         self._items: dict[str, dict[str, Any]] = {k: {} for k in GROUPS}
+        self.failures: list[LoadFailure] = []
 
-    def discover(self) -> None:
-        """Load every pip-installed plugin declared via entry points."""
+    def discover(self) -> list[LoadFailure]:
+        """Load every pip-installed plugin declared via entry points.
+
+        Discovery is resilient: a single broken plugin — a third-party package
+        whose entry point raises on import — must not take down discovery of
+        everything else (the same principle the event bus applies to a crashing
+        subscriber). Each failure is isolated, recorded on ``self.failures``,
+        and returned, so a caller can surface it instead of crashing.
+        """
+        self.failures = []
         for kind, group in GROUPS.items():
             for ep in entry_points(group=group):
-                self._items[kind][ep.name] = ep.load()
+                try:
+                    self._items[kind][ep.name] = ep.load()
+                except Exception as exc:  # noqa: BLE001 - isolate any broken plugin
+                    self.failures.append(LoadFailure(kind=kind, name=ep.name, error=exc))
+        return self.failures
 
     def register(self, kind: str, name: str, obj: Any) -> None:
         if kind not in self._items:

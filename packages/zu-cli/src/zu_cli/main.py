@@ -26,11 +26,13 @@ def run(task_file: str) -> None:
 def plugins() -> None:
     """List every plugin Zu can discover (providers, tools, detectors, ...)."""
     reg = Registry()
-    reg.discover()
+    failures = reg.discover()
     for kind in GROUPS:
         names = reg.names(kind)
         listed = ", ".join(names) if names else "—"
         typer.echo(f"{kind:11} {listed}")
+    for f in failures:
+        typer.echo(f"  ! failed to load {f.kind}:{f.name} — {f.error}", err=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

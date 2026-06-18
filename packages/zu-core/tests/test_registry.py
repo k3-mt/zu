@@ -8,6 +8,7 @@ http_fetch via the 'zu.tools' group).
 
 from __future__ import annotations
 
+import zu_core.registry as registry_mod
 from zu_core.registry import GROUPS, REGISTRY, Registry, tool
 
 
@@ -54,3 +55,40 @@ def test_all_groups_present() -> None:
     reg = Registry()
     for kind in GROUPS:
         assert reg.names(kind) == []  # empty until discover()/register()
+
+
+class _FakeEP:
+    def __init__(self, name: str, loader) -> None:
+        self.name = name
+        self._loader = loader
+
+    def load(self):
+        return self._loader()
+
+
+def test_discovery_isolates_a_broken_plugin(monkeypatch) -> None:
+    """One plugin whose entry point raises must not take down the rest."""
+
+    def boom():
+        raise RuntimeError("third-party plugin blew up on import")
+
+    good = _FakeEP("good_tool", lambda: "GOOD")
+    bad = _FakeEP("bad_tool", boom)
+
+    def fake_entry_points(group: str):
+        return [good, bad] if group == "zu.tools" else []
+
+    monkeypatch.setattr(registry_mod, "entry_points", fake_entry_points)
+
+    reg = Registry()
+    failures = reg.discover()
+
+    # the good plugin still loaded…
+    assert reg.get("tools", "good_tool") == "GOOD"
+    assert "bad_tool" not in reg.names("tools")
+    # …and the failure was isolated and recorded, not raised.
+    assert len(failures) == 1
+    assert failures[0].kind == "tools"
+    assert failures[0].name == "bad_tool"
+    assert isinstance(failures[0].error, RuntimeError)
+    assert reg.failures == failures
