@@ -1,0 +1,24 @@
+# A sample Zu run config. Wiring — which model per tier, which plugins are
+# active, the backend, budgets — is declarative. Secrets stay in the
+# environment. Switching models or swapping a backend is a config edit, not a
+# code change. (Consumed by `zu run` at build step 8.)
+
+tiers:
+  1:
+    provider: openai-compatible        # OpenRouter / OpenAI / Ollama
+    model: "anthropic/claude-haiku"    # any model the endpoint serves
+    base_url_env: OPENROUTER_BASE_URL
+    api_key_env: OPENROUTER_API_KEY
+    tools: [http_fetch, html_parse]
+    detectors: [empty, error, js-shell]
+  2:
+    provider: anthropic
+    model: "claude-sonnet-4-6"
+    api_key_env: ANTHROPIC_API_KEY
+    backend: local-docker              # browser sidecar
+    tools: [http_fetch, html_parse, render_dom]
+    detectors: [empty, error, bot-wall]
+
+validators: [schema, grounding]
+event_sink: { driver: sqlite, path: ./zu.db }
+budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }
