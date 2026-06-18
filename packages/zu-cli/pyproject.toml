@@ -3,7 +3,19 @@ name = "zu-cli"
 version = "0.1.0"
 description = "The `zu` command — Agent Production Runtime CLI"
 requires-python = ">=3.11"
-dependencies = ["zu-core", "zu-providers", "typer", "pyyaml"]
+# The CLI is the batteries-included entry point: it depends on every built-in
+# plugin package so `zu run` discovers them out of the box. Config still selects
+# which are active per run; a user's own plugins are discovered the same way.
+dependencies = [
+    "zu-core",
+    "zu-providers",
+    "zu-tools",
+    "zu-detectors",
+    "zu-validators",
+    "zu-backends",
+    "typer",
+    "pyyaml",
+]
 
 [project.scripts]
 zu = "zu_cli.main:app"

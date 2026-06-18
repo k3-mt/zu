@@ -40,11 +40,14 @@ with a one-line config change.
 ## Status
 
 Early. The core is being built in the open in nine steps (see
-[`docs/BUILD.md`](docs/BUILD.md)). **Steps 1–4 are done and green:** the typed
+[`docs/BUILD.md`](docs/BUILD.md)). **Steps 1–8 are done and green:** the typed
 contracts, the six ports, the plugin registry, a scripted (fake) model provider,
-the event spine (SQLite sink + append-before-notify bus + projection), and the
-deterministic interpreter loop with tier-1 tools and budgets. Escalation and the
-tier-2 browser, validation against the event log, and real model adapters are next.
+the event spine (SQLite sink + append-before-notify bus + projection), the
+deterministic interpreter loop with tier-1 tools and budgets, the escalation
+ladder and the tier-2 browser, validation against the event log (schema +
+grounding), the real `anthropic` and `openai-compatible` model adapters, and the
+**config system** — `zu run task.yaml` wires a whole run from a file, with the
+model a one-line swap. Next (step 9): the quickstart, examples, and killer demo.
 
 ## Quickstart (for contributors today)
 
@@ -66,6 +69,14 @@ sinks       sqlite
 
 Every built-in above is registered through the **same** plugin API you'd use for your
 own — which is how we prove the plugin system is real, not a second-class add-on.
+
+Run a task from a config file — the model, plugins, and event sink are all
+declarative, and swapping models is a one-line edit to the `provider` block:
+
+```bash
+cp examples/zu.example.yaml zu.yaml          # pick the model + plugins
+uv run zu run examples/task.example.yaml -c zu.yaml
+```
 
 ## The five-minute promise (the target for v1)
 

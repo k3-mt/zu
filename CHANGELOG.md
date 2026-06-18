@@ -7,6 +7,34 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — build step 8: the config system + `zu run`
+
+A run is now wired by a file, not by code. `zu run task.yaml -c zu.yaml` loads a
+declarative config, assembles the loop (provider, active plugins, event sink),
+and executes — and **swapping the model is a one-line edit** to the `provider`
+block, no code change, because the loop only ever speaks to the provider port.
+
+- **`zu_cli.config`** — parses `zu.yaml` (`RunConfig`), and builds the provider,
+  the run registry, and the event sink from it. The wiring stays
+  provider-agnostic: a plugin is looked up *by name* in the same registry the
+  loop reads and constructed by passing only the config fields its constructor
+  declares (signature-filtered), so a new adapter needs no change here.
+- **Three registration doors, from config.** A plugin is named by its short name
+  (a discovered built-in or pip-installed package) or **by reference** as a
+  `module:Attr` import path — the no-packaging door — for both plugins and the
+  provider itself. The run registry contains exactly the configured plugins, so
+  config activates and orders them per run.
+- **Secrets stay in the environment.** Config names the env *variable*
+  (`api_key_env`), never the key; building a provider reads no secret (resolved
+  inside the adapter at call time).
+- **One provider drives the run.** A configured `backend` is injected into a tool
+  that accepts one (e.g. `render_dom`); a missing API key / unreachable endpoint
+  is reported as a clean message and a non-zero exit, not a traceback. Binding a
+  *distinct model per tier* remains the deferred next rung (see BUILD.md).
+- `examples/zu.example.yaml` rewritten to the implemented single-`provider`
+  shape; `zu-cli` now depends on every built-in plugin package so `zu run`
+  discovers them out of the box. 20 new tests (full suite green; mypy clean).
+
 ### Fixed — security & quality audit of build steps 5–7
 
 A focused review of the three newest build steps, with each finding verified by

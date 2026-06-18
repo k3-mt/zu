@@ -1,24 +1,42 @@
-# A sample Zu run config. Wiring — which model per tier, which plugins are
-# active, the backend, budgets — is declarative. Secrets stay in the
-# environment. Switching models or swapping a backend is a config edit, not a
-# code change. (Consumed by `zu run` at build step 8.)
+# A sample Zu run config, consumed by `zu run task.yaml -c zu.yaml` (build step 8).
+#
+# Wiring is declarative: pick the model, list the active plugins, choose the
+# sink. Swapping the model is the one-line edit to the `provider` block below —
+# no code change, because the loop only ever speaks to the provider port.
+#
+# Secrets stay in the environment: `api_key_env` names the *variable* that holds
+# the key, never the key itself — it is read inside the adapter at call time.
 
-tiers:
-  1:
-    provider: openai-compatible        # OpenRouter / OpenAI / Ollama
-    model: "anthropic/claude-haiku"    # any model the endpoint serves
-    base_url_env: OPENROUTER_BASE_URL
-    api_key_env: OPENROUTER_API_KEY
-    tools: [http_fetch, html_parse]
-    detectors: [empty, error, js-shell]
-  2:
-    provider: anthropic
-    model: "claude-sonnet-4-6"
-    api_key_env: ANTHROPIC_API_KEY
-    backend: local-docker              # browser sidecar
-    tools: [http_fetch, html_parse, render_dom]
-    detectors: [empty, error, bot-wall]
+provider:
+  name: anthropic                  # scripted | anthropic | openai-compatible | <module:Class>
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+  # The whole "run on any model" swap is this block. To use OpenRouter:
+  #   name: openai-compatible
+  #   model: "anthropic/claude-3.5-haiku"   # any model the endpoint serves
+  #   base_url_env: OPENROUTER_BASE_URL
+  #   api_key_env: OPENROUTER_API_KEY
+  # ...or a local model (Ollama / vLLM), usually no key needed:
+  #   name: openai-compatible
+  #   model: "llama3.1"
+  #   base_url_env: OPENAI_BASE_URL          # e.g. http://localhost:11434/v1
 
-validators: [schema, grounding]
+plugins:
+  tools: [http_fetch, html_parse, render_dom]
+  detectors: [empty, error, js-shell, bot-wall]
+  validators: [schema, grounding]
+
+# Optional. The tier-2 sandbox render_dom runs its browser in; defaults to
+# local-docker if render_dom is active and this is omitted.
+backend: local-docker
+
+# Optional. The canonical event log; omit to keep the in-memory default.
 event_sink: { driver: sqlite, path: ./zu.db }
+
+# Default budget for a task that doesn't set its own.
 budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }
+
+# Note: one provider drives the whole run today. The escalation ladder still
+# climbs tiers — a tool's own `tier` gates when it unlocks (render_dom is tier
+# 2) — but binding a *different model per tier* (a cheap model at tier 1, a
+# frontier model at tier 2) is the deferred next rung; see docs/BUILD.md.

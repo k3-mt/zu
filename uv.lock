@@ -1333,16 +1333,24 @@ source = { editable = "packages/zu-cli" }
 dependencies = [
     { name = "pyyaml" },
     { name = "typer" },
+    { name = "zu-backends" },
     { name = "zu-core" },
+    { name = "zu-detectors" },
     { name = "zu-providers" },
+    { name = "zu-tools" },
+    { name = "zu-validators" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pyyaml" },
     { name = "typer" },
+    { name = "zu-backends", editable = "packages/zu-backends" },
     { name = "zu-core", editable = "packages/zu-core" },
+    { name = "zu-detectors", editable = "packages/zu-detectors" },
     { name = "zu-providers", editable = "packages/zu-providers" },
+    { name = "zu-tools", editable = "packages/zu-tools" },
+    { name = "zu-validators", editable = "packages/zu-validators" },
 ]
 
 [[package]]
