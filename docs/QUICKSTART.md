@@ -27,12 +27,14 @@ real browser (tier 2). Until then, everything runs with just Python.
 ### The tier-2 browser image
 
 `render_dom` runs a headless Chromium inside a container via the `local-docker`
-backend. That needs the Docker daemon, `pip install 'zu-runtime[docker]'`, and a
-render image (published as `ghcr.io/k3-mt/zu-render-chromium`). Point `render_dom`
-at it, or build it yourself from this repo:
+backend. That needs the Docker daemon and `pip install 'zu-runtime[docker]'`. The
+render image is published at `ghcr.io/k3-mt/zu-render-chromium:latest` and is
+`render_dom`'s default, so it's pulled automatically the first time you escalate.
+To customise it, rebuild from this repo and point `render_dom` at your tag:
 
 ```bash
-docker build -t ghcr.io/k3-mt/zu-render-chromium:latest images/render-chromium
+docker build -t my/zu-render:latest images/render-chromium
+# RenderDom(image="my/zu-render:latest")  — or set it in config
 ```
 
 The image stays running and exposes a `zu-render <url>` entrypoint that prints

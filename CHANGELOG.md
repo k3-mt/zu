@@ -35,8 +35,10 @@ client), and `[all]`. Every plugin remains a standalone package
   `RenderDom()` renders a live JS page through Docker and returns the
   JS-executed DOM (status 200, the JS-injected content present).
 - `docker>=7` added to the dev group so the local-docker backend is exercised.
-- Published as `ghcr.io/k3-mt/zu-render-chromium` (see QUICKSTART); until then,
-  build it locally from `images/render-chromium`.
+- **Published** at `ghcr.io/k3-mt/zu-render-chromium:latest`, and `render_dom`'s
+  default image now points at it — so real tier-2 works on a fresh install (with
+  Docker + `zu-runtime[docker]`). Rebuild locally from `images/render-chromium`
+  to customise. (The package must be public on GHCR for anonymous pulls.)
 
 ### Changed — `zu demo` proves runnability (real model required), demo types, prerequisites
 

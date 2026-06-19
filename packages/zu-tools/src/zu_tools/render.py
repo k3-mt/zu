@@ -21,9 +21,10 @@ from typing import Any
 from zu_core.ports import SandboxBackend, ToolCall
 
 # The sandbox image is a spec detail, not a hard-coded constant in the loop:
-# the backend launches it. A Playwright/Chromium image is the default tier-2
-# environment; swap it via RenderDom(image=...) without touching the loop.
-_DEFAULT_IMAGE = "zu/render-chromium:latest"
+# the backend launches it. The published Playwright/Chromium image is the default
+# tier-2 environment (built from images/render-chromium in this repo); swap it via
+# RenderDom(image=...) or config without touching the loop.
+_DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
 
 
 class RenderDom:
