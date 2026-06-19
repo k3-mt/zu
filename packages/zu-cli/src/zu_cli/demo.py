@@ -283,7 +283,10 @@ async def run_demo(
     process exit code (0 success, 1 otherwise)."""
     meta = DEMOS[kind]
     task = meta["task"]
-    model = getattr(provider, "model", None) or provider_label
+    # Only a real model id, never the provider name standing in for one — a
+    # scripted/offline provider has no model, and "model=scripted" conflates the
+    # two. None here means the provider line below shows the provider alone.
+    model = getattr(provider, "model", None)
 
     print("=" * 72)
     print(f"Zu · demo: {meta['title']}")
@@ -293,7 +296,7 @@ async def run_demo(
     print(f"task     : {task.query}")
     if task.target:
         print(f"target   : {task.target}")
-    print(f"provider : {provider_label}  model: {model}")
+    print(f"provider : {provider_label}" + (f"  model: {model}" if model else ""))
     print("-" * 72)
 
     # Watch the run live — the train of thought, tools, and escalations stream

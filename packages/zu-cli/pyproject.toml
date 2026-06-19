@@ -20,6 +20,9 @@ dependencies = [
 serve = ["fastapi>=0.110", "uvicorn>=0.27"]
 # `zu mcp` — the MCP server, so coding agents (Claude Code, Cursor, …) drive Zu.
 mcp = ["mcp>=1.2"]
+# `zu test-plugin` — the plugin-test gate + adversarial red team. Optional: a
+# contributor/CI tool, not needed to run an agent.
+test = ["zu-redteam==0.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

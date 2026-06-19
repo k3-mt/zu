@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from zu_core.ports import RunContext, Scope, Severity, Verdict
 
-_CONTENT_KEYS = ("html", "text", "content")
+from . import _CONTENT_KEYS  # one source of truth for "what counts as page content"
 
 
 class EmptyDetector:

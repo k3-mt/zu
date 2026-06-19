@@ -51,13 +51,19 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
     spec = load_task(task_file, default_budget=cfg.budget)
     provider, registry, bus = assemble(cfg)
 
-    if stream:
-        from .trace import live_printer
+    # The uniform observability hook: a live trace (when streaming) AND the defense
+    # review queue — so a blocked attempt during `zu run` is queued exactly as it
+    # is under `zu serve`. Same hook in every harness.
+    from .observe import attach_observability
 
-        bus.subscribe(live_printer())
+    attach_observability(bus, cfg.observability, trace=stream)
 
-    model = getattr(provider, "model", None) or cfg.provider.name
-    typer.echo(f"zu run: {task_file} · provider={cfg.provider.name} model={model}")
+    # Only show a model when the provider actually exposes one — otherwise show
+    # just the provider name. The two are not the same thing: a provider like
+    # ``scripted`` has no model, and printing ``model=scripted`` conflates them.
+    model = getattr(provider, "model", None)
+    suffix = f" model={model}" if model else ""
+    typer.echo(f"zu run: {task_file} · provider={cfg.provider.name}{suffix}")
 
     try:
         result: Result = asyncio.run(run_task(spec, provider, registry, bus))
@@ -142,7 +148,7 @@ def serve(
     port: int = typer.Option(8000, help="Bind port."),
 ) -> None:
     """Serve the runtime over HTTP (POST /run). Needs the 'serve' extra:
-    pip install 'zu-cli[serve]'."""
+    pip install 'zu-runtime[serve]'."""
     try:
         load_config(config)  # fail fast on a bad config before binding a port
     except ConfigError as exc:
@@ -154,12 +160,15 @@ def serve(
         from .server import create_app
     except ModuleNotFoundError:
         typer.echo(
-            "the HTTP server needs FastAPI + uvicorn; install with: pip install 'zu-cli[serve]'",
+            "the HTTP server needs FastAPI + uvicorn; install with: pip install 'zu-runtime[serve]'",
             err=True,
         )
         raise typer.Exit(code=2)
 
-    typer.echo(f"zu serve: http://{host}:{port}  (POST /run · config={config})")
+    typer.echo(
+        f"zu serve: http://{host}:{port}  (dashboard at / · POST /run · "
+        f"live feed /events · review queue /review · config={config})"
+    )
     uvicorn.run(create_app(config), host=host, port=port)
 
 
@@ -352,6 +361,91 @@ def mcp() -> None:
         )
         raise typer.Exit(code=2)
     build_server().run(transport="stdio")
+
+
+def _resolve_package_plugins(package: str) -> tuple[list[tuple[str, str, object]], list[str]]:
+    """The (kind, name, instance) Zu plugins a distribution declares via entry
+    points. A plugin that needs constructor args (e.g. a sink wanting a path) is
+    skipped with a note — the gate stands up what it can instantiate no-arg."""
+    from importlib.metadata import PackageNotFoundError, distribution
+
+    groups = {
+        "zu.providers": "providers", "zu.tools": "tools", "zu.detectors": "detectors",
+        "zu.validators": "validators", "zu.backends": "backends", "zu.sinks": "sinks",
+    }
+    try:
+        dist = distribution(package)
+    except PackageNotFoundError:
+        return [], [f"package {package!r} is not installed"]
+    out: list[tuple[str, str, object]] = []
+    notes: list[str] = []
+    for ep in dist.entry_points:
+        kind = groups.get(ep.group)
+        if kind is None:
+            continue
+        try:
+            obj = ep.load()
+            inst = obj() if isinstance(obj, type) else obj
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the gate
+            notes.append(f"skipped {ep.group}:{ep.name} (needs config to instantiate: {exc})")
+            continue
+        out.append((kind, ep.name, inst))
+    return out, notes
+
+
+def _find_package_dir(package: str) -> str | None:
+    from pathlib import Path
+
+    p = Path("packages") / package
+    return str(p) if (p / "tests").is_dir() else None
+
+
+@app.command(name="test-plugin")
+def test_plugin(
+    package: str = typer.Argument(..., help="Distribution name to gate, e.g. zu-tools."),
+    no_unit: bool = typer.Option(False, "--no-unit", help="Skip the plugin's own pytest gate."),
+    json_out: bool = typer.Option(False, "--json", help="Emit the full report (gates + findings) as JSON."),
+    watch: bool = typer.Option(False, "--watch", help="Stream each attack live as it runs (see it happening)."),
+) -> None:
+    """Run a plugin package through the test gate: unit · contract · interop ·
+    adversarial — the frozen red-team corpus + directed probes, judged by
+    out-of-band verdict observers (the attacker never certifies). The container
+    gate is the production form, reported when Docker is present. See
+    docs/RED_TEAM.md. Exits non-zero if the envelope did not hold.
+    """
+    try:
+        from zu_redteam import run_gate
+    except ModuleNotFoundError:
+        typer.echo("zu test-plugin needs the gate: pip install zu-redteam", err=True)
+        raise typer.Exit(code=2)
+
+    plugins_, notes = _resolve_package_plugins(package)
+    for n in notes:
+        typer.echo(f"  note: {n}", err=True)
+    if not plugins_:
+        typer.echo(
+            f"no Zu plugins found for {package!r} — is it installed and does it declare "
+            "zu.* entry points?",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    on_event = None
+    if watch:
+        from .trace import live_printer  # full scope: local, your own terminal
+
+        on_event = live_printer()
+    report = asyncio.run(
+        run_gate(package, plugins=plugins_, pkg_dir=_find_package_dir(package),
+                 run_unit=not no_unit, on_event=on_event)
+    )
+    if json_out:
+        import json
+
+        typer.echo(json.dumps(report.as_dict(), indent=2))
+    else:
+        typer.echo(report.render())
+    raise typer.Exit(code=0 if report.passed else 1)
 
 
 @app.command()

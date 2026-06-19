@@ -69,11 +69,20 @@ class PluginsConfig(BaseModel):
     """Which plugins are active, by name (or ``module:Attr`` reference). Listing
     a plugin here is what activates it — the run registry contains exactly these,
     never everything installed, so a config controls (and orders) plugins per run
-    without touching code."""
+    without touching code.
+
+    ``validators`` defaults to ``[schema, grounding]`` — **correct by default**: a
+    run is held to its output schema *and* every reported value must appear in the
+    content it actually fetched, so a fabricated answer is refused rather than
+    returned as success. Dropping ``grounding`` is opting out of the
+    anti-hallucination check; a legitimately non-fetching agent (pure Q&A from the
+    model's own knowledge — e.g. the ``minimal`` template) must set
+    ``validators: [schema]`` explicitly, because grounding has no retrieved content
+    to check against."""
 
     tools: list[str] = Field(default_factory=list)
     detectors: list[str] = Field(default_factory=list)
-    validators: list[str] = Field(default_factory=list)
+    validators: list[str] = Field(default_factory=lambda: ["schema", "grounding"])
 
 
 class EventSinkConfig(BaseModel):
@@ -85,6 +94,19 @@ class EventSinkConfig(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class ObservabilityConfig(BaseModel):
+    """How a run is made watchable — the same hook for every harness.
+
+    ``review_queue`` is the JSONL path contained attacks (``harness.defense.blocked``)
+    are appended to for triage; set it to null to disable. ``scope`` is the default
+    view scope for *networked* surfaces (the SSE feed and dashboard): ``render``
+    (allowlist-render, safe to leave on in production) or ``full`` (show content —
+    for local/authorized viewing). The local console trace is always full."""
+
+    review_queue: str | None = "zu_review.jsonl"
+    scope: str = "render"
+
+
 class RunConfig(BaseModel):
     """A whole `zu.yaml`, parsed and validated."""
 
@@ -93,6 +115,9 @@ class RunConfig(BaseModel):
     backend: str | None = None
     # The canonical store (the single source of truth for the run).
     event_sink: EventSinkConfig | None = None
+    # How the run is surfaced (live trace + defense review queue), the same hook
+    # for every harness — see zu_cli.observe.attach_observability.
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     # Secondary trace destinations — events are shipped to each *in addition* to
     # the canonical store, isolated (a failing sink never breaks the run). This is
     # how a run emits to local files or cloud storage for observability.
@@ -145,6 +170,62 @@ def load_task(path: str, *, default_budget: Budget | None = None) -> TaskSpec:
         return TaskSpec.model_validate(doc)
     except ValidationError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
+
+
+# --- coercion (a config/task may arrive as a path, a dict, or a typed object) -
+#
+# The CLI surfaces — `zu serve`, `zu mcp`, and the `zu` embed facade — all accept
+# a config/task that may be a file path, a plain dict, an already-built typed
+# object, or None. The coercion is identical except for one axis: whether a task
+# given as a *str path* is allowed. The HTTP server says no (a path would resolve
+# server-side, which a client can't set); the MCP tools and the embed facade say
+# yes. So these live here once, parameterised by ``allow_paths``, rather than
+# being re-implemented (and drifting) in each caller.
+
+
+def coerce_config(source: Any) -> RunConfig:
+    """A RunConfig from a path (str), a dict, an existing RunConfig, or None
+    (meaning ``./zu.yaml``). A malformed *dict* raises ``ConfigError`` like a
+    malformed *file* does — so callers that ``except ConfigError`` get a clean
+    message for either, never a raw pydantic ``ValidationError`` escaping."""
+    if source is None:
+        return load_config("zu.yaml")
+    if isinstance(source, RunConfig):
+        return source
+    if isinstance(source, str):
+        return load_config(source)
+    if isinstance(source, dict):
+        from pydantic import ValidationError
+
+        try:
+            return RunConfig.model_validate(source)
+        except ValidationError as exc:
+            raise ConfigError(f"invalid config: {exc}") from exc
+    raise ConfigError(f"unsupported config type: {type(source).__name__}")
+
+
+def coerce_task(source: Any, default_budget: Budget, *, allow_paths: bool) -> TaskSpec:
+    """A TaskSpec from a dict, an existing TaskSpec, or (when ``allow_paths``) a
+    file path. A task that omits a budget inherits ``default_budget``. A malformed
+    dict (or, where permitted, a bad file) surfaces as ``ConfigError``.
+
+    ``allow_paths=False`` is the server's stance: a str task is a *path*, which a
+    remote client cannot meaningfully set, so it is rejected rather than read off
+    the server's filesystem."""
+    if isinstance(source, TaskSpec):
+        return source
+    if isinstance(source, str):
+        if not allow_paths:
+            raise ConfigError("task must be a JSON object (the task spec)")
+        return load_task(source, default_budget=default_budget)
+    if isinstance(source, dict):
+        doc = dict(source)
+        doc.setdefault("budget", default_budget.model_dump())
+        try:
+            return TaskSpec.model_validate(doc)
+        except Exception as exc:  # noqa: BLE001 - surface as a ConfigError, not a raw pydantic error
+            raise ConfigError(f"invalid task: {exc}") from exc
+    raise ConfigError(f"unsupported task type: {type(source).__name__}")
 
 
 # --- building the run --------------------------------------------------------
@@ -322,9 +403,12 @@ __all__ = [
     "ProviderConfig",
     "PluginsConfig",
     "EventSinkConfig",
+    "ObservabilityConfig",
     "ConfigError",
     "load_config",
     "load_task",
+    "coerce_config",
+    "coerce_task",
     "build_provider",
     "build_registry",
     "build_sink",

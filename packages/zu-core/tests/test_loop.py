@@ -13,7 +13,6 @@ no Docker, no real browser, the same fixture discipline as everywhere else.
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from zu_core.bus import EventBus
 from zu_core.contracts import Budget, Status, TaskSpec
@@ -55,6 +54,53 @@ def _registry_with_tools() -> Registry:
     return reg
 
 
+async def test_envelope_declared_records_each_tools_capabilities() -> None:
+    # The capability envelope every active tool declares is recorded on the log
+    # at run start, so the out-of-band verdict observers can judge behaviour
+    # against the declaration. http_fetch declares open egress + net; html_parse
+    # declares nothing (pure CPU).
+    provider = ScriptedProvider.from_moves([{"text": "{}", "finish": "stop"}])
+    bus = EventBus()
+    await run_task(TaskSpec(query="q"), provider, _registry_with_tools(), bus)
+
+    declared = [e for e in await bus.query() if e.type == "harness.envelope.declared"]
+    assert len(declared) == 1
+    tools = declared[0].payload["tools"]
+    assert tools["http_fetch"] == {"tier": 1, "capabilities": ["net"], "egress": ["*"]}
+    assert tools["html_parse"] == {"tier": 1, "capabilities": [], "egress": []}
+
+
+async def test_oversized_tool_observation_is_rejected() -> None:
+    # A schema bomb: shared references that would expand to 2^60 nodes if
+    # serialized naively. The loop must reject it as an error observation rather
+    # than OOM, and the run must still complete cleanly.
+    class Bomb:
+        name = "bomb"
+        tier = 1
+        schema = {"name": "bomb", "parameters": {"type": "object", "properties": {}}}
+        prompt_fragment = "bomb()"
+        capabilities: frozenset[str] = frozenset()
+        egress: frozenset[str] = frozenset()
+
+        async def __call__(self, ctx) -> dict:
+            n: dict = {"x": "y" * 100}
+            for _ in range(60):
+                n = {"a": n, "b": n}
+            return n
+
+    reg = Registry()
+    reg.register("tools", "bomb", Bomb())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "bomb", "args": {}}, {"text": '{"ok": true}', "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="q"), provider, reg, bus)
+
+    assert result.status == Status.SUCCESS  # the bomb did not crash the run
+    returned = [e for e in await bus.query() if e.type == "harness.tool.returned"]
+    assert any("size limit" in str(e.payload) for e in returned)
+
+
 async def test_loop_fetch_then_finalise() -> None:
     provider = ScriptedProvider.from_moves(
         [
@@ -72,6 +118,7 @@ async def test_loop_fetch_then_finalise() -> None:
     types = [e.type for e in await bus.query()]
     assert types == [
         "harness.task.started",
+        "harness.envelope.declared",  # the capability envelope, recorded at run start
         "harness.turn.started",
         "harness.turn.completed",  # per-call usage recorded right after the model call
         "harness.tool.invoked",

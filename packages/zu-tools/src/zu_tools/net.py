@@ -25,11 +25,18 @@ import os
 import socket
 from urllib.parse import urlsplit
 
+from zu_core.security import SecurityBlock
+
 _ALLOWED_SCHEMES = {"http", "https"}
 
 
-class BlockedURLError(Exception):
-    """Raised when a URL is refused by the SSRF guard."""
+class BlockedURLError(SecurityBlock):
+    """Raised when a URL is refused by the egress guard. A ``SecurityBlock``, so
+    the loop records it as a ``harness.defense.blocked`` event — a refused fetch
+    is a contained attempt, not a silent failure. ``kind`` defaults to
+    ``"fetch_blocked"``; the SSRF path sets ``kind="ssrf"`` and the target host."""
+
+    kind = "fetch_blocked"
 
 
 def _resolve_ips(host: str) -> set[str]:
@@ -92,10 +99,16 @@ def check_url(url: str, *, allow_private: bool | None = None) -> None:
     if allow_private:
         return
 
+    # Note: we deliberately do NOT block on port. Aggressive port-blocking would
+    # break legitimate public APIs on custom ports, and the private-range guard
+    # below already covers the high-value internal targets (metadata, loopback,
+    # RFC1918) regardless of which port they listen on.
     for ip in _resolve_ips(host):
         reason = _ip_blocked_reason(ip)
         if reason is not None:
             raise BlockedURLError(
                 f"refusing to fetch {host!r} -> {ip} ({reason}); "
-                "set ZU_HTTP_ALLOW_PRIVATE=1 to override for local development"
+                "set ZU_HTTP_ALLOW_PRIVATE=1 to override for local development",
+                kind="ssrf",
+                target=host,
             )

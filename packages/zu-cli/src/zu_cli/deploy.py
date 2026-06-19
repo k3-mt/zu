@@ -17,7 +17,6 @@ Docker and is fully testable; only ``local`` touches the daemon.
 from __future__ import annotations
 
 import os
-from typing import Any
 
 TARGETS = ("local", "dockerfile", "compose", "fly", "render")
 

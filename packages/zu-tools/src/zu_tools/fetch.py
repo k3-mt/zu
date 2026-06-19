@@ -6,6 +6,8 @@ from urllib.parse import urljoin
 
 import httpx
 
+from zu_core.ports import CAP_NET, EGRESS_OPEN
+
 from .net import BlockedURLError, check_url
 
 # Default cap on a single fetched body (decompressed). Untrusted pages can be
@@ -27,6 +29,12 @@ class HttpFetch:
         },
     }
     prompt_fragment = "http_fetch(url): fetch a page's raw HTML. Cheapest; try first."
+    # A general web fetcher reaches model-chosen URLs, so it declares open egress
+    # (EGRESS_OPEN) — the high-trust case PHILOSOPHY.md §6 says earns review. Its
+    # host-level SSRF guard (net.check_url) is what bounds the open egress until a
+    # sandbox scopes it; it declares no fs/subprocess capability.
+    capabilities = frozenset({CAP_NET})
+    egress = frozenset({EGRESS_OPEN})
 
     def __init__(
         self,

@@ -21,11 +21,16 @@ htmlcov/
 *.db
 zu.db
 zu.yaml.local
+zu_review.jsonl
+*.review.jsonl
 
 # Editor / OS
 .idea/
 .vscode/
 .DS_Store
+
+# Claude Code local session state
+.claude/
 
 # Secrets
 .env
@@ -38,5 +43,6 @@ zu.yaml.local
 # Internal design / strategy docs — kept local, never in the public repo
 *.docx
 *.pdf
-docs/ARCHITECTURE.md
+# BUILD.md is the internal build-sequence / deferred-gaps ledger — kept local.
+# (ARCHITECTURE.md is public: an onboarding agent needs the structural map.)
 docs/BUILD.md

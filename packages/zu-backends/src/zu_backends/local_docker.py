@@ -20,6 +20,7 @@ real model providers are (build step 7).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -79,8 +80,10 @@ class LocalDockerBackend:
 
     async def launch(self, spec: dict) -> _Sandbox:
         """Start a detached container from ``spec['image']`` with the network
-        locked down by default (the tier's egress policy lives here, not in the
-        host-level SSRF guard) and return an opaque handle."""
+        turned off by default (the sandbox controls network on/off here, distinct
+        from the host-level SSRF guard) and return an opaque handle. Note this is
+        only the on/off switch: *scoped* egress (an allowlist, DNS-pinned hosts)
+        is the deferred egress-policy work, not yet implemented in this backend."""
         image = spec["image"]
         client = self._docker()
         # The Docker SDK is synchronous and a container launch is seconds-long;
@@ -90,8 +93,9 @@ class LocalDockerBackend:
             client.containers.run,
             image,
             detach=True,
-            # No network by default: the sandbox is where a tier's egress policy
-            # is enforced. A tier that needs the public web opts in via spec.
+            # No network by default: the sandbox controls network on/off here. A
+            # tier that needs the public web opts in via spec. (Scoped egress —
+            # an allowlist / DNS-pinning — is the deferred egress-policy work.)
             network_disabled=not spec.get("network", False),
             mem_limit=spec.get("mem_limit", "1g"),
             # Privilege hardening, secure by default: this container runs an
@@ -146,14 +150,20 @@ class LocalDockerBackend:
         text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
         if exit_code != 0:
             return {"status": 500, "html": "", "error": f"render failed (exit {exit_code}): {text[:500]}"}
-        import json
-
         try:
             return json.loads(text)
         except ValueError:
-            # The entrypoint should print JSON; if it printed raw HTML, treat
-            # the whole stdout as the page so a render is never silently lost.
-            return {"status": 200, "html": text}
+            # The entrypoint contract is a JSON line; non-JSON stdout is a broken
+            # render, not a page. Surfacing it as {"status": 200, "html": text}
+            # would launder garbage into a successful observation that the
+            # detectors trust — so return an ERROR observation instead, which the
+            # `error` detector fires on. Raw stdout is preserved (capped) for
+            # debugging, never presented as page content.
+            return {
+                "status": 500,
+                "error": "render produced non-JSON output",
+                "raw": text[:2000],
+            }
 
     async def destroy(self, sandbox: _Sandbox) -> None:
         """Stop and remove the container. Best-effort: a teardown failure must

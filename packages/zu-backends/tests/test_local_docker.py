@@ -127,11 +127,18 @@ async def test_nonzero_exit_becomes_error_observation() -> None:
     assert container.removed is True
 
 
-async def test_raw_html_stdout_is_tolerated() -> None:
-    # If the entrypoint prints HTML instead of JSON, the page isn't lost.
+async def test_non_json_stdout_becomes_error_observation() -> None:
+    # The entrypoint contract is a JSON line; non-JSON stdout is a broken render,
+    # not a page. It must surface as an ERROR observation (so the `error`
+    # detector fires) rather than be laundered into a fake 200 page — but the raw
+    # stdout is preserved for debugging.
     container = _FakeContainer(exit_code=0, output=_RENDERED.encode())
     obs = await _render(container)
-    assert obs == {"status": 200, "html": _RENDERED}
+    assert obs["status"] == 500
+    assert obs["error"] == "render produced non-JSON output"
+    assert obs["raw"] == _RENDERED
+    assert "html" not in obs  # never presented as page content
+    assert container.removed is True
 
 
 async def test_missing_docker_sdk_raises_clear_error() -> None:

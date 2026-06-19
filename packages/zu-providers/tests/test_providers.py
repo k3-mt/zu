@@ -148,11 +148,16 @@ async def test_capabilities_present(make) -> None:
     assert make("text", []).capabilities.native_tools is True
 
 
-async def test_openai_usage_includes_total_tokens() -> None:
-    # The neutral usage dict the cost projection reads carries total_tokens for
-    # the OpenAI shape (Anthropic omits it; the loop sums input+output either way).
-    r = await make_openai("text", []).complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
-    assert r.usage["total_tokens"] == 15
+@pytest.mark.parametrize("make", _PROVIDERS)
+async def test_usage_shape_is_normalised(make) -> None:
+    # The neutral usage dict the cost projection reads carries the SAME keys from
+    # both adapters: input/output/total. OpenAI returns a total on the wire;
+    # Anthropic doesn't, so the adapter computes it (input + output) — either way
+    # the cost projection sees one shape.
+    r = await make("text", []).complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert r.usage["input_tokens"] == 10
+    assert r.usage["output_tokens"] == 5
+    assert r.usage["total_tokens"] == 15  # 10 + 5, whether the API gave it or not
 
 
 def test_api_key_resolution_prefers_explicit_then_env(monkeypatch) -> None:

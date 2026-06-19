@@ -25,7 +25,7 @@ from typing import AsyncIterator
 
 from zu_core.codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from zu_core.contracts import Event
-from zu_core.eventstore import ALLOWED_EVENT_FILTERS, validate_filter
+from zu_core.eventstore import validate_filter
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -169,4 +169,4 @@ class SqliteSink:
             self._conn.close()
 
 
-__all__ = ["SqliteSink", "ALLOWED_EVENT_FILTERS"]
+__all__ = ["SqliteSink"]

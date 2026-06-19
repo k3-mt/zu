@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from zu_core.ports import RunContext, Scope, Severity, Verdict
 
-from . import _html_of
+from . import _contains_any, _html_of
 
 _WALL_MARKERS = (
     "captcha",
@@ -21,8 +21,7 @@ class BotWallDetector:
     scope = Scope.PER_OBSERVATION
 
     def inspect(self, ctx: RunContext) -> Verdict | None:
-        html = _html_of(ctx).lower()
-        if any(m in html for m in _WALL_MARKERS):
+        if _contains_any(_html_of(ctx), _WALL_MARKERS):
             return Verdict(
                 severity=Severity.ESCALATE,
                 detector=self.name,

@@ -162,7 +162,8 @@ zu/
     zu-tools/       # http_fetch, html_parse, render_dom
     zu-detectors/   # empty, error, js-shell, bot-wall
     zu-validators/  # schema, grounding
-    zu-backends/    # local-docker sandbox + sqlite event sink
+    zu-backends/    # local-docker sandbox + sqlite/jsonl event sinks
+    zu-redteam/     # the plugin-test gate + adversarial red team (zu test-plugin)
     zu-cli/         # the `zu` command + `zu serve` (HTTP)
     zu/             # the `import zu` embed facade (published as zu-runtime)
   examples/         # runnable demos (the killer demo lives here)
@@ -171,6 +172,9 @@ zu/
 ## Documentation
 
 - [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install, define a task + config, embed, serve, containerize, schedule, and write your own plugin
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the small core and the six ports, in depth
+- [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — the principles every decision (and every plugin) is held to
+- [`AGENTS.md`](AGENTS.md) — how to navigate and extend this repo (for AI agents and new humans)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up from a clone (`uv sync`), test, and submit changes
 
 ## License

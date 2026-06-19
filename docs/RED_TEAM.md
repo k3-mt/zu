@@ -4,6 +4,27 @@
 
 ---
 
+## Implementation status
+
+This document is both the design and a description of what ships. The gate lives
+in `packages/zu-redteam` and runs via `zu test-plugin <pkg>`.
+
+| Component | Status |
+|-----------|--------|
+| Out-of-band verdict observers (egress · exfil · provenance · resources · neighbour-health) | **Implemented**, deterministic (`zu_redteam.verdict`) |
+| The frozen regression corpus (the §4 attacks) | **Implemented** (`zu_redteam.corpus`) — runs on every gated plugin |
+| The attacker agent + tools + fleet | **Implemented** (`zu_redteam.attacker`): `ScriptedAttacker` (deterministic) |
+| Capability-envelope declaration on the `Tool` port | **Implemented** — recorded as `harness.envelope.declared`; observers judge against it |
+| Gates: unit · contract · interop · adversarial | **Implemented**, run in-process, deterministic, in CI |
+| The container gate (real Docker, in production) | **Designed**; reported `SKIP` until an image is wired — same run, same observers |
+| Live frontier-model discovery (`LiveAttacker`) | **Opt-in** behind `ZU_REDTEAM_LIVE=1`; CI never depends on a live model |
+| Dormant-pivot probe · continuous runtime monitoring (§6) | **Designed**; the verdict observers are already deterministic detectors over the log, ready to run live |
+
+The deterministic gates are the always-on floor; the live discovery and the
+Docker container form are escalations on top of the same observers and corpus.
+
+---
+
 ## 1. Shape and trust boundaries
 
 The gate is three things in three trust boundaries. The single most important property is that **the boundary that decides pass/fail is one neither the target nor the attacker can reach.**

@@ -21,12 +21,12 @@ from zu_core.ports import Capabilities, Finish, ModelRequest, ModelResponse, Too
 
 from ._messages import anthropic_tool, to_anthropic_messages
 
-# Anthropic stop_reason -> neutral Finish. tool_use is handled by the presence
-# of tool calls (set in complete) so a text+tool response still finalises right.
+# Anthropic stop_reason -> neutral Finish. A tool-call finish is decided by the
+# presence of tool calls, not this map, so the ``tool_use`` reason is absent here
+# (a text+tool response still finalises right via presence-of-calls).
 _FINISH = {
     "end_turn": Finish.STOP,
     "stop_sequence": Finish.STOP,
-    "tool_use": Finish.TOOL_CALLS,
     "max_tokens": Finish.LENGTH,
     "refusal": Finish.STOP,
     "pause_turn": Finish.STOP,
@@ -57,7 +57,10 @@ class AnthropicProvider:
         # client is a testability/config seam (an AsyncAnthropic, possibly with a
         # mock transport); None -> construct from the resolved key on first use.
         self._client = client
-        self.capabilities = Capabilities(native_tools=True, vision=True, max_context=1_000_000)
+        # vision=False: the neutral ModelRequest has no image channel yet, so the
+        # adapter never sends or handles image blocks — multimodal is deferred
+        # until the neutral request grows one. Declaring it would be decorative.
+        self.capabilities = Capabilities(native_tools=True, vision=False, max_context=1_000_000)
 
     def _ensure_client(self) -> Any:
         if self._client is None:
@@ -103,7 +106,11 @@ def _to_model_response(resp: Any) -> ModelResponse:
         elif block.type == "tool_use":
             calls.append(ToolCall(name=block.name, args=dict(block.input or {})))
     finish = Finish.TOOL_CALLS if calls else _FINISH.get(resp.stop_reason, Finish.STOP)
-    usage = {"input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens}
+    # Normalised usage shape shared with the openai-compatible adapter:
+    # input/output/total. Anthropic's API doesn't return a total, so compute it
+    # (input + output) — both adapters hand the cost projection the same shape.
+    in_tok, out_tok = resp.usage.input_tokens, resp.usage.output_tokens
+    usage = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok}
     return ModelResponse(
         text="".join(text_parts) or None,
         tool_calls=calls,

@@ -12,8 +12,16 @@ from .codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
 from .projections import SessionState, SessionStore
+from .security import SecurityBlock
 from .sinks import MemoryEventSink
+from .view import RENDER_KEYS, scope_event, scope_payload
 from .ports import (
+    CAP_FS_READ,
+    CAP_FS_WRITE,
+    CAP_NET,
+    CAP_SANDBOX,
+    CAP_SUBPROCESS,
+    EGRESS_OPEN,
     Capabilities,
     Detector,
     EventSink,
@@ -29,6 +37,7 @@ from .ports import (
     ToolCall,
     Validator,
     Verdict,
+    declared_envelope,
 )
 from .registry import (
     REGISTRY,
@@ -63,7 +72,18 @@ __all__ = [
     "PayloadCodec",
     "encode_payload",
     "decode_payload",
+    "SecurityBlock",
+    "scope_event",
+    "scope_payload",
+    "RENDER_KEYS",
     # ports
+    "CAP_NET",
+    "CAP_SANDBOX",
+    "CAP_FS_READ",
+    "CAP_FS_WRITE",
+    "CAP_SUBPROCESS",
+    "EGRESS_OPEN",
+    "declared_envelope",
     "Capabilities",
     "Detector",
     "EventSink",

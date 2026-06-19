@@ -17,7 +17,7 @@ import re
 
 from zu_core.ports import RunContext, Scope, Severity, Verdict
 
-from . import _html_of
+from . import _contains_any, _html_of
 
 # Common SPA mount points / framework markers.
 _SHELL_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__NEXT_DATA__")
@@ -53,9 +53,8 @@ class JsShellDetector:
         html = _html_of(ctx)
         if not html:
             return None
-        lowered = html.lower()
-        looks_like_shell = any(m.lower() in lowered for m in _SHELL_MARKERS)
-        script_heavy = "<script" in lowered
+        looks_like_shell = _contains_any(html, _SHELL_MARKERS)
+        script_heavy = "<script" in html.lower()
         thin = len(_visible_text(html)) < _MIN_VISIBLE_TEXT
         if looks_like_shell and script_heavy and thin:
             return Verdict(

@@ -13,6 +13,12 @@ from __future__ import annotations
 
 # --- harness.* — the runtime's own lifecycle ---------------------------------
 TASK_STARTED = "harness.task.started"
+# Emitted once at run start with the capability envelope every active tool
+# declared: {"tools": {name: {tier, capabilities, egress}}}. This is the
+# machine-readable record the gate's out-of-band verdict observers compare
+# observed behaviour against — "did a plugin reach a host outside its declared
+# egress?" is answerable only because the declaration is on the log.
+ENVELOPE_DECLARED = "harness.envelope.declared"
 TASK_COMPLETED = "harness.task.completed"
 # Emitted in two shapes, distinguished by payload (the documented contract):
 #   climb  -> {"reason", "detail", "from_tier", "to_tier"}  the escalation step
@@ -31,6 +37,11 @@ TOOL_INVOKED = "harness.tool.invoked"
 TOOL_RETURNED = "harness.tool.returned"
 DETECTOR_FIRED = "harness.detector.fired"
 VALIDATION_FAILED = "harness.validation.failed"
+# A contained adversarial/unsafe attempt: a guard refused an action (SSRF/egress
+# block, an oversized "schema bomb" observation, a denied capability). Emitted at
+# the point of containment so a blocked attempt is on the record, never silent —
+# the raw material for the defense review queue and the live dashboard.
+DEFENSE_BLOCKED = "harness.defense.blocked"
 
 # --- data.* — what the agent read and produced -------------------------------
 SOURCE_FETCHED = "data.source.fetched"
@@ -39,6 +50,7 @@ RECORD_EXTRACTED = "data.record.extracted"
 HARNESS_TYPES: frozenset[str] = frozenset(
     {
         TASK_STARTED,
+        ENVELOPE_DECLARED,
         TASK_COMPLETED,
         TASK_ESCALATED,
         TASK_TERMINAL,
@@ -48,6 +60,7 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         TOOL_RETURNED,
         DETECTOR_FIRED,
         VALIDATION_FAILED,
+        DEFENSE_BLOCKED,
     }
 )
 DATA_TYPES: frozenset[str] = frozenset({SOURCE_FETCHED, RECORD_EXTRACTED})

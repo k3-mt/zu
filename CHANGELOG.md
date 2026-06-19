@@ -7,6 +7,89 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Changed — grounding is on by default (correct by default)
+
+`PluginsConfig.validators` now defaults to `[schema, grounding]`. A run is held to
+its output schema *and* every reported value must appear in the content it
+actually fetched — so a fabricated answer is refused (RETRY → terminal), never
+returned as `success`. Dropping `grounding` is now an explicit opt-out; a
+legitimately non-fetching agent (pure Q&A, e.g. the `minimal` template) sets
+`validators: [schema]` on purpose, because grounding has no retrieved content to
+check against. (Templates already set this explicitly; only hand-written configs
+that omitted `validators` change — they get the safe default instead of none.)
+
+### Added — uniform observability: blocked-attempt logging, review queue, live dashboard
+
+Contained attacks are now visible by construction, end to end — and surfaced the
+**same way from every harness** (`zu run`, `import zu`, `zu serve`, `zu mcp`, and
+the `zu test-plugin` gate) via one hook, `attach_observability(bus, cfg)`:
+
+- **A live web dashboard** at `GET /` (`zu serve`) over a global `GET /events`
+  SSE feed: the live run feed for all runs with a highlighted Defenses panel —
+  watch a local process or a deployed container as data is piped in.
+- **Allowlist-render scope.** Networked surfaces (`/events`, `/run/stream`, the
+  dashboard) are **default-deny**: only structural control-plane fields render;
+  content (query, fetched text, extracted values, URL args) is summarized to
+  type/length/sha256 (`zu_core.view.scope_event`). It does not try to *detect*
+  PII — it contains by structure, so the window is safe to leave on in production.
+  The local console trace is `full`; `observability.scope: full` opts a feed in.
+- **`zu test-plugin --watch`** streams each attack live as it runs, so you can
+  see the gate's attacks and the defenses firing in real time.
+
+Contained attacks are now visible by construction:
+
+- **`harness.defense.blocked` events.** A guard that contains an action raises
+  `zu_core.security.SecurityBlock` (the SSRF/egress guard now does), and the loop
+  records it as a defense event — a blocked attempt is on the append-only log,
+  never a silent return. The oversized-observation rejection emits one too.
+- **A review queue.** `zu serve` tees every defense event to a JSONL review queue
+  (`zu_review.jsonl`, configurable), marked `pending`, and exposes `GET /review`.
+  `zu_redteam.DefenseMonitor` is the reusable subscriber for embedders.
+- **A live web dashboard.** `zu serve` now serves an observability dashboard at
+  `GET /` (vanilla JS over a new global `GET /events` SSE feed): the live run feed
+  for all runs, with a highlighted Defenses panel fed by the same stream — watch a
+  local process or a deployed container as data is piped in.
+- **Red-team findings.** `zu test-plugin` now reports per-attack findings — what
+  each attack attempted, the outcome (contained/breached), and **what defended it**
+  (the defenses that fired) — rendered as a table and available as `--json`.
+
+### Added — the plugin-test gate and the adversarial red team (`zu-redteam`)
+
+The adversarial gate from `PHILOSOPHY.md` §3 and `RED_TEAM.md` is now runnable as
+a new `zu-redteam` package and the `zu test-plugin <pkg>` command:
+
+- **Out-of-band, deterministic verdict observers** (the judge): egress, exfil,
+  provenance, resources, neighbour-health. They read the run's event log from
+  outside the target's trust boundary — the attacker only *generates* attacks, it
+  never certifies.
+- **A frozen regression corpus** of the concrete attacks from the threat surface
+  (indirect injection, metadata SSRF, output smuggle, schema bomb, forged event,
+  injected judge), each a deterministic Zu run proving the envelope holds.
+- **The attacker agent + fleet** (`ScriptedAttacker` for the deterministic gate;
+  `LiveAttacker` for opt-in frontier-model discovery behind `ZU_REDTEAM_LIVE=1`).
+- **Graded gates**: unit · contract · interop · adversarial run deterministically;
+  the container gate is the production form, reported when Docker is present.
+
+### Added — the capability envelope is now a declared contract
+
+The `Tool` port carries `capabilities` and `egress` (with `CAP_*` / `EGRESS_OPEN`
+tokens), the loop records each tool's declared envelope to the log at run start
+(`harness.envelope.declared`), and the gate's observers judge behaviour against
+it. The secure-by-default thesis is now a machine-readable contract, not prose.
+
+### Fixed — schema-bomb size guard (found by the new gate)
+
+The loop serialized tool observations with no size cap, so a hostile tool
+returning a shared-reference/exponential structure could OOM the harness. The
+loop now rejects an oversized observation (`_within_size`, lazy `iterencode`)
+as an error observation — "parsing and size limits reject it" made real. Plus a
+batch of audit fixes: detectors now read `text`/`content` observations (not just
+`html`); the local-docker backend no longer mislabels non-JSON render output as a
+200; the openai adapter logs (no longer silently swallows) malformed tool args;
+the jsonl sink and adapter usage shapes were normalized; coercion/message logic
+was de-duplicated; dead code removed. OSS-readiness: `AGENTS.md`, per-package
+READMEs, public `ARCHITECTURE.md`, and ruff in CI.
+
 ### Fixed — robustness found by running the real developer flow
 
 Running a real agent end to end (clean install → `zu init` → a live `gpt-4o-mini`

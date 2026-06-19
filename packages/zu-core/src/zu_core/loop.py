@@ -42,8 +42,10 @@ from .ports import (
     Scope,
     Severity,
     Verdict,
+    declared_envelope,
 )
 from .registry import REGISTRY, Registry
+from .security import SecurityBlock
 
 log = logging.getLogger("zu.loop")
 
@@ -53,6 +55,30 @@ _RANK = {Severity.WARN: 0, Severity.RETRY: 1, Severity.ESCALATE: 2, Severity.TER
 # Observation keys that carry retrieved page content — stored once (in a
 # data.source.fetched event), summarised in the harness.tool.returned event.
 _CONTENT_KEYS = ("html", "text", "content")
+
+# Hard cap on a single tool observation's serialized size. A hostile tool can
+# return an enormous, deeply-nested, or shared-reference ("schema bomb")
+# structure that explodes when serialized (to the model message and to the event
+# log) and OOMs the harness. We reject it gracefully instead — the secure-by-
+# default claim that "parsing and size limits reject it" made real.
+_MAX_OBSERVATION_BYTES = 1_000_000
+
+
+def _within_size(obj: Any, max_bytes: int = _MAX_OBSERVATION_BYTES) -> bool:
+    """True iff ``obj`` serializes to <= max_bytes of JSON — checked WITHOUT
+    materializing a pathological structure. ``iterencode`` yields lazily, so an
+    exponential/shared-reference bomb is caught after the first max_bytes of
+    output rather than after full (2^depth) expansion; a circular reference
+    raises ValueError and is likewise rejected."""
+    total = 0
+    try:
+        for chunk in json.JSONEncoder(default=str).iterencode(obj):
+            total += len(chunk)
+            if total > max_bytes:
+                return False
+    except ValueError:
+        return False
+    return True
 
 
 def _materialize(obj: Any) -> Any:
@@ -226,6 +252,20 @@ async def run_task(
 
     run.root = await run.emit(ev.TASK_STARTED, {"query": spec.query, "target": spec.target})
 
+    # Record each tool's declared capability envelope onto the log at run start,
+    # so the out-of-band verdict observers (the gate, and the always-on runtime
+    # checks) can judge observed behaviour against what each plugin declared.
+    await run.emit(
+        ev.ENVELOPE_DECLARED,
+        {
+            "tools": {
+                name: {"tier": _tier_of(t), **declared_envelope(t)}
+                for name, t in tools.items()
+            }
+        },
+        parent=run.root,
+    )
+
     messages = _initial_messages(spec, ladder.active().values())
 
     start = time.monotonic()
@@ -380,9 +420,34 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
     else:
         try:
             obs = await tool(run.ctx(), **args)
+        except SecurityBlock as block:
+            # A guard contained the action (e.g. an SSRF/egress refusal). Record
+            # it as a defense so the blocked attempt is on the log, then surface
+            # it to the model as an error observation like any other failure.
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": block.kind, "tool": name, "target": block.target, "detail": str(block)},
+                parent=turn,
+                source=name,
+            )
+            log.warning("tool %r blocked (%s): %s", name, block.kind, block)
+            obs = {"error": f"{type(block).__name__}: {block}", "blocked": block.kind}
         except Exception as exc:  # noqa: BLE001 - tool failure is an observation
             log.warning("tool %r raised %s: %s", name, type(exc).__name__, exc)
             obs = {"error": f"{type(exc).__name__}: {exc}"}
+        # Reject an oversized/unserialisable observation before it is stored or
+        # forwarded — a schema bomb is contained here, not after it has OOMed.
+        if not _within_size(obs):
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": "oversized_observation", "tool": name,
+                 "detail": "tool observation exceeds the size limit and was rejected"},
+                parent=turn,
+                source=name,
+            )
+            log.warning("tool %r returned an oversized observation; rejecting it", name)
+            obs = {"error": "tool observation exceeds the size limit and was rejected",
+                   "blocked": "oversized_observation"}
     # When the observation carried retrieved content, store it once in a data
     # event (the provenance grounding reads in step 6) and summarise it in the
     # tool.returned event, so a fetched page isn't duplicated in the log. The

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from zu_core.ports import SandboxBackend, ToolCall
+from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, SandboxBackend, ToolCall
 
 # The sandbox image is a spec detail, not a hard-coded constant in the loop:
 # the backend launches it. The published Playwright/Chromium image is the default
@@ -43,6 +43,12 @@ class RenderDom:
         "render_dom(url): render a page in a real browser (JS executed). "
         "More expensive than http_fetch; use when a page needs JavaScript."
     )
+    # Provisions a sandbox (CAP_SANDBOX) and renders a model-chosen URL inside
+    # it, so it declares open egress (the browser must reach the page). The
+    # sandbox is where that egress is *enforced* and where scoping it to the
+    # target is the deferred egress-policy work — but the declaration lives here.
+    capabilities = frozenset({CAP_NET, CAP_SANDBOX})
+    egress = frozenset({EGRESS_OPEN})
 
     def __init__(self, backend: SandboxBackend | None = None, image: str = _DEFAULT_IMAGE) -> None:
         # backend None -> the local-docker default, imported lazily so this

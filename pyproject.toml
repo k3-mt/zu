@@ -16,6 +16,7 @@ dependencies = [
     "zu-detectors",
     "zu-validators",
     "zu-backends",
+    "zu-redteam",
     "zu-cli",
     "zu-runtime",
 ]
@@ -33,6 +34,7 @@ zu-tools      = { workspace = true }
 zu-detectors  = { workspace = true }
 zu-validators = { workspace = true }
 zu-backends   = { workspace = true }
+zu-redteam    = { workspace = true }
 zu-cli        = { workspace = true }
 zu-runtime    = { workspace = true }
 

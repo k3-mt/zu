@@ -61,6 +61,43 @@ class ModelProvider(Protocol):
     async def complete(self, req: ModelRequest) -> ModelResponse: ...
 
 
+# --- the capability envelope ---------------------------------------------
+#
+# The security thesis (see PHILOSOPHY.md §5–6): a plugin **declares** the
+# capabilities it needs and the hosts it reaches, so its blast radius is visible
+# in its own code and a runtime/sandbox can bound it mechanically. The
+# declaration is the *what*; a SandboxBackend is the *enforcement*. These tokens
+# are the machine-readable contract the gate's verdict observers compare actual
+# behaviour against — without them, "least privilege" is prose, not a contract.
+
+CAP_NET = "net"  # opens outbound network connections
+CAP_SANDBOX = "sandbox"  # provisions/runs a sandbox (e.g. a tier-2 container)
+CAP_FS_READ = "fs:read"  # reads the host filesystem
+CAP_FS_WRITE = "fs:write"  # writes the host filesystem
+CAP_SUBPROCESS = "subprocess"  # spawns a subprocess
+
+# The egress allowlist sentinel for a plugin that legitimately needs the open
+# internet (a general web-fetch tool, by definition). It is *not* a default:
+# declaring it is the high-trust request PHILOSOPHY.md §6 says earns review.
+# Any other egress entry is a specific host the plugin is allowed to reach;
+# an empty ``egress`` means the plugin reaches nothing.
+EGRESS_OPEN = "*"
+
+
+def declared_envelope(plugin: Any) -> dict[str, Any]:
+    """The capability envelope a plugin declares, read defensively.
+
+    A plugin that omits ``capabilities``/``egress`` is treated as least
+    privilege (no capabilities, no egress) — the safe default — so the
+    declaration is opt-in for plugins and never crashes the loop on an older
+    plugin that predates the fields. Returns plain sorted lists so the value is
+    JSON-serialisable straight into the event log.
+    """
+    caps = getattr(plugin, "capabilities", None) or ()
+    egress = getattr(plugin, "egress", None) or ()
+    return {"capabilities": sorted(caps), "egress": sorted(egress)}
+
+
 # --- in-loop ports -------------------------------------------------------
 
 
@@ -110,6 +147,14 @@ class Tool(Protocol):
     # The loop reads it defensively (``getattr(tool, "tier", 1)``) so a tool
     # that omits it is treated as tier 1.
     tier: int
+
+    # The capability envelope (see CAP_* / EGRESS_OPEN above). ``capabilities``
+    # is the least-privilege set of capability tokens the tool needs; ``egress``
+    # is its host allowlist (``{EGRESS_OPEN}`` for the reviewed open-internet
+    # case, empty for none). Both are read defensively via ``declared_envelope``,
+    # so a tool that omits them is treated as needing nothing — the safe default.
+    capabilities: frozenset[str]
+    egress: frozenset[str]
 
     async def __call__(self, ctx: RunContext, **kwargs: Any) -> dict: ...
 
