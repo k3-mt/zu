@@ -65,19 +65,22 @@ pip install 'zu-runtime[all]'         # everything (web + both SDKs + server + D
 Each plugin is also a standalone package (`pip install zu-tools`, `zu-providers`, …),
 the way dbt ships adapters. `zu plugins` lists whatever you've installed.
 
-Try it offline and deterministic — no key, no network, no Docker:
+Prove it runs — `zu demo` runs against a **real model** (that's the point: prove
+runnability, not just wired logic):
 
 ```bash
-zu demo --type minimal            # smallest loop (model answers, schema-validated) — runs on the base
-pip install 'zu-runtime[demo]'    # the escalation demo uses the web tools
-zu demo                           # fetch → fail on JS → escalate to a browser → validate
-zu demo --provider anthropic --model claude-sonnet-4-6   # with ANTHROPIC_API_KEY or --api-key
+export ANTHROPIC_API_KEY=sk-...
+pip install 'zu-runtime[demo,anthropic]'
+zu demo --model claude-sonnet-4-6     # real http_fetch + extract + validate (tier 1)
+zu demo --type minimal --model claude-sonnet-4-6   # no tools — needs only a key
+zu demo --offline                     # scripted self-test (no key) — proves wiring, not a real run
 ```
 
-**Prerequisites:** Python 3.11+ is all you need to install, demo, embed, serve,
-or run tier-1 web extraction. An API key is needed only for a **real model**, and
-**Docker only** if a run escalates to the real tier-2 browser (`render_dom`). See
-[`docs/QUICKSTART.md`](docs/QUICKSTART.md#prerequisites).
+**Prerequisites — the requirement ladder:** Python 3.11+ (always) · an **API key**
+for a real model · **+ network** for tier-1 web tools (`http_fetch`/`html_parse`) ·
+**+ Docker** only for the tier-2 browser (`render_dom`). So tier 1 needs *network,
+not Docker*; only the real browser tier needs Docker (and that image isn't
+published yet). See [`docs/QUICKSTART.md`](docs/QUICKSTART.md#prerequisites).
 
 ```
 providers   anthropic, openai-compatible, scripted

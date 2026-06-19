@@ -152,27 +152,34 @@ def serve(
 @app.command()
 def demo(
     type: str = typer.Option(
-        "escalation", "--type", "-t",
-        help="Which demo: escalation (web arc, needs [demo] extra) | minimal (no tools, runs on base).",
+        "web", "--type", "-t",
+        help="Which demo: web (default, tier-1 real fetch) | minimal (no tools) | escalation (tier-2).",
+    ),
+    model: str = typer.Option(
+        None, "--model", help="Model id for the real run (required unless --offline)."
     ),
     provider: str = typer.Option(
-        "scripted", "--provider", help="scripted (offline, default) | anthropic | openai-compatible"
+        None, "--provider", help="Provider name (defaults to anthropic when --model is given)."
     ),
-    model: str = typer.Option(None, "--model", help="Model id for a real provider."),
     api_key: str = typer.Option(
-        None, "--api-key", help="API key for a real provider (or set the provider's env var)."
+        None, "--api-key", help="API key for the real run (or set the provider's env var)."
     ),
     api_key_env: str = typer.Option(None, "--api-key-env", help="Env var holding the API key."),
     base_url_env: str = typer.Option(
         None, "--base-url-env", help="Env var holding the base URL (openai-compatible)."
     ),
+    offline: bool = typer.Option(
+        False, "--offline", help="Self-test with a scripted model + fixtures (proves wiring, not a real run)."
+    ),
 ) -> None:
-    """Run a demo. --type escalation (default) shows the fetch → fail-on-JS →
-    escalate-to-browser → validate arc (needs the [demo] extra); --type minimal
-    is the smallest loop (a model answers, schema-validated) and runs on the base.
+    """Run a demo against a real model — proving Zu actually runs, not just that
+    the logic is wired. Requires --model (and a key) by default.
 
-    Offline by default (fake model, fixtures — no key, no network, no Docker).
-    Pass --provider/--model (and a key) to watch a real model do it.
+    --type web (default) does a real tier-1 fetch + extract (API key + network,
+    no Docker); minimal is a no-tools model call (API key only); escalation is
+    the tier-2 arc (needs Docker — real path not yet available; use --offline).
+
+    --offline replays a scripted, fixtured run for CI / a wiring self-test.
     """
     import asyncio as _asyncio
 
@@ -184,8 +191,19 @@ def demo(
         )
         raise typer.Exit(code=2)
 
-    # Fail fast with the install hint if this demo needs the web tools and they
-    # aren't installed — rather than partway through the run.
+    # A real run is the point: require a model unless self-testing the wiring.
+    if not offline and not model:
+        typer.echo(
+            "zu demo runs against a real model to prove it works. Pass --model "
+            "(provider defaults to anthropic) and set the provider's API key — e.g.:\n"
+            "  export ANTHROPIC_API_KEY=...\n"
+            "  zu demo --model claude-sonnet-4-6\n"
+            "Or self-test the wiring offline (no key): zu demo --offline",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Fail fast with the install hint if this demo needs the web tools.
     if _demo.DEMOS[type]["needs_web"]:
         try:
             _demo.ensure_web_tools()
@@ -195,12 +213,12 @@ def demo(
 
     try:
         prov, label = _demo.build_provider(
-            provider, model, api_key, api_key_env, base_url_env, kind=type
+            provider, model, api_key, api_key_env, base_url_env, kind=type, offline=offline
         )
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
         raise typer.Exit(code=2)
-    raise typer.Exit(code=_asyncio.run(_demo.run_demo(prov, label, kind=type)))
+    raise typer.Exit(code=_asyncio.run(_demo.run_demo(prov, label, kind=type, offline=offline)))
 
 
 @app.command()

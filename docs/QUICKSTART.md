@@ -57,25 +57,39 @@ Verify and see every plugin the runtime discovered:
 zu plugins
 ```
 
-### Try it instantly
+### Try it for real
 
-Two demos, pick with `--type`:
+The demo runs against a **real model** — the point is to prove Zu actually runs,
+not just that the logic is wired. So it needs an API key. Pick a demo with
+`--type` (each needs a bit more than the last):
 
 ```bash
-# minimal — the smallest real loop (a model answers, schema-validated). No tools,
-# no network, no extra install: runs on the bare base.
-zu demo --type minimal
+export ANTHROPIC_API_KEY=sk-...
 
-# escalation (default) — the full arc: fetch → fail on JS → escalate to a browser
-# → validate. Uses the web tools, so install the demo extra first:
-pip install 'zu-runtime[demo]'    # alias for [web]
-zu demo
+# minimal — a model answers a question as JSON, schema-validated. No tools, no
+# network. Needs: an API key (and the model SDK: pip install 'zu-runtime[anthropic]').
+zu demo --type minimal --model claude-sonnet-4-6
+
+# web (default) — a real http_fetch of a real page + the model extracts a field +
+# validation. This is TIER 1: needs an API key + network, the [demo] extra — NO Docker.
+pip install 'zu-runtime[demo,anthropic]'
+zu demo --model claude-sonnet-4-6
 ```
 
-Both run offline with the fake model and saved fixtures — no key, no network, no
-Docker. (On the bare base, `zu demo` prints the one-line `[demo]` install hint.)
-To watch a **real model** do it (the page stays fixtured, so still no Docker),
-pass a provider, a model, and your key:
+Other providers work the same way (`--provider openai-compatible --model … --base-url-env …`).
+
+**Self-test without a key** — replays a scripted, fixtured run to prove the
+*wiring* (handy for CI); it is labelled as not-a-real-run:
+
+```bash
+zu demo --offline                 # web wiring (fixtured fetch)
+zu demo --offline --type escalation   # the escalation logic (fixtured browser)
+```
+
+> **`escalation` (tier 2)** is the full fetch → fail-on-JS → escalate-to-browser
+> arc. The real path needs **Docker** *and* a published headless-Chromium image,
+> which isn't available yet — so today escalation is `--offline` only. A real
+> `web` (tier-1) run is the end-to-end proof you can do today with just a key.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
