@@ -28,6 +28,27 @@ Verify and see every plugin the runtime discovered:
 zu plugins
 ```
 
+### Try it instantly
+
+```bash
+zu demo
+```
+
+Runs the whole arc — fetch → fail on JavaScript → escalate to a browser →
+validate — with the fake model and saved fixtures: no key, no network, no
+Docker. To watch a **real model** make the same escalation decision (the page
+stays fixtured, so still no Docker), pass a provider, a model, and your key:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+zu demo --provider anthropic --model claude-sonnet-4-6
+# or pass the key directly, without an env var:
+zu demo --provider anthropic --model claude-sonnet-4-6 --api-key sk-...
+```
+
+Real providers need their SDK — `pip install 'zu-runtime[anthropic]'` (or
+`[openai]`). No key is ever bundled with the package; you always supply your own.
+
 ## 2. Define the agent: a config and a task
 
 **`zu.yaml`** — how to run (the model is a one-line swap):
@@ -110,6 +131,19 @@ result, events = zu.run_with_events("task.yaml", config="zu.yaml")
 agent = zu.Zu(config="zu.yaml")
 r = agent.run({"query": "..."})
 ```
+
+Passing a key your app already holds (in-memory, never written to a file): put
+`api_key` in the provider block of a **config dict** (not a committed YAML):
+
+```python
+result = zu.run(task, config={
+    "provider": {"name": "anthropic", "model": "claude-sonnet-4-6", "api_key": my_key},
+    "plugins": {"validators": ["schema"]},
+})
+```
+
+Prefer `api_key_env` (naming the env var) in files so a secret is never
+committed; use the direct `api_key` only for in-memory configs.
 
 ## 5. Serve it — as an HTTP service
 

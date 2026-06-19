@@ -95,6 +95,16 @@ def test_unknown_provider_is_a_clear_error():
         build_provider(ProviderConfig(name="nope"))
 
 
+def test_provider_accepts_a_direct_api_key(monkeypatch):
+    # A key supplied programmatically (not via env) is carried onto the adapter,
+    # so an embedder can pass a key their app already holds.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    provider = build_provider(
+        ProviderConfig(name="anthropic", model="claude-x", api_key="sk-test-123")
+    )
+    assert provider.api_key == "sk-test-123"
+
+
 # --- only the named plugins are active ---------------------------------------
 
 

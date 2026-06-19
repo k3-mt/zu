@@ -42,26 +42,38 @@ class AnthropicProvider:
         self,
         model: str = "claude-opus-4-8",
         api_key_env: str = "ANTHROPIC_API_KEY",
+        api_key: str | None = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         client: Any = None,
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
+        # An explicit key (for programmatic / in-memory use, e.g. zu.run with a
+        # key your app already holds). Prefer ``api_key_env`` so the key never
+        # lands in a committed config file; either way it stays out of the
+        # model's context. Never hard-code or ship a key.
+        self.api_key = api_key
         self.max_tokens = max_tokens
         # client is a testability/config seam (an AsyncAnthropic, possibly with a
-        # mock transport); None -> construct from the env key on first use.
+        # mock transport); None -> construct from the resolved key on first use.
         self._client = client
         self.capabilities = Capabilities(native_tools=True, vision=True, max_context=1_000_000)
 
     def _ensure_client(self) -> Any:
         if self._client is None:
-            import anthropic
+            try:
+                import anthropic
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "the anthropic provider needs the SDK: "
+                    "pip install 'zu-runtime[anthropic]'"
+                ) from exc
 
-            key = os.environ.get(self.api_key_env)
+            key = self.api_key or os.environ.get(self.api_key_env)
             if not key:
                 raise RuntimeError(
-                    f"{self.api_key_env} is not set; export it to use the anthropic provider "
-                    "(the key is read here, never placed in the model's context or config)."
+                    f"no Anthropic API key: pass api_key=... or set ${self.api_key_env} "
+                    "(the key is read here, never placed in the model's context or a config file)."
                 )
             self._client = anthropic.AsyncAnthropic(api_key=key)
         return self._client

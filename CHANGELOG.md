@@ -7,6 +7,26 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — `zu demo`, and providers accept a direct API key
+
+Make the demo runnable straight from a `pip install`, and let the package take a
+key your app already holds (we never ship or require one).
+
+- **`zu demo`** — the killer-demo arc is now shipped *in the package*
+  (`zu_cli.demo`) and exposed as a command, so a freshly installed `zu demo`
+  runs the full fetch → fail-on-JS → escalate → validate arc with zero setup
+  (no key, no network, no Docker). `--provider/--model` (with `--api-key` or an
+  env var) drives the same arc through a real model. `examples/killer_demo.py` is
+  now a thin wrapper over the same code (one source of truth).
+- **Direct API key.** `AnthropicProvider` and `OpenAICompatibleProvider` accept
+  `api_key=` (and the openai one `base_url=`) for programmatic use, resolved as
+  *explicit arg → env var* — so an embedder can pass a key in memory. Config and
+  the facade thread it through (`provider.api_key`). `api_key_env` remains the
+  preferred, file-safe default; a key is never placed in a committed config or
+  the model's context.
+- A missing provider SDK now raises a clear install hint
+  (`pip install 'zu-runtime[anthropic]'`) instead of a bare ImportError.
+
 ### Added — build step 9: the killer demo (v1 core complete)
 
 `examples/killer_demo.py` — the whole arc in one run, demonstrating all three

@@ -155,6 +155,19 @@ async def test_openai_usage_includes_total_tokens() -> None:
     assert r.usage["total_tokens"] == 15
 
 
+def test_api_key_resolution_prefers_explicit_then_env(monkeypatch) -> None:
+    # A directly-passed key works with no env var set; without either, the
+    # adapter raises a clear error rather than calling the API with no auth.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    AnthropicProvider(model="claude-x", api_key="sk-explicit")._ensure_client()  # no raise
+
+    with pytest.raises(RuntimeError, match="no Anthropic API key"):
+        AnthropicProvider(model="claude-x")._ensure_client()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+    AnthropicProvider(model="claude-x")._ensure_client()  # resolves from env
+
+
 async def test_native_tools_false_raises_not_implemented() -> None:
     # The prompt-based tool fallback for non-native-tool models is deferred;
     # the adapter must raise clearly, never silently guess.

@@ -43,6 +43,8 @@ class OpenAICompatibleProvider:
         model: str,
         base_url_env: str = "OPENAI_BASE_URL",
         api_key_env: str = "OPENAI_API_KEY",
+        api_key: str | None = None,
+        base_url: str | None = None,
         native_tools: bool = True,
         max_tokens: int | None = None,
         client: Any = None,
@@ -50,19 +52,30 @@ class OpenAICompatibleProvider:
         self.model = model
         self.base_url_env = base_url_env
         self.api_key_env = api_key_env
+        # Explicit key/base_url for programmatic use; prefer the *_env forms so a
+        # key never lands in a committed config. Either way it stays out of the
+        # model's context. Never hard-code or ship a key.
+        self.api_key = api_key
+        self.base_url = base_url
         self.max_tokens = max_tokens
         self._client = client
         self.capabilities = Capabilities(native_tools=native_tools)
 
     def _ensure_client(self) -> Any:
         if self._client is None:
-            import openai
+            try:
+                import openai
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "the openai-compatible provider needs the SDK: "
+                    "pip install 'zu-runtime[openai]'"
+                ) from exc
 
             # Local servers (Ollama/vLLM) need no key; the SDK still wants a
             # non-empty string, so fall back to a placeholder. Base URL is
             # optional (defaults to OpenAI) and read from the env when set.
-            key = os.environ.get(self.api_key_env) or "not-needed"
-            base_url = os.environ.get(self.base_url_env) or None
+            key = self.api_key or os.environ.get(self.api_key_env) or "not-needed"
+            base_url = self.base_url or os.environ.get(self.base_url_env) or None
             self._client = openai.AsyncOpenAI(api_key=key, base_url=base_url)
         return self._client
 

@@ -150,6 +150,38 @@ def serve(
 
 
 @app.command()
+def demo(
+    provider: str = typer.Option(
+        "scripted", "--provider", help="scripted (offline, default) | anthropic | openai-compatible"
+    ),
+    model: str = typer.Option(None, "--model", help="Model id for a real provider."),
+    api_key: str = typer.Option(
+        None, "--api-key", help="API key for a real provider (or set the provider's env var)."
+    ),
+    api_key_env: str = typer.Option(None, "--api-key-env", help="Env var holding the API key."),
+    base_url_env: str = typer.Option(
+        None, "--base-url-env", help="Env var holding the base URL (openai-compatible)."
+    ),
+) -> None:
+    """Run the killer demo: fetch → fail on JS → escalate to a browser → validate.
+
+    Offline by default (fake model, fixtures — no key, no network, no Docker).
+    Pass --provider/--model (and a key) to watch a real model make the same
+    escalation decision; the page stays fixtured so no Docker is needed.
+    """
+    import asyncio as _asyncio
+
+    from . import demo as _demo
+
+    try:
+        prov, label = _demo.build_provider(provider, model, api_key, api_key_env, base_url_env)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=_asyncio.run(_demo.run_demo(prov, label)))
+
+
+@app.command()
 def plugins() -> None:
     """List every plugin Zu can discover (providers, tools, detectors, ...)."""
     # The shared process registry, so this lists the same plugins the loop sees

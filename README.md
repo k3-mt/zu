@@ -55,7 +55,13 @@ with zero setup. What remains is breadth behind the existing ports, not new core
 pip install zu-runtime            # the library + the `zu` CLI + every built-in plugin
 pip install 'zu-runtime[all]'     # + HTTP server, Anthropic/OpenAI SDKs, Docker sandbox
 zu plugins                        # list every discovered plugin across all six ports
+zu demo                           # run the full arc instantly — no key, no network, no Docker
 ```
+
+See the whole thing work the moment it's installed: `zu demo` fetches a JS page,
+**fails on JavaScript, escalates to a browser**, and returns validated data —
+offline and deterministic. Add `--provider anthropic --model claude-sonnet-4-6`
+(with `ANTHROPIC_API_KEY` set, or `--api-key`) to watch a real model do it.
 
 ```
 providers   anthropic, openai-compatible, scripted

@@ -55,6 +55,11 @@ class ProviderConfig(BaseModel):
     model: str | None = None
     api_key_env: str | None = None
     base_url_env: str | None = None
+    # Direct key/URL for *programmatic* use (a key your app already holds). Prefer
+    # the *_env forms in files so a secret is never committed; an explicit api_key
+    # here is meant for in-memory config dicts, not checked-in YAML.
+    api_key: str | None = None
+    base_url: str | None = None
     max_tokens: int | None = None
     script: list[dict] | None = None
     options: dict[str, Any] = Field(default_factory=dict)
@@ -211,6 +216,8 @@ def build_provider(cfg: ProviderConfig, catalog: Registry | None = None) -> Mode
         "model": cfg.model,
         "api_key_env": cfg.api_key_env,
         "base_url_env": cfg.base_url_env,
+        "api_key": cfg.api_key,
+        "base_url": cfg.base_url,
         "max_tokens": cfg.max_tokens,
         **cfg.options,
     }
