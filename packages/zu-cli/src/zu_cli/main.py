@@ -182,7 +182,7 @@ def demo(
         None, "--model", help="Model id for the real run (required unless --offline)."
     ),
     provider: str = typer.Option(
-        None, "--provider", help="Provider name (defaults to anthropic when --model is given)."
+        None, "--provider", help="Provider name (required for a real run; no default)."
     ),
     api_key: str = typer.Option(
         None, "--api-key", help="API key for the real run (or set the provider's env var)."

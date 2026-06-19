@@ -101,6 +101,16 @@ async def test_network_enabled_when_requested() -> None:
     assert client.containers.run_kwargs["network_disabled"] is False
 
 
+async def test_extra_hosts_dns_pin_is_passed_to_docker() -> None:
+    # The validated target host->IP pin reaches the container as extra_hosts.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "network": True, "extra_hosts": {"shop.test": "93.184.216.34"}})
+    kw = client.containers.run_kwargs
+    assert kw is not None and kw["extra_hosts"] == {"shop.test": "93.184.216.34"}
+
+
 async def test_container_is_hardened_by_default() -> None:
     # The tier-2 container runs an untrusted, model-chosen URL: it must drop all
     # caps, forbid privilege escalation, and bound pids by default.

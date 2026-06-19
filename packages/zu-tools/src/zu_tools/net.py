@@ -25,6 +25,8 @@ import os
 import socket
 from urllib.parse import urlsplit
 
+import httpx
+
 from zu_core.security import SecurityBlock
 
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -112,3 +114,64 @@ def check_url(url: str, *, allow_private: bool | None = None) -> None:
                 kind="ssrf",
                 target=host,
             )
+
+
+def pin_ip(host: str) -> str:
+    """Resolve ``host`` ONCE, validate every address, and return one validated IP
+    to pin a connection to. This is the *authoritative* resolution: closing the
+    DNS-rebinding TOCTOU means the address we validate is the address we connect
+    to, with no second lookup in between. Raises ``BlockedURLError`` if any
+    resolved address is internal (same default-deny as ``check_url``)."""
+    ips = _resolve_ips(host)
+    for ip in ips:
+        reason = _ip_blocked_reason(ip)
+        if reason is not None:
+            raise BlockedURLError(
+                f"refusing to connect to {host!r} -> {ip} ({reason})",
+                kind="ssrf",
+                target=host,
+            )
+    # Prefer an IPv4 address for the pin (broadest reachability); else any.
+    for ip in ips:
+        if ":" not in ip:
+            return ip
+    return next(iter(ips))
+
+
+class PinnedTransport(httpx.AsyncBaseTransport):
+    """An SSRF-safe httpx transport that closes the DNS-rebinding TOCTOU.
+
+    ``check_url`` validates a host's addresses, but httpx would re-resolve
+    independently at connect time — a low-TTL record can answer with a public IP
+    on the first lookup and ``169.254.169.254`` on the second, slipping past the
+    check. This transport performs the authoritative resolution itself: it
+    validates the host and **pins the connection to a validated IP**, while
+    preserving the original hostname for the ``Host`` header and the TLS SNI (via
+    httpcore's ``sni_hostname`` extension), so certificate validation is
+    unchanged. There is no second, unvalidated lookup. ``allow_private`` (None ⇒
+    ``ZU_HTTP_ALLOW_PRIVATE``) skips pinning for local development."""
+
+    def __init__(
+        self,
+        *,
+        allow_private: bool | None = None,
+        inner: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._allow_private = allow_private
+        self._inner = inner or httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        allow_private = self._allow_private
+        if allow_private is None:
+            allow_private = os.environ.get("ZU_HTTP_ALLOW_PRIVATE") == "1"
+        host = request.url.host
+        if not allow_private and host and request.url.scheme in _ALLOWED_SCHEMES:
+            ip = pin_ip(host)  # authoritative resolve+validate, raises if internal
+            # Keep the original hostname for TLS SNI / cert validation; the Host
+            # header httpx already set from the URL stays the original host too.
+            request.extensions = {**request.extensions, "sni_hostname": host}
+            request.url = request.url.copy_with(host=ip)
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()

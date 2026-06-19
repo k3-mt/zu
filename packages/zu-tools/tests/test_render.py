@@ -77,6 +77,17 @@ async def test_render_applies_ssrf_guard_before_leasing_a_sandbox() -> None:
     assert backend.destroyed == 0
 
 
+async def test_render_pins_target_dns_to_validated_ip() -> None:
+    # Tier-2 DNS pin: the validated target IP is passed as extra_hosts so the
+    # browser cannot be rebound to an internal address. An IP-literal URL needs
+    # no DNS, so this runs offline.
+    backend = _FakeBackend()
+    await RenderDom(backend=backend, allow_private=False).__call__(
+        ctx=None, url="http://93.184.216.34/page"
+    )
+    assert backend.launched[0]["extra_hosts"] == {"93.184.216.34": "93.184.216.34"}
+
+
 async def test_render_threads_viewport_into_the_tool_call() -> None:
     # A requested viewport reaches the backend exec (responsive pages need width).
     captured: dict = {}

@@ -16,11 +16,13 @@ escalation ladder is proven offline.
 
 from __future__ import annotations
 
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, SandboxBackend, ToolCall
 
-from .net import check_url
+from .net import check_url, pin_ip
 
 # Default browser viewport. Chromium otherwise falls back to Playwright's
 # implicit 1280x720; we set it explicitly so the rendered DOM is reproducible
@@ -103,7 +105,20 @@ class RenderDom:
         # container is expensive and must not leak even if the render raises.
         # ``network`` is required: a browser with egress disabled cannot fetch
         # the page it is asked to render.
-        sandbox = await backend.launch({"image": self.image, "tier": self.tier, "network": True})
+        spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
+        # Pin the container's DNS for the target host to the validated IP, so the
+        # browser cannot be DNS-rebound to an internal address at connect time —
+        # the tier-2 analogue of tier-1's PinnedTransport. (Full egress
+        # *allowlisting* — blocking other hosts a page's subresources point at —
+        # needs a firewall-capable sandbox; this closes the rebind for the target.)
+        allow_private = (
+            self.allow_private if self.allow_private is not None
+            else os.environ.get("ZU_HTTP_ALLOW_PRIVATE") == "1"
+        )
+        host = urlsplit(url).hostname
+        if not allow_private and host:
+            spec["extra_hosts"] = {host: pin_ip(host)}
+        sandbox = await backend.launch(spec)
         args: dict[str, Any] = {
             "url": url,
             "width": int(width) if width else _DEFAULT_WIDTH,

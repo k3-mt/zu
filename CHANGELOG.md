@@ -7,6 +7,21 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — DNS-rebinding closed; tier-2 render DNS-pinned (Level C: scoped egress)
+
+- **`http_fetch` closes the DNS-rebinding TOCTOU.** A new `net.PinnedTransport`
+  does the single authoritative resolve+validate and pins the connection to a
+  validated IP, keeping the original hostname for the `Host` header and TLS SNI —
+  so a low-TTL record can no longer answer "public" to the check and "internal" to
+  the connect. `http_fetch` uses it by default; an injected transport (tests) is
+  used as-is. Validated against the real network (TLS to example.com still works).
+- **Tier-2 render is DNS-pinned too.** `render_dom` passes the validated
+  `host -> IP` to the container as `extra_hosts`, so the browser cannot be rebound
+  to an internal address. (Full egress *allowlisting* of a page's other
+  subresources remains a firewall-capable-sandbox job, documented as such.)
+- No flagship adapter: removed the last "defaults to anthropic" help string —
+  every provider is equal, and a run must name the one it uses.
+
 ### Added — plugin interface-versioning (MLR §6)
 
 Each plugin port now carries a major interface version (`ports.INTERFACE_VERSION`),

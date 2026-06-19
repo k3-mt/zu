@@ -100,9 +100,13 @@ class LocalDockerBackend:
             image,
             detach=True,
             # No network by default: the sandbox controls network on/off here. A
-            # tier that needs the public web opts in via spec. (Scoped egress —
-            # an allowlist / DNS-pinning — is the deferred egress-policy work.)
+            # tier that needs the public web opts in via spec.
             network_disabled=not spec.get("network", False),
+            # DNS pin: map the validated target host -> validated IP in the
+            # container's /etc/hosts, so the browser cannot be rebound to an
+            # internal address at connect time. (Full egress allowlisting still
+            # wants a firewall-capable backend; this closes the rebind.)
+            extra_hosts=spec.get("extra_hosts") or {},
             mem_limit=spec.get("mem_limit", "1g"),
             # Privilege hardening, secure by default: this container runs an
             # untrusted, model-chosen URL. Drop all Linux capabilities and forbid

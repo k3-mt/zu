@@ -8,7 +8,7 @@ import httpx
 
 from zu_core.ports import CAP_NET, EGRESS_OPEN
 
-from .net import BlockedURLError, check_url
+from .net import BlockedURLError, PinnedTransport, check_url
 
 # Default cap on a single fetched body (decompressed). Untrusted pages can be
 # arbitrarily large, and httpx transparently decompresses, so a small gzip can
@@ -56,8 +56,12 @@ class HttpFetch:
         # redirects manually and re-check each Location before requesting it.
         check_url(url, allow_private=self.allow_private)
         current = url
+        # Default to the DNS-pinning transport: check_url is an early reject, but
+        # the transport is what *closes* the rebind TOCTOU by connecting only to a
+        # validated IP. An injected transport (tests' MockTransport) is used as-is.
+        transport = self._transport or PinnedTransport(allow_private=self.allow_private)
         async with httpx.AsyncClient(
-            follow_redirects=False, timeout=20, transport=self._transport
+            follow_redirects=False, timeout=20, transport=transport
         ) as c:
             for _ in range(self.max_redirects + 1):
                 # Stream so we can stop reading once the body exceeds max_bytes
