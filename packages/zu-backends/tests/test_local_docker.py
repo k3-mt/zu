@@ -198,3 +198,111 @@ async def test_missing_docker_sdk_raises_clear_error() -> None:
             await backend.launch({"image": "img"})
     finally:
         builtins.__import__ = real_import
+
+
+# --- the red-team container form (RED_TEAM_CONTAINER.md P1) ------------------
+
+
+class _ExecContainer(_FakeContainer):
+    """A fake whose exec_run accepts an environment, as the real SDK does — so the
+    generic exec_entrypoint (spec passed via env) can be exercised with no daemon."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.exec_env: dict | None = None
+
+    def exec_run(self, cmd, demux=False, environment=None):
+        self.exec_env = environment
+        self.exec_calls.append(cmd)
+        if demux:
+            return self._exit_code, (self._output, self._stderr)
+        return self._exit_code, self._output
+
+
+async def test_isolated_network_attaches_internal_net_and_injects_proxy_env() -> None:
+    # The container form: attach to the internal network (the default-DROP
+    # enforcement) and point HTTP(S)_PROXY at the egress proxy.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({
+        "image": "img", "network": "isolated", "network_name": "zu-redteam-net",
+        "proxy": {"host": "10.0.0.2", "port": 8080},
+    })
+    kw = client.containers.run_kwargs
+    assert kw is not None
+    assert kw["network"] == "zu-redteam-net"
+    assert kw["network_disabled"] is False
+    assert kw["environment"]["HTTPS_PROXY"] == "http://10.0.0.2:8080"
+    assert kw["environment"]["HTTP_PROXY"] == "http://10.0.0.2:8080"
+    # Hardening is unchanged in the container form.
+    assert kw["cap_drop"] == ["ALL"] and kw["security_opt"] == ["no-new-privileges"]
+
+
+async def test_exec_entrypoint_runs_argv_with_env_and_returns_streams() -> None:
+    container = _ExecContainer(exit_code=0, output=b'{"type": "x"}\n', stderr=b"warn")
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    sandbox = await backend.launch({"image": "img"})
+    code, out, err = await backend.exec_entrypoint(
+        sandbox, ["zu-redteam-run"], environment={"ZU_REDTEAM_SPEC": "{}"})
+    assert code == 0
+    assert out.strip() == '{"type": "x"}'
+    assert err == "warn"
+    assert container.exec_env == {"ZU_REDTEAM_SPEC": "{}"}
+    assert container.exec_calls == [["zu-redteam-run"]]
+
+
+class _DiffContainer(_FakeContainer):
+    """A fake container exposing docker diff() — the fs-write audit source (P3)."""
+
+    def __init__(self, diffs, **kw) -> None:
+        super().__init__(exit_code=kw.pop("exit_code", 0), output=kw.pop("output", b"{}"), **kw)
+        self._diffs = diffs
+
+    def diff(self):
+        return self._diffs
+
+
+async def test_fs_diff_maps_docker_diff_to_path_kind() -> None:
+    container = _DiffContainer(diffs=[{"Path": "/etc/cron.d/x", "Kind": 1},
+                                      {"Path": "/tmp/cache", "Kind": 0},
+                                      {"Path": "/old", "Kind": 2}])
+    backend = LocalDockerBackend(client=_FakeClient(container))
+    sandbox = await backend.launch({"image": "img"})
+    diffs = await backend.fs_diff(sandbox)
+    assert {"path": "/etc/cron.d/x", "kind": "added"} in diffs
+    assert {"path": "/tmp/cache", "kind": "changed"} in diffs
+    assert {"path": "/old", "kind": "deleted"} in diffs
+
+
+async def test_mitm_ca_is_bind_mounted_trusted_and_cleaned_up() -> None:
+    # P2: a per-run CA is written to a host temp file, bind-mounted read-only, and
+    # trusted via SSL_CERT_FILE/REQUESTS_CA_BUNDLE — then removed at destroy.
+    import os
+
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    sandbox = await backend.launch({"image": "img", "ca_cert": b"-----BEGIN CA-----"})
+    kw = client.containers.run_kwargs
+    assert kw is not None and len(kw["volumes"]) == 1
+    ca_path = next(iter(kw["volumes"]))
+    assert kw["volumes"][ca_path]["mode"] == "ro"
+    assert kw["environment"]["SSL_CERT_FILE"] == "/zu-redteam-ca.pem"
+    assert kw["environment"]["REQUESTS_CA_BUNDLE"] == "/zu-redteam-ca.pem"
+    assert os.path.exists(ca_path)          # present during the run
+    assert sandbox.cleanup_paths == [ca_path]
+    await backend.destroy(sandbox)
+    assert not os.path.exists(ca_path)      # the CA dies with the run
+
+
+async def test_seccomp_profile_is_appended_to_security_opt() -> None:
+    # P3: the audit seccomp profile is applied via security_opt.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "seccomp": "/etc/redteam-audit.json"})
+    kw = client.containers.run_kwargs
+    assert "seccomp=/etc/redteam-audit.json" in kw["security_opt"]
+    assert "no-new-privileges" in kw["security_opt"]  # default hardening preserved

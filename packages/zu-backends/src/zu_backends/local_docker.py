@@ -22,8 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from zu_core.ports import ToolCall
@@ -38,10 +40,15 @@ class DockerUnavailableError(RuntimeError):
 @dataclass
 class _Sandbox:
     """A handle to a launched container. Returned by ``launch`` and passed back
-    to ``exec``/``destroy`` — opaque to the loop, which only moves it around."""
+    to ``exec``/``destroy`` — opaque to the loop, which only moves it around.
+
+    ``cleanup_paths`` are host temp files (e.g. a per-run MITM CA bind-mounted into
+    the container) to remove at ``destroy``, so an enabled MITM leaves nothing on
+    the host after the run."""
 
     container: Any
     image: str
+    cleanup_paths: list[str] = field(default_factory=list)
 
 
 # The render command run inside the browser container. The image is expected to
@@ -85,27 +92,29 @@ class LocalDockerBackend:
         return self._client
 
     async def launch(self, spec: dict) -> _Sandbox:
-        """Start a detached container from ``spec['image']`` with the network
-        turned off by default (the sandbox controls network on/off here, distinct
-        from the host-level SSRF guard) and return an opaque handle. Note this is
-        only the on/off switch: *scoped* egress (an allowlist, DNS-pinned hosts)
-        is the deferred egress-policy work, not yet implemented in this backend."""
+        """Start a detached container from ``spec['image']`` and return an opaque
+        handle. Network has three modes:
+
+          * absent/false  -> ``network_disabled`` (the render default; no egress);
+          * truthy        -> network on (the public-web tier);
+          * ``"isolated"`` -> attach to the pre-created INTERNAL docker network
+            ``spec['network_name']`` (no external route), so the egress proxy is
+            the **only** path off-box. The internal network is the default-DROP
+            enforcement for the red-team container form (RED_TEAM_CONTAINER.md
+            §3.1); ``spec['proxy']`` then injects HTTP(S)_PROXY so a cooperative
+            client routes through it — the env is convenience, the network is the
+            guarantee.
+
+        ``spec['proxy']`` (``{host, port}``) injects proxy env; ``spec['extra_hosts']``
+        DNS-pins validated host->IP; the cap-drop/no-new-privileges/pids hardening
+        is unchanged."""
         image = spec["image"]
         client = self._docker()
-        # The Docker SDK is synchronous and a container launch is seconds-long;
-        # run it in a worker thread so it never blocks the event loop (and other
-        # concurrent runs) for the duration. Same rationale for exec/destroy.
-        container = await asyncio.to_thread(
-            client.containers.run,
-            image,
+        run_kwargs: dict = dict(
             detach=True,
-            # No network by default: the sandbox controls network on/off here. A
-            # tier that needs the public web opts in via spec.
-            network_disabled=not spec.get("network", False),
             # DNS pin: map the validated target host -> validated IP in the
             # container's /etc/hosts, so the browser cannot be rebound to an
-            # internal address at connect time. (Full egress allowlisting still
-            # wants a firewall-capable backend; this closes the rebind.)
+            # internal address at connect time.
             extra_hosts=spec.get("extra_hosts") or {},
             mem_limit=spec.get("mem_limit", "1g"),
             # Privilege hardening, secure by default: this container runs an
@@ -123,8 +132,93 @@ class LocalDockerBackend:
             # explicitly, but this is the backstop against a leak on crash.
             auto_remove=False,
         )
-        await self._await_running(container)
-        return _Sandbox(container=container, image=image)
+        network = spec.get("network", False)
+        if network == "isolated":
+            # The only route off-box is the proxy on this internal network.
+            run_kwargs["network"] = spec["network_name"]
+            run_kwargs["network_disabled"] = False
+        else:
+            run_kwargs["network_disabled"] = not network
+        # Optional seccomp profile (P3 host-effect audit): the shipped
+        # redteam-audit.json LOGs process-creation/ptrace/mount/namespace syscalls
+        # so the SeccompAuditMonitor can observe them. Appended to security_opt.
+        seccomp = spec.get("seccomp")
+        if seccomp:
+            run_kwargs["security_opt"] = [*run_kwargs.get("security_opt", []), f"seccomp={seccomp}"]
+        environment = dict(spec.get("environment") or {})
+        proxy = spec.get("proxy")
+        if proxy:
+            url = f"http://{proxy['host']}:{proxy['port']}"
+            environment.update({
+                "HTTP_PROXY": url, "HTTPS_PROXY": url,
+                "http_proxy": url, "https_proxy": url,
+                "NO_PROXY": spec.get("no_proxy", "localhost,127.0.0.1"),
+            })
+        # Per-run MITM CA (P2): write it to a host temp file, bind-mount it
+        # read-only into the container, and point the standard TLS-trust env vars
+        # at it so the in-container client trusts the proxy's minted leaves. The
+        # temp file is tracked for removal at destroy — the CA dies with the run.
+        cleanup_paths: list[str] = []
+        ca_cert = spec.get("ca_cert")
+        if ca_cert:
+            fd, ca_path = tempfile.mkstemp(suffix="-zu-redteam-ca.pem")
+            os.write(fd, ca_cert if isinstance(ca_cert, bytes) else str(ca_cert).encode())
+            os.close(fd)
+            cleanup_paths.append(ca_path)
+            mount = spec.get("ca_mount", "/zu-redteam-ca.pem")
+            run_kwargs["volumes"] = {**(spec.get("volumes") or {}),
+                                     ca_path: {"bind": mount, "mode": "ro"}}
+            environment.update({"SSL_CERT_FILE": mount, "REQUESTS_CA_BUNDLE": mount})
+        # Shared-volume CA (sidecar topology): the proxy sidecar writes its per-run
+        # CA into a docker volume; the target mounts the SAME volume read-only and
+        # trusts it. No host file — the CA lives only in the volume and the run.
+        ca_volume = spec.get("ca_volume")
+        if ca_volume:
+            mdir = spec.get("ca_volume_mount", "/ca")
+            ca_file = f"{mdir}/ca.pem"
+            run_kwargs["volumes"] = {**(run_kwargs.get("volumes") or spec.get("volumes") or {}),
+                                     ca_volume: {"bind": mdir, "mode": "ro"}}
+            environment.update({"SSL_CERT_FILE": ca_file, "REQUESTS_CA_BUNDLE": ca_file})
+        if environment:
+            run_kwargs["environment"] = environment
+        # An optional command override keeps a non-render target alive (e.g.
+        # ``sleep infinity``) so the sidecar gate can exec the runner into it,
+        # rather than running the image's default server CMD.
+        if spec.get("command") is not None:
+            run_kwargs["command"] = spec["command"]
+        # The Docker SDK is synchronous and a container launch is seconds-long;
+        # run it in a worker thread so it never blocks the event loop (and other
+        # concurrent runs) for the duration. Same rationale for exec/destroy.
+        try:
+            container = await asyncio.to_thread(client.containers.run, image, **run_kwargs)
+        except Exception:
+            for p in cleanup_paths:  # don't leak the CA temp file on a failed launch
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            raise
+        # If the container never reaches "running" (exited/dead/timeout), tear it
+        # down here: with auto_remove=False a startup failure would otherwise
+        # leave a stopped container behind on every failed launch, since the
+        # caller gets an exception instead of a handle to destroy.
+        try:
+            await self._await_running(container)
+        except Exception:
+            try:
+                await asyncio.to_thread(container.remove, force=True)
+            except Exception as exc:  # noqa: BLE001 - cleanup must not mask the launch error
+                logger.warning(
+                    "failed to remove container %s after a failed launch: %s",
+                    getattr(container, "id", "?"), exc,
+                )
+            for p in cleanup_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            raise
+        return _Sandbox(container=container, image=image, cleanup_paths=cleanup_paths)
 
     async def _await_running(self, container: Any) -> None:
         """Poll until the container reports ``running`` (or exits), bounded by
@@ -195,6 +289,79 @@ class LocalDockerBackend:
                 "raw": text[:2000],
             }
 
+    async def exec_entrypoint(
+        self, sandbox: _Sandbox, argv: list[str], *,
+        environment: dict | None = None, timeout_s: float | None = None,
+    ) -> tuple[int, str, str]:
+        """Run an arbitrary argv in the container and return ``(exit_code, stdout,
+        stderr)``. Generalises :meth:`exec` (which is render-specific) so the
+        red-team container form can exec the ``zu-redteam-run`` runner inside the
+        box — passing the scenario spec via ``environment['ZU_REDTEAM_SPEC']`` —
+        and read its JSONL event log off stdout. Bounded by ``timeout_s`` (default
+        the backend's ``exec_timeout_s``) so a wedged run can't hang forever."""
+        timeout = self.exec_timeout_s if timeout_s is None else timeout_s
+        try:
+            exit_code, streams = await asyncio.wait_for(
+                asyncio.to_thread(
+                    sandbox.container.exec_run, argv, demux=True,
+                    environment=environment or {},
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return 504, "", f"exec timed out after {timeout}s"
+        stdout, stderr = streams if isinstance(streams, tuple) else (streams, None)
+        out = stdout.decode("utf-8", "replace") if isinstance(stdout, bytes) else str(stdout or "")
+        err = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or "")
+        return exit_code, out, err
+
+    # Docker's diff Kind codes: 0 modified, 1 added, 2 deleted.
+    _DIFF_KINDS = {0: "changed", 1: "added", 2: "deleted"}
+
+    async def top(self, sandbox: _Sandbox) -> list[dict]:
+        """The target's process table (``docker top``) as ``[{pid, cmd}]`` — the
+        out-of-band view of what is running, read before teardown. Portable (any
+        Docker host), so it catches a *persistent* process a tool spawned without
+        declaring ``subprocess`` (a transient exec that exits between reads needs
+        the seccomp-audit source instead)."""
+        info = await asyncio.to_thread(sandbox.container.top)
+        titles = info.get("Titles") or []
+        rows = info.get("Processes") or []
+        try:
+            ci = titles.index("CMD")
+        except ValueError:
+            ci = len(titles) - 1 if titles else -1
+        try:
+            pi = titles.index("PID")
+        except ValueError:
+            pi = 1
+        out: list[dict] = []
+        for row in rows:
+            cmd = row[ci] if 0 <= ci < len(row) else " ".join(row)
+            pid = row[pi] if 0 <= pi < len(row) else ""
+            out.append({"pid": pid, "cmd": cmd})
+        return out
+
+    async def mounts(self, sandbox: _Sandbox) -> list[dict]:
+        """The target's mounts (``container.attrs['Mounts']``) — so a writable host
+        bind-mount (a filesystem-escape path the sandbox should never have) is
+        visible to the mount-escape check."""
+        await asyncio.to_thread(sandbox.container.reload)
+        return list(sandbox.container.attrs.get("Mounts") or [])
+
+    async def fs_diff(self, sandbox: _Sandbox) -> list[dict]:
+        """The container's filesystem changes since launch (``docker diff``), as
+        ``[{path, kind}]`` — the out-of-band record of what the run *wrote*, read
+        AFTER the run and BEFORE teardown. This is the host-effect audit source the
+        red-team container form (RED_TEAM_CONTAINER.md §3.3, P3) reads: a plugin
+        that modified the filesystem is visible here whether or not it admitted to
+        it. Defensive about the SDK shape so an injected stub still works."""
+        raw = await asyncio.to_thread(sandbox.container.diff)
+        out: list[dict] = []
+        for d in raw or []:
+            out.append({"path": d.get("Path"), "kind": self._DIFF_KINDS.get(d.get("Kind"), "changed")})
+        return out
+
     async def destroy(self, sandbox: _Sandbox) -> None:
         """Stop and remove the container. Best-effort: a teardown failure must
         not raise over the render's own result, but it IS logged at WARNING — a
@@ -207,3 +374,8 @@ class LocalDockerBackend:
                 getattr(sandbox.container, "id", "?"),
                 exc,
             )
+        for p in getattr(sandbox, "cleanup_paths", []):  # remove the per-run MITM CA
+            try:
+                os.unlink(p)
+            except OSError:
+                pass

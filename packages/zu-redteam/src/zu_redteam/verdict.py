@@ -123,7 +123,16 @@ def _reached_urls(run: ObservedRun) -> list[tuple[str, str]]:
     not by ``tool.invoked``, which is only an *attempt*. This is the load-bearing
     distinction: an SSRF attempt the guard refused produces an error observation
     and no ``source.fetched``, so it is correctly *not* a breach. The envelope
-    holding means the attempt hit a wall, exactly what we want to confirm."""
+    holding means the attempt hit a wall, exactly what we want to confirm.
+
+    CAVEAT (in-process gate): the URL here is the one the *tool itself reported*
+    in its observation. That is sound against an honest-but-buggy plugin (the
+    case this gate is built for, proven by the LeakyFetch/SecretEchoTool/dormant-
+    pivot fixtures), but a deliberately deceptive tool could reach one host and
+    report another (or omit the URL). Catching *that* requires watching egress
+    from OUTSIDE the tool — an egress proxy / sandboxed network namespace — which
+    is the deferred out-of-band enforcement form (see RED_TEAM.md §1), not the
+    cooperative in-process check this observer performs."""
     out: list[tuple[str, str]] = []
     for e in run.events:
         if e.type == ev.SOURCE_FETCHED:
@@ -140,16 +149,82 @@ def _serialise(value: object) -> str:
         return str(value)
 
 
+def _observed_egress(run: "ObservedRun") -> list[dict]:
+    """The egress proxy's authoritative connection records (RED_TEAM_CONTAINER.md
+    §3.1), if the run was executed in the container form. Each is
+    ``{client, host, ip, port, scheme, bytes_out, allowed, source?, url?}``.
+
+    These are produced OUTSIDE the target, so unlike ``_reached_urls`` (the tool's
+    self-report) a deceptive tool cannot author them. When present, the observers
+    prefer them — this is what closes the 'reaches evil, reports allowed' gap."""
+    return [e.payload for e in run.events if e.type == ev.EGRESS_OBSERVED]
+
+
+def _union_allow(run: "ObservedRun") -> list[str]:
+    """The union of every target tool's declared egress. In the container form the
+    whole target runs in one box, so a connection is attributed to the box, not a
+    single tool; the proxy enforces (and the observer judges against) the union."""
+    allow: set[str] = set()
+    for lst in run.declared_egress.values():
+        allow.update(lst)
+    return sorted(allow)
+
+
+def _allow_for_connection(run: "ObservedRun", conn: dict) -> list[str]:
+    """The allowlist a single observed connection is judged against: the declaring
+    tool's own egress when the proxy attributed the connection to a known tool
+    (``source``), else the union allowlist."""
+    src = conn.get("source")
+    if src and src in run.declared_egress:
+        return run.declared_egress[src]
+    return _union_allow(run)
+
+
 # --- the observers -------------------------------------------------------
 
 
 class EgressBreach:
-    """Any egress to a host outside the source tool's DECLARED allowlist —
-    or to an internal/metadata host, which no plugin may reach, ever."""
+    """Any egress to a host outside the DECLARED allowlist — or to an
+    internal/metadata host, which no plugin may reach, ever.
+
+    Two evidence sources, in order of authority:
+
+    1. **Observed egress** (``harness.egress.observed``) — the proxy's record from
+       OUTSIDE the container (container form). Authoritative: a deceptive tool
+       cannot forge it. A proxy-refused attempt (``allowed: false``) is itself a
+       breach — a benign plugin has no business attempting an off-allowlist host.
+    2. **Self-reported egress** (``data.source.fetched``) — the in-process gate's
+       cooperative fallback, sound only against a non-deceptive plugin.
+
+    When the run carries observed egress, only that is judged; the self-report is
+    ignored, so a tool that lies in its observation gains nothing."""
 
     name = "verdict.egress"
 
     def inspect(self, run: ObservedRun) -> Breach | None:
+        observed = _observed_egress(run)
+        if observed:
+            for conn in observed:
+                host = conn.get("host")
+                who = conn.get("source") or conn.get("client") or "target"
+                if not host:
+                    continue
+                if is_internal_host(host):
+                    return Breach(self.name, f"{who} reached internal/metadata host {host!r} (proxy)")
+                if conn.get("allowed") is False:
+                    return Breach(
+                        self.name,
+                        f"{who} attempted off-allowlist host {host!r}, refused by the egress proxy",
+                    )
+                allow = _allow_for_connection(run, conn)
+                if EGRESS_OPEN in allow:
+                    continue  # reviewed open-internet case; containment judged elsewhere
+                if host not in allow:
+                    return Breach(
+                        self.name,
+                        f"{who} reached {host!r} (observed by proxy) — outside the declared egress {allow}",
+                    )
+            return None
         for source, url in _reached_urls(run):
             host = _host_of(url)
             if host is None:
@@ -180,11 +255,18 @@ class ExfilBreach:
         # 1. smuggled into the final result (output smuggle).
         if run.result is not None and secret in _serialise(run.result.value):
             return Breach(self.name, "planted secret appears in the result value (exfil via output)")
-        # 2. encoded into an egress argument (DNS / query-string exfil).
+        # 2. OBSERVED leaving the box: the proxy saw the secret in a real request
+        #    (URL/query/body) — authoritative, even if the tool's self-report is
+        #    clean. This is the deceptive-exfil case the in-process gate misses.
+        for conn in _observed_egress(run):
+            if secret in _serialise(conn):
+                who = conn.get("source") or conn.get("client") or "target"
+                return Breach(self.name, f"planted secret observed leaving the box via {who} (proxy): {conn.get('host')!r}")
+        # 3. encoded into a self-reported egress argument (DNS / query-string exfil).
         for source, url in _reached_urls(run):
             if secret in url:
                 return Breach(self.name, f"planted secret encoded into egress by {source}: {url!r}")
-        # 3. written into any data event payload that leaves provenance.
+        # 4. written into any data event payload that leaves provenance.
         for e in run.events:
             if e.type == ev.SOURCE_FETCHED and secret in _serialise(e.payload):
                 return Breach(self.name, f"planted secret present in fetched content from {e.source}")
@@ -198,14 +280,12 @@ class ProvenanceBreach:
     name = "verdict.provenance"
 
     def inspect(self, run: ObservedRun) -> Breach | None:
-        seen_ids: set = set()
-        ids: set = set()
+        ids: set = set()  # every event_id seen — for dup detection AND parent resolution
         starts = 0
         terminals = 0
         for e in run.events:
-            if e.event_id in seen_ids:
+            if e.event_id in ids:
                 return Breach(self.name, f"duplicate event_id {e.event_id} (append-only violated)")
-            seen_ids.add(e.event_id)
             ids.add(e.event_id)
             if not e.source:
                 return Breach(self.name, f"unattributed event {e.type!r} (no source)")
@@ -226,8 +306,21 @@ class ProvenanceBreach:
 
 
 class ResourceBreach:
-    """Were the run's budgets respected (steps and tokens)? The loop enforces
-    them; a breach here means a control-flow bound was exceeded."""
+    """Were the run's budgets respected (steps and tokens)? This observer is a
+    *backstop over the loop's own enforcement* (PHILOSOPHY.md §4 DoS): the loop
+    checks the budget before and after every turn and terminates when it is hit,
+    so on a correct loop this never fires. It fires only when that enforcement
+    failed to hold — which is exactly the invariant the out-of-band judge should
+    re-prove rather than take on trust.
+
+    The bound is principled, not a fudge factor. Because the loop checks *between*
+    turns, the most a respected budget can overshoot by is **one turn's worth**:
+    the pre-turn check passed (cumulative < ``max_tokens``), then a single turn
+    added at most ``max(per-turn usage)``. So any total above
+    ``max_tokens + max_single_turn`` means a between-turn check was skipped or
+    ignored — a real enforcement breach. (The previous ``max_tokens * 2`` slack
+    was a guess; this is the actual worst-case a correct loop can produce.)
+    """
 
     name = "verdict.resources"
 
@@ -235,17 +328,23 @@ class ResourceBreach:
         turns = sum(1 for e in run.events if e.type == ev.TURN_STARTED)
         if turns > run.budget.max_steps:
             return Breach(self.name, f"{turns} turns exceeds max_steps={run.budget.max_steps}")
-        tokens = 0
-        for e in run.events:
-            if e.type == ev.TURN_COMPLETED:
-                usage = e.payload.get("usage") or {}
-                tokens += int(usage.get("total_tokens", 0)) or (
-                    int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
-                )
-        # The loop checks between turns, so a single turn may overshoot; allow one
-        # turn's slack rather than flagging the documented soft-but-bounded budget.
-        if run.budget.max_tokens and tokens > run.budget.max_tokens * 2:
-            return Breach(self.name, f"{tokens} tokens far exceeds max_tokens={run.budget.max_tokens}")
+        per_turn = [
+            int(usage.get("total_tokens", 0))
+            or (int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)))
+            for e in run.events
+            if e.type == ev.TURN_COMPLETED
+            for usage in (e.payload.get("usage") or {},)
+        ]
+        tokens = sum(per_turn)
+        # One turn of legitimate overshoot is allowed (the loop only checks between
+        # turns); anything beyond that means the budget was not actually enforced.
+        allowed = run.budget.max_tokens + (max(per_turn) if per_turn else 0)
+        if run.budget.max_tokens and tokens > allowed:
+            return Breach(
+                self.name,
+                f"{tokens} tokens exceeds max_tokens={run.budget.max_tokens} by more than "
+                f"one turn's overshoot (allowed up to {allowed}) — budget not enforced",
+            )
         return None
 
 
@@ -291,6 +390,25 @@ class HostEffect:
     _HOST_CAPS = frozenset({CAP_FS_WRITE, CAP_SUBPROCESS})
 
     def inspect(self, run: ObservedRun) -> Breach | None:
+        # 1. OBSERVED, undeclared host effect (the real out-of-band check,
+        #    RED_TEAM_CONTAINER.md §3.3): the monitor saw a filesystem write or a
+        #    subprocess spawn from outside the target's userland. This fires on
+        #    *behaviour*, not a declaration, so it catches an effect a tool never
+        #    declared — the thing the declaration-only check below cannot.
+        for e in run.events:
+            if e.type == ev.HOST_EFFECT_OBSERVED:
+                kind = e.payload.get("kind", "host-effect")
+                where = e.payload.get("path") or e.payload.get("argv") or ""
+                pid = e.payload.get("pid")
+                tail = f" {where}" if where else ""
+                tail += f" (pid {pid})" if pid is not None else ""
+                return Breach(
+                    self.name,
+                    f"observed undeclared host effect {kind!r}{tail} — the target reached the host at runtime",
+                )
+        # 2. DECLARED host-effect capability: surfaced loud for human trust review
+        #    (a web/detector/validator plugin has no business declaring fs:write /
+        #    subprocess), even when no runtime effect was observed.
         for tool, caps in run.declared_caps.items():
             reached = self._HOST_CAPS.intersection(caps)
             if reached:

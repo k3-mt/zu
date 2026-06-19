@@ -43,6 +43,24 @@ VALIDATION_FAILED = "harness.validation.failed"
 # the raw material for the defense review queue and the live dashboard.
 DEFENSE_BLOCKED = "harness.defense.blocked"
 
+# Out-of-band facts emitted by the red-team control plane, NOT by a tool
+# (RED_TEAM_CONTAINER.md §3.3). They are produced OUTSIDE the target container —
+# by the egress proxy and the host-effect monitor — so a deceptive plugin can
+# neither author nor forge them. The verdict observers prefer them when present.
+#
+#   egress.observed     -> the proxy's authoritative record of a connection the
+#                          target actually made: {client, host, ip, port, scheme,
+#                          bytes_out, allowed}. Unlike data.source.fetched (the
+#                          tool's SELF-REPORT of where it went), this is ground
+#                          truth — what closes the "reaches evil, reports allowed"
+#                          gap the in-process gate cannot (RED_TEAM.md §1).
+#   host_effect.observed-> an observed filesystem write / subprocess spawn from
+#                          outside the target's userland: {kind, path|argv, pid}.
+#                          Lets HostEffect fire on an OBSERVED, undeclared effect,
+#                          not only a declared capability.
+EGRESS_OBSERVED = "harness.egress.observed"
+HOST_EFFECT_OBSERVED = "harness.host_effect.observed"
+
 # --- data.* — what the agent read and produced -------------------------------
 SOURCE_FETCHED = "data.source.fetched"
 RECORD_EXTRACTED = "data.record.extracted"
@@ -61,6 +79,8 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         DETECTOR_FIRED,
         VALIDATION_FAILED,
         DEFENSE_BLOCKED,
+        EGRESS_OBSERVED,
+        HOST_EFFECT_OBSERVED,
     }
 )
 DATA_TYPES: frozenset[str] = frozenset({SOURCE_FETCHED, RECORD_EXTRACTED})

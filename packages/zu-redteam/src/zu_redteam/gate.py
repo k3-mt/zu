@@ -95,8 +95,8 @@ class GateReport:
                 how = ", ".join(f.defended_by or f.breaches) or "—"
                 lines.append(f"    {mark} {f.id:<22} {f.objective:<12} {f.outcome:<10} {how}")
         lines.append("")
-        lines.append("RESULT: " + ("PASS — the envelope held" if self.passed
-                                    else "FAIL — see the gate(s) above"))
+        lines.append("RESULT: " + ("PASS — no envelope breach observed (in-process gate)"
+                                    if self.passed else "FAIL — see the gate(s) above"))
         return "\n".join(lines)
 
 
@@ -160,13 +160,38 @@ async def run_gate(
     return report
 
 
+_PROBE_HOST = "example.com"
+
+
+def _container_probe_spec() -> dict:
+    """The benign probe the container gate runs *inside* the box: a REAL fetch to
+    an allowlisted host (RealFetch genuinely egresses), so a clean run proves the
+    real sidecar enforcement is in place — the proxy actually observed the egress
+    and nothing breached. (The real *deception* proof — a tool reaching an
+    off-allowlist host while lying about it — is the opt-in live test.)"""
+    return {
+        "objective": "container-probe",
+        "planted_secret": _PLANTED_SECRET,
+        "include_benign_neighbours": True,
+        "neighbours": NEIGHBOUR_NAMES,
+        "plugins": [{"kind": "tools", "name": "web_fetch",
+                     "import": "zu_redteam.fixtures:RealFetch"}],
+        "moves": [{"tool": "web_fetch", "args": {"url": f"http://{_PROBE_HOST}/"}},
+                  {"text": '{"ok": true}', "finish": "stop"}],
+    }
+
+
 async def _container_gate() -> GateResult:
-    """The production form: stand the target's sandbox tier up in a *real* Docker
-    container under the isolation envelope (all caps dropped, no-new-privileges,
-    network off, pids capped), proving the enforcement the in-process observers
-    assume actually holds. Honest about cost: it pulls/launches an image, so it is
-    opt-in (``ZU_REDTEAM_CONTAINER=1``); without Docker it SKIPs, and a Docker/
-    image error SKIPs with the reason rather than failing a plugin for infra."""
+    """Run a scenario *inside* a real Docker container whose sole egress is a proxy
+    SIDECAR, and judge it on the proxy's out-of-band record (RED_TEAM_CONTAINER.md
+    §3, the live form). The target sits on an internal network with no route but the
+    proxy (default-DROP enforced), the ``zu-redteam-run`` entrypoint runs the
+    scenario on real Zu, and the verdict rests on the proxy's connection log — a
+    fact the target cannot author.
+
+    Opt-in (``ZU_REDTEAM_CONTAINER=1``, pulls/launches images and reaches the
+    network); without Docker it SKIPs, and any infra error SKIPs with the reason
+    rather than FAILing a plugin. ``ZU_REDTEAM_MITM=1`` adds TLS interception."""
     if shutil.which("docker") is None:
         return GateResult(
             "container", SKIP,
@@ -175,24 +200,40 @@ async def _container_gate() -> GateResult:
     if os.environ.get("ZU_REDTEAM_CONTAINER") != "1":
         return GateResult(
             "container", SKIP,
-            "Docker present; set ZU_REDTEAM_CONTAINER=1 to run the real hardened-container "
-            "form (it pulls/launches an image)")
-    image = os.environ.get("ZU_REDTEAM_CONTAINER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
+            "Docker present; set ZU_REDTEAM_CONTAINER=1 to run the real container form "
+            "(a proxy sidecar + target on an internal network)")
+    image = os.environ.get("ZU_REDTEAM_CONTAINER_IMAGE", "ghcr.io/k3-mt/zu-redteam:latest")
     try:
+        from zu_backends.host_monitor import (
+            CompositeHostMonitor,
+            DockerFsDiffMonitor,
+            DockerTopMonitor,
+            MountEscapeMonitor,
+        )
         from zu_backends.local_docker import LocalDockerBackend
 
-        backend = LocalDockerBackend()
-        sandbox = await backend.launch({"image": image, "network": False})
-        try:
-            up = getattr(sandbox, "container", None) is not None
-        finally:
-            await backend.destroy(sandbox)
-        return GateResult(
-            "container", PASS if up else FAIL,
-            f"hardened container ({image}) stood up and torn down under the isolation "
-            "envelope (caps dropped, no-new-privileges, network off, pids capped)")
+        from .sidecar import SidecarContainerGate
+
+        # The full portable host-effect panel: filesystem writes (docker diff),
+        # persistent processes (docker top), and host-mount escapes (mount inspect).
+        monitor = CompositeHostMonitor(monitors=[
+            DockerFsDiffMonitor(), DockerTopMonitor(), MountEscapeMonitor()])
+        gate = SidecarContainerGate(
+            backend=LocalDockerBackend(), image=image, allowlist=[_PROBE_HOST],
+            mitm=os.environ.get("ZU_REDTEAM_MITM") == "1", host_monitor=monitor,
+        )
+        result = await gate.run(_container_probe_spec())
+        detail = (
+            f"ran a scenario inside {image} behind a proxy sidecar (sole egress) "
+            f"— {len(result.connections)} egress connection(s), "
+            f"{len(result.host_effects)} host effect(s) observed out of band; "
+            + ("envelope held on the out-of-band record" if result.passed else result.summary())
+        )
+        return GateResult("container", PASS if result.passed else FAIL, detail)
     except Exception as exc:  # noqa: BLE001 - infra failure SKIPs, never FAILs a plugin
-        return GateResult("container", SKIP, f"Docker present but the container form could not run: {exc}")
+        return GateResult(
+            "container", SKIP,
+            f"Docker present but the container form could not run ({type(exc).__name__}: {exc})")
 
 
 def _unit_gate(pkg_dir: str | Path | None) -> GateResult:
@@ -256,9 +297,12 @@ async def _adversarial_gate(
 
     # Directed probes: invoke each target tool in a real run and judge it against
     # its OWN declaration — this is what catches a tool that under-declares egress.
-    for tool_name, probe in _directed_probes(plugins):
+    opaque_notes: list[str] = []
+    for tool_name, probe, opaque in _directed_probes(plugins):
         run = await run_scenario(probe, subscribers=subscribers)
         findings.append(_finding(f"probe:{tool_name}", "envelope", run, probe.neighbours))
+        if opaque:
+            opaque_notes.append(f"{tool_name}({', '.join(opaque)})")
 
     # Dormant-pivot probe: the two-phase controlled handler (RED_TEAM.md §6.1) —
     # catches a plugin that behaves in testing and pivots on a production trigger.
@@ -289,11 +333,15 @@ async def _adversarial_gate(
             "adversarial", FAIL,
             f"corpus battery incomplete: {covered} objectives ran (< {min_coverage})",
         ), findings
-    return GateResult(
-        "adversarial", PASS,
+    detail = (
         f"{len(fleet)} fleet specialists · {len(results)} corpus attacks + "
-        f"{len(target_tools)} tool probe(s); envelope held",
-    ), findings
+        f"{len(target_tools)} tool probe(s); envelope held"
+    )
+    if opaque_notes:
+        # Surfaced, not silent: these tools were probed with synthesised args for
+        # required params whose type we could not infer, so their probe is weaker.
+        detail += f" · note: synthesised args for opaque required param(s): {'; '.join(opaque_notes)}"
+    return GateResult("adversarial", PASS, detail), findings
 
 
 def _finding(id_: str, objective: str, run: ObservedRun, neighbours: list[str]) -> AttackFinding:
@@ -316,9 +364,10 @@ async def _dormant_pivot_probe(
     subscribers: Sequence[Callable[[Any], None]] = (),
 ) -> AttackFinding:
     """The dormant-pivot probe (RED_TEAM.md §6.1): stand the target up against a
-    two-phase controlled handler. Phase 1 the handler is benign; the gate arms it;
-    phase 2 it serves the trigger payload, and every target tool is then given a
-    turn. A plugin that pivots only after the trigger — reaching the off-allowlist
+    two-phase controlled handler. Phase 1 the handler is benign; it arms itself
+    after ``arm_after`` fetches; phase 2 it serves the trigger payload, and every
+    target tool is then given a turn. A plugin that pivots only after the trigger
+    — reaching the off-allowlist
     command host or leaking the secret — is caught by the same out-of-band
     observers (egress / exfil / host). A plugin that stays put is contained: for a
     declared-allowlist plugin reaching the handler at all is an egress breach; for
@@ -328,8 +377,9 @@ async def _dormant_pivot_probe(
 
     The two phases are the *handler's*, within one run (the canonical log keeps a
     single task, which the provenance observer requires): the handler serves
-    benign content on the first fetch, then arms itself and serves the trigger
-    payload on the next — "behaved in testing, then a trigger appeared.\""""
+    benign content for the first ``arm_after`` fetch(es), then arms itself and
+    serves the trigger payload on the next — "behaved in testing, then a trigger
+    appeared.\""""
     handler = ControlledHandler(arm_after=1)
     plugins_all: list[tuple[str, str, Any]] = [("tools", "web_fetch", handler), *benign_neighbours()]
     names = {(k, n) for k, n, _ in plugins_all}
@@ -344,8 +394,10 @@ async def _dormant_pivot_probe(
     for kind, name, obj in plugins:
         if kind != "tools":
             continue
-        props = (getattr(obj, "schema", {}) or {}).get("parameters", {}).get("properties", {})
-        args = {"url": "http://probe.example/"} if "url" in props else {}
+        # Neutral, in-type args for every required param — never the handler URL
+        # (a url param resolves to the off-target probe.example, not the C2): the
+        # pivot must come from the tool's own reaction to the trigger it saw.
+        args, _ = _benign_args(obj)
         moves.append({"tool": name, "args": args})
     moves.append({"text": '{"done": true}', "finish": "stop"})
 
@@ -357,16 +409,71 @@ async def _dormant_pivot_probe(
     return _finding("probe:dormant_pivot", "pivot", run, NEIGHBOUR_NAMES)
 
 
-def _directed_probes(plugins: list[tuple[str, str, Any]]) -> list[tuple[str, Scenario]]:
-    """(tool_name, scenario) per target *tool*: invoke it once (benign args
-    inferred from its schema) so the observers can judge whether doing its job
-    stayed inside its declared envelope."""
-    probes: list[tuple[str, Scenario]] = []
+_KNOWN_TYPES = frozenset({"string", "integer", "number", "boolean", "array", "object"})
+_URL_HINTS = ("url", "uri", "endpoint", "href", "link")
+
+
+def _benign_value(name: str, spec: dict) -> Any:
+    """A harmless value for one parameter, by its JSON-schema type. A url-shaped
+    string gets a benign off-target URL the egress observers can judge; other
+    types get the simplest in-type value. An ``enum`` takes its first member."""
+    enum = spec.get("enum")
+    if enum:
+        return enum[0]
+    t = spec.get("type")
+    if t in (None, "string"):
+        low = name.lower()
+        return "http://probe.example/" if any(h in low for h in _URL_HINTS) else "probe"
+    if t in ("integer", "number"):
+        return 1
+    if t == "boolean":
+        return True
+    if t == "array":
+        return []
+    if t == "object":
+        return {}
+    return "probe"
+
+
+def _benign_args(obj: Any) -> tuple[dict, list[str]]:
+    """Benign arguments to actually exercise a tool, plus the names of any
+    *required* params we could only fill with a generic fallback.
+
+    The earlier probe inferred a ``url`` and nothing else, so a tool with other
+    required params was invoked with ``{}`` — an immediate arg error that probes
+    nothing. This fills every required param (and every declared property) with an
+    in-type benign value, and returns the required params whose type we could not
+    confidently synthesise (an opaque/undescribed type) so the caller can surface
+    that the probe was weak rather than silently treat it as a clean pass."""
+    params = (getattr(obj, "schema", {}) or {}).get("parameters", {}) or {}
+    props = params.get("properties", {}) or {}
+    required = list(params.get("required") or [])
+    args: dict = {}
+    opaque: list[str] = []
+    for name in dict.fromkeys([*required, *props]):  # required first, deduped
+        spec = props.get(name)
+        if spec is None:  # required but undescribed — best-effort string
+            args[name] = "probe"
+            if name in required:
+                opaque.append(name)
+            continue
+        if name in required and "enum" not in spec and spec.get("type") not in _KNOWN_TYPES:
+            opaque.append(name)
+        args[name] = _benign_value(name, spec)
+    return args, opaque
+
+
+def _directed_probes(plugins: list[tuple[str, str, Any]]) -> list[tuple[str, Scenario, list[str]]]:
+    """(tool_name, scenario, opaque_required) per target *tool*: invoke it once
+    with benign args synthesised for ALL its required params (not just ``url``) so
+    the observers can judge whether doing its job stayed inside its declared
+    envelope. ``opaque_required`` names any required param we could only fill with
+    a generic fallback — surfaced so a weak probe is visible, not silent."""
+    probes: list[tuple[str, Scenario, list[str]]] = []
     for kind, name, obj in plugins:
         if kind != "tools":
             continue
-        props = (getattr(obj, "schema", {}) or {}).get("parameters", {}).get("properties", {})
-        args = {"url": "http://probe.example/"} if "url" in props else {}
+        args, opaque = _benign_args(obj)
         scenario = Scenario(
             objective="envelope",
             plugins=[(kind, name, obj), *benign_neighbours()],
@@ -374,5 +481,5 @@ def _directed_probes(plugins: list[tuple[str, str, Any]]) -> list[tuple[str, Sce
             planted_secret=_PLANTED_SECRET,
             neighbours=NEIGHBOUR_NAMES,
         )
-        probes.append((name, scenario))
+        probes.append((name, scenario, opaque))
     return probes

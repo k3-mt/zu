@@ -21,11 +21,19 @@ from .attacker import (
     ATTACKER_BRIEF,
     FLEET,
     OBJECTIVES,
+    AttackerBudget,
     AttackResult,
     LiveAttacker,
     ScriptedAttacker,
     Specialist,
 )
+from .container import (
+    ContainerGate,
+    ContainerResult,
+    DockerContainerRunner,
+    merge_evidence,
+)
+from .sidecar import SidecarContainerGate, parse_proxy_log
 from .contract import ContractFinding, check_plugin
 from .corpus import CORPUS_OBJECTIVES, CorpusCase, build_corpus
 from .defense import DefenseMonitor, monitor_defenses
@@ -51,6 +59,13 @@ __all__ = [
     "GateReport",
     "GateResult",
     "AttackFinding",
+    # container form (out-of-band enforcement, RED_TEAM_CONTAINER.md)
+    "ContainerGate",
+    "ContainerResult",
+    "DockerContainerRunner",
+    "SidecarContainerGate",
+    "parse_proxy_log",
+    "merge_evidence",
     # defense logging + review queue
     "DefenseMonitor",
     "monitor_defenses",
@@ -69,6 +84,7 @@ __all__ = [
     # attacker + fleet
     "ScriptedAttacker",
     "LiveAttacker",
+    "AttackerBudget",
     "AttackResult",
     "Specialist",
     "FLEET",

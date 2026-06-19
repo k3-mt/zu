@@ -10,6 +10,12 @@ dependencies = ["zu-core==0.1.0"]
 docker = ["docker>=7"]
 encryption = ["cryptography>=42"]
 
+# The egress proxy as a sidecar container for the red-team container form
+# (RED_TEAM_CONTAINER.md §3.1): the target's sole route off-box, streaming its
+# connection log as JSONL on stdout.
+[project.scripts]
+zu-egress-proxy = "zu_backends.egress_proxy:main"
+
 [project.entry-points."zu.backends"]
 local-docker = "zu_backends.local_docker:LocalDockerBackend"
 

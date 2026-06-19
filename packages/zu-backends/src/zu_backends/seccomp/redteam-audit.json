@@ -1,0 +1,17 @@
+{
+  "_comment": "Red-team host-effect audit profile (RED_TEAM_CONTAINER.md P3). Default ALLOW so the target runs normally, but SCMP_ACT_LOG the sensitive syscalls — process creation, ptrace, namespace/mount changes — so each fires a kernel audit SECCOMP record the host-side SeccompAuditMonitor reads into a {kind: 'subprocess'|...} host-effect. It OBSERVES (logs), it does not block; the verdict is rendered out of band.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64"],
+  "syscalls": [
+    {
+      "names": [
+        "execve", "execveat",
+        "fork", "vfork", "clone", "clone3",
+        "ptrace",
+        "mount", "umount2",
+        "setns", "unshare"
+      ],
+      "action": "SCMP_ACT_LOG"
+    }
+  ]
+}

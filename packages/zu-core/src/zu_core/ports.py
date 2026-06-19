@@ -207,11 +207,69 @@ class Validator(Protocol):
 
 @runtime_checkable
 class SandboxBackend(Protocol):
+    """Provisions and execs inside an isolated environment (a container/microVM).
+
+    ``launch`` takes a free-form spec dict so an adapter can grow new isolation
+    knobs without changing this shape. The red-team container form
+    (RED_TEAM_CONTAINER.md) reads, in addition to the existing
+    ``image``/``network``/cap-drop keys:
+
+      * ``network: "isolated"`` — attach to a network with no default route, so
+        the egress proxy is the *only* path off-box (default-DROP is the real
+        enforcement; the proxy env below is only a convenience);
+      * ``proxy: {host, port}`` — the egress proxy to route through (sets
+        HTTP(S)_PROXY in the container);
+      * ``ca_cert`` — a per-run MITM CA to trust *inside the container only*
+        (P2, for HTTPS payload inspection);
+      * ``seccomp`` / ``audit`` — a syscall profile / fs-audit toggle for the
+        host-effect monitor (P3).
+
+    An adapter ignores keys it does not implement, so a spec is forward-compatible
+    across phases."""
+
     async def launch(self, spec: dict) -> Any: ...
 
     async def exec(self, sandbox: Any, call: ToolCall) -> dict: ...
 
     async def destroy(self, sandbox: Any) -> None: ...
+
+
+@runtime_checkable
+class EgressProxy(Protocol):
+    """The control-plane egress proxy: the target container's sole route off-box,
+    and the *authoritative* record of where it actually went (RED_TEAM_CONTAINER.md
+    §3.1). It is out of band — the target routes through it but cannot read its
+    log or config — so its connection record is a fact the judged cannot author.
+
+    ``launch`` starts the proxy for one run against a host allowlist (the union of
+    the target tools' declared ``egress``; ``EGRESS_OPEN`` permits any host) and
+    returns an opaque handle carrying its ``{host, port}``. ``connections``
+    returns the JSONL connection log as dicts — ``{client, host, ip, port,
+    scheme, bytes_out, allowed}`` — one per CONNECT/request, including refused
+    (``allowed: false``) attempts. ``close`` tears it down."""
+
+    async def launch(self, spec: dict) -> Any: ...
+
+    def connections(self, handle: Any) -> list[dict]: ...
+
+    async def close(self, handle: Any) -> None: ...
+
+
+@runtime_checkable
+class HostEffectMonitor(Protocol):
+    """The control-plane host-effect monitor: the out-of-band record of what the
+    target did to the filesystem / process table from *outside* its userland
+    (RED_TEAM_CONTAINER.md §3.3, P3). Like the egress proxy, it observes the
+    target rather than trusting it, so an undeclared fs-write or subprocess is a
+    fact the plugin cannot suppress.
+
+    ``collect`` is called after the run, before teardown (it needs the live
+    sandbox), and returns host-effect facts as ``{kind, path|argv, pid?}`` dicts —
+    e.g. ``{"kind": "fs:write", "path": "/etc/cron.d/x"}``. The default Docker
+    implementation reads the container's filesystem diff; a seccomp/audit source
+    can feed subprocess/syscall facts through the same shape later."""
+
+    async def collect(self, sandbox: Any, backend: Any) -> list[dict]: ...
 
 
 @runtime_checkable

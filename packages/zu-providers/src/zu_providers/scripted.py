@@ -47,19 +47,44 @@ class ScriptedProvider:
     @classmethod
     def from_moves(cls, moves: list[dict], **kw) -> "ScriptedProvider":
         responses: list[ModelResponse] = []
-        for m in moves:
+        for i, m in enumerate(moves):
+            # Fail loudly on a malformed move rather than silently swallowing it:
+            # a tool move is {tool, args}; a text move is {text?, finish?}. An
+            # unrecognised key (a typo like {"toolname": ...}) or an empty move
+            # would otherwise be quietly turned into a do-nothing STOP response,
+            # masking a broken script — exactly the "explicit over implicit" trap.
+            # An optional ``usage`` dict ({"total_tokens": N} or {"input_tokens",
+            # "output_tokens"}) lets a script carry real per-turn token cost, so the
+            # loop's token accounting and the resource observer can be exercised
+            # deterministically (without it, a scripted run reports zero tokens and
+            # any token-budget check is vacuous).
             if "tool" in m:
+                extra = set(m) - {"tool", "args", "usage"}
+                if extra:
+                    raise ValueError(
+                        f"move {i} is a tool call with unexpected key(s) {sorted(extra)}; "
+                        "a tool move takes only 'tool', 'args', and optional 'usage'"
+                    )
                 responses.append(
                     ModelResponse(
                         tool_calls=[ToolCall(name=m["tool"], args=m.get("args", {}))],
                         finish=Finish.TOOL_CALLS,
+                        usage=m.get("usage") or {},
                     )
                 )
             else:
+                extra = set(m) - {"text", "finish", "usage"}
+                if extra or not m:
+                    raise ValueError(
+                        f"move {i} is not a valid move: {m!r}; expected a tool move "
+                        "{'tool': ..., 'args': ...} or a text move {'text': ..., 'finish': ...} "
+                        "(either may carry an optional 'usage')"
+                    )
                 responses.append(
                     ModelResponse(
                         text=m.get("text"),
                         finish=Finish(m.get("finish", "stop")),
+                        usage=m.get("usage") or {},
                     )
                 )
         return cls(responses, **kw)

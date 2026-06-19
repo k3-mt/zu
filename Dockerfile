@@ -29,9 +29,14 @@ RUN uv pip install --system \
     ./packages/zu-tools \
     ./packages/zu-detectors \
     ./packages/zu-validators \
-    ./packages/zu-backends \
+    "./packages/zu-backends[encryption]" \
+    ./packages/zu-redteam \
     "./packages/zu-cli[serve]" \
     ./packages/zu
+
+# zu-redteam ships the `zu-redteam-run` entrypoint: the red-team container form
+# (RED_TEAM_CONTAINER.md) execs it inside this image to run the corpus on real Zu
+# behind the egress proxy and emit its event log as JSONL on stdout.
 
 EXPOSE 8000
 
