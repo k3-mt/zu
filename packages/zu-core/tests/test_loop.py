@@ -445,6 +445,54 @@ async def test_escalation_climbs_to_tier2_and_succeeds() -> None:
     assert types[-1] == "harness.task.completed"
 
 
+async def test_per_tier_provider_takes_over_on_escalation() -> None:
+    # Global (cheap) provider runs tier 1; on the climb to tier 2 the bound
+    # provider takes over the same conversation. The tier→model record in the
+    # event log proves which provider produced each turn.
+    backend = _FakeBackend(_RENDERED)
+    cheap = _RecordingProvider([{"tool": "http_fetch", "args": {"url": "http://spa.test/"}}])
+    cheap.model = "cheap-tier1"
+    frontier = _RecordingProvider([
+        {"tool": "render_dom", "args": {"url": "http://spa.test/"}},
+        {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
+    ])
+    frontier.model = "frontier-tier2"
+
+    bus = EventBus()
+    result = await run_task(
+        TaskSpec(query="get title and price"), cheap, _registry_with_tiers(backend),
+        bus, providers={2: frontier},
+    )
+    assert result.status == Status.SUCCESS
+    assert result.value == {"title": "Acme Widget", "price": "$9.00"}
+
+    # Each provider was asked to complete only its own tier's turns.
+    assert len(cheap.seen) == 1 and len(frontier.seen) == 2
+
+    # The log attributes each turn to the model that produced it, by tier.
+    completed = [e.payload for e in await bus.query() if e.type == "harness.turn.completed"]
+    by_tier_models = {(p["tier"], p["model"]) for p in completed}
+    assert (1, "cheap-tier1") in by_tier_models      # tier-1 work ran on the global provider
+    assert (2, "frontier-tier2") in by_tier_models    # escalation switched to the bound provider
+    assert (1, "frontier-tier2") not in by_tier_models  # the frontier model never ran tier 1
+
+
+async def test_no_per_tier_override_uses_global_provider_everywhere() -> None:
+    # Back-compat: with no providers map, the global provider runs every tier.
+    backend = _FakeBackend(_RENDERED)
+    only = _RecordingProvider([
+        {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},
+        {"tool": "render_dom", "args": {"url": "http://spa.test/"}},
+        {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
+    ])
+    only.model = "solo"
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), only, _registry_with_tiers(backend), bus)
+    assert result.status == Status.SUCCESS
+    models = {e.payload["model"] for e in await bus.query() if e.type == "harness.turn.completed"}
+    assert models == {"solo"}  # every tier ran the one global provider
+
+
 async def test_escalation_via_real_builtin_detectors() -> None:
     # End-to-end through the *real* built-in detectors (empty/error/js-shell/
     # bot-wall registered together), not a hand-rolled one: a JS-shell page must

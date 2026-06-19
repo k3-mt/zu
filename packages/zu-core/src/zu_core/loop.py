@@ -30,7 +30,7 @@ import json
 import re
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Iterable
 
 from . import events as ev
@@ -282,8 +282,18 @@ async def run_task(
     provider: ModelProvider,
     registry: Registry | None = None,
     bus: EventBus | None = None,
+    *,
+    providers: Mapping[int, ModelProvider] | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
+
+    ``provider`` is the run's **global** model provider, used on every tier unless
+    a tier is overridden. ``providers`` is an optional per-tier override map
+    (``{tier: ModelProvider}``): when the ladder climbs to a tier present in the
+    map, the loop switches to that provider mid-run — the neutral message format
+    lets a different adapter pick up the same conversation, so a cheap/fast model
+    can do the tier-1 work and a frontier/vision model take over on escalation.
+    A tier with no override falls back to the global ``provider``.
 
     ``registry`` defaults to the process-wide ``REGISTRY`` (so decorator- and
     entry-point-registered plugins are both visible); pass an explicit one to
@@ -293,6 +303,7 @@ async def run_task(
     overshoot ``max_tokens`` before the run is ended — until the real providers
     pass a remaining-token limit into the call (build step 7).
     """
+    by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
     run = _Run(spec, bus)
@@ -334,9 +345,11 @@ async def run_task(
             return await run.terminal("budget:max_tokens")
 
         # Recompute per turn so a tier climbed last turn takes effect now: the
-        # model is offered exactly the tools unlocked at the current tier.
+        # model is offered exactly the tools unlocked at the current tier, and
+        # the provider bound to that tier takes over (global provider otherwise).
         active = ladder.active()
         tool_schemas = ladder.schemas()
+        turn_provider = by_tier.get(ladder.current, provider)
 
         turn = await run.emit(ev.TURN_STARTED, {"step": step + 1}, parent=run.root)
         # Bound the single model call by the wall-time the run has left: budgets
@@ -348,7 +361,7 @@ async def run_task(
             return await run.terminal("budget:wall_time_s")
         try:
             resp = await asyncio.wait_for(
-                provider.complete(ModelRequest(messages=messages, tools=tool_schemas)),
+                turn_provider.complete(ModelRequest(messages=messages, tools=tool_schemas)),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
@@ -362,7 +375,7 @@ async def run_task(
             {
                 "step": step + 1,
                 "tier": ladder.current,
-                "model": getattr(provider, "model", None),
+                "model": getattr(turn_provider, "model", None),
                 "usage": dict(resp.usage),
                 # The model's natural-language output this turn — its "train of
                 # thought" (a plan/explanation before a tool call, or the final

@@ -49,7 +49,7 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
     happens, so the loop is never a black box."""
     cfg = load_config(config)
     spec = load_task(task_file, default_budget=cfg.budget)
-    provider, registry, bus = assemble(cfg)
+    provider, registry, bus, providers = assemble(cfg)
 
     # The uniform observability hook: a live trace (when streaming) AND the defense
     # review queue — so a blocked attempt during `zu run` is queued exactly as it
@@ -66,7 +66,7 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
     typer.echo(f"zu run: {task_file} · provider={cfg.provider.name}{suffix}")
 
     try:
-        result: Result = asyncio.run(run_task(spec, provider, registry, bus))
+        result: Result = asyncio.run(run_task(spec, provider, registry, bus, providers=providers))
     except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
         # A model-call failure (unset key, unreachable endpoint) propagates here;
         # report it as a terminal outcome rather than a traceback.
@@ -214,13 +214,18 @@ def demo(
         )
         raise typer.Exit(code=2)
 
-    # A real run is the point: require a model unless self-testing the wiring.
-    if not offline and not model:
+    # A real run is the point: require a provider AND a model unless self-testing
+    # the wiring. There is no default provider — an agent must say what it runs on.
+    if not offline and (not model or not provider):
         typer.echo(
-            "zu demo runs against a real model to prove it works. Pass --model "
-            "(provider defaults to anthropic) and set the provider's API key — e.g.:\n"
+            "zu demo runs against a real model to prove it works. Name the provider "
+            "and model (no default provider), and set its API key — e.g.:\n"
             "  export ANTHROPIC_API_KEY=...\n"
-            "  zu demo --model claude-sonnet-4-6\n"
+            "  zu demo --provider anthropic --model claude-opus-4-8\n"
+            "or, for an OpenAI-compatible endpoint (e.g. OpenRouter):\n"
+            "  export OPENAI_API_KEY=...   # and OPENAI_BASE_URL if not api.openai.com\n"
+            "  zu demo --provider openai-compatible --model openai/gpt-4o-mini "
+            "--api-key-env OPENAI_API_KEY --base-url-env OPENAI_BASE_URL\n"
             "Or self-test the wiring offline (no key): zu demo --offline",
             err=True,
         )

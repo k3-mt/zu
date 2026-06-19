@@ -21,6 +21,7 @@ from zu_cli.config import (
     PluginsConfig,
     ProviderConfig,
     RunConfig,
+    assemble,
     build_provider,
     build_registry,
     build_sink,
@@ -164,6 +165,38 @@ def test_provider_by_import_reference():
     assert provider.model == "claude-x"
 
 
+def test_per_tier_providers_built_from_config():
+    # A `providers:` block builds one ModelProvider per tier; the global provider
+    # is separate and required.
+    from zu_cli.config import build_providers_by_tier
+
+    cfg = RunConfig(
+        provider=ProviderConfig(name="openai-compatible", model="gpt-4o-mini"),
+        providers={2: ProviderConfig(name="anthropic", model="claude-opus-4-8")},
+    )
+    by_tier = build_providers_by_tier(cfg)
+    assert set(by_tier) == {2}
+    assert type(by_tier[2]).__name__ == "AnthropicProvider"
+    assert by_tier[2].model == "claude-opus-4-8"
+
+
+def test_assemble_returns_global_and_per_tier_providers():
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        providers={2: ProviderConfig(name="anthropic", model="claude-opus-4-8")},
+        plugins=PluginsConfig(validators=["schema"]),
+    )
+    provider, _registry, _bus, by_tier = assemble(cfg)
+    assert type(provider).__name__ == "ScriptedProvider"   # global
+    assert set(by_tier) == {2} and by_tier[2].model == "claude-opus-4-8"
+
+
+def test_no_per_tier_block_means_empty_map():
+    cfg = RunConfig(provider=ProviderConfig(name="scripted"))
+    _p, _r, _b, by_tier = assemble(cfg)
+    assert by_tier == {}
+
+
 def test_import_reference_refused_when_imports_disallowed():
     # The networked surface (per-request config) forbids the module:Attr door,
     # so a remote caller cannot make the server import & execute arbitrary code.
@@ -222,7 +255,7 @@ async def test_trace_sinks_ship_events_alongside_the_canonical_store(tmp_path):
             "trace_sinks": [{"driver": "jsonl", "path": str(trace)}],
         }
     )
-    provider, registry, bus = assemble(cfg)
+    provider, registry, bus, _ = assemble(cfg)
     result = await run_task(load_task_spec(), provider, registry, bus)
 
     assert result.status is Status.SUCCESS

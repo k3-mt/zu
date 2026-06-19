@@ -83,13 +83,13 @@ class Zu:
     async def arun_with_events(self, task: Any) -> tuple[Result, list[Event]]:
         """Async: run one task, returning the Result and the run's event log."""
         spec = coerce_task(task, self.config.budget, allow_paths=True)
-        provider, registry, bus = assemble(self.config)
+        provider, registry, bus, providers = assemble(self.config)
         # The same observability hook the CLI uses: an embedded agent queues a
         # blocked attempt to the review queue too (no console trace by default).
         from zu_cli.observe import attach_observability
 
         attach_observability(bus, self.config.observability)
-        result = await run_task(spec, provider, registry, bus)
+        result = await run_task(spec, provider, registry, bus, providers=providers)
         events = await bus.query()
         return result, events
 

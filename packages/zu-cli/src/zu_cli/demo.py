@@ -349,15 +349,23 @@ def build_provider(
     config surface), defaulting to Anthropic when only a model is given."""
     if offline:
         return DEMOS[kind]["scripted"](), "scripted"
-    from .config import ProviderConfig, build_provider as cfg_build_provider
+    from .config import ConfigError, ProviderConfig, build_provider as cfg_build_provider
 
+    # No hard-coded provider default: an agent must say which provider it runs on.
+    # If a real run names none, fail clearly rather than silently assuming one.
+    if not provider:
+        raise ConfigError(
+            "a real run needs a provider — pass --provider (e.g. --provider "
+            "openai-compatible --model openai/gpt-4o-mini, or --provider anthropic "
+            "--model claude-opus-4-8), or use --offline for the scripted self-test."
+        )
     prov = cfg_build_provider(
         ProviderConfig(
-            name=provider or "anthropic",
+            name=provider,
             model=model,
             api_key=api_key,
             api_key_env=api_key_env,
             base_url_env=base_url_env,
         )
     )
-    return prov, (provider or "anthropic")
+    return prov, provider

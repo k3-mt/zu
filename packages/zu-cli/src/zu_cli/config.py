@@ -110,7 +110,17 @@ class ObservabilityConfig(BaseModel):
 class RunConfig(BaseModel):
     """A whole `zu.yaml`, parsed and validated."""
 
+    # The agent's GLOBAL provider — required. An agent with no provider cannot
+    # operate, so there is deliberately no default: a config that omits it fails
+    # to validate rather than silently assuming one.
     provider: ProviderConfig
+    # Optional PER-TIER provider overrides, keyed by tier number. The global
+    # ``provider`` runs every tier unless overridden here; when the loop escalates
+    # to a tier listed below, that provider takes over mid-run (the neutral
+    # message format lets a different adapter continue the same conversation). The
+    # canonical use: a cheap/fast model at tier 1, a frontier/vision model unlocked
+    # on escalation to tier 2 — e.g. ``providers: {2: {name: anthropic, model: ...}}``.
+    providers: dict[int, ProviderConfig] = Field(default_factory=dict)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     backend: str | None = None
     # The canonical store (the single source of truth for the run).
@@ -409,12 +419,28 @@ def build_trace_sinks(cfg: RunConfig, catalog: Registry | None = None) -> list[A
     return [_build_one_sink(s, catalog) for s in cfg.trace_sinks]
 
 
+def build_providers_by_tier(
+    cfg: RunConfig, catalog: Registry | None = None, *, allow_imports: bool = True
+) -> dict[int, ModelProvider]:
+    """The per-tier provider overrides (``cfg.providers``) as built ModelProviders,
+    keyed by tier. Empty when no overrides are configured — the loop then runs the
+    global provider on every tier."""
+    if not cfg.providers:
+        return {}
+    catalog = catalog or _catalog()
+    return {
+        tier: build_provider(pc, catalog, allow_imports=allow_imports)
+        for tier, pc in cfg.providers.items()
+    }
+
+
 def assemble(
     cfg: RunConfig, *, allow_imports: bool = True
-) -> tuple[ModelProvider, Registry, EventBus]:
-    """Turn a parsed config into the three things ``run_task`` needs: the
-    provider, the run registry, and a bus whose canonical sink is configured.
-    Any ``trace_sinks`` are attached as isolated secondary destinations.
+) -> tuple[ModelProvider, Registry, EventBus, dict[int, ModelProvider]]:
+    """Turn a parsed config into what ``run_task`` needs: the global provider, the
+    run registry, a bus whose canonical sink is configured, and the per-tier
+    provider override map. Any ``trace_sinks`` are attached as isolated secondary
+    destinations.
 
     ``allow_imports`` defaults True for the operator-trusted CLI; pass False when
     the config arrived over the network (``zu serve`` per-request override) so an
@@ -422,11 +448,12 @@ def assemble(
     top-level code executed) by a remote caller."""
     catalog = _catalog()
     provider = build_provider(cfg.provider, catalog, allow_imports=allow_imports)
+    providers_by_tier = build_providers_by_tier(cfg, catalog, allow_imports=allow_imports)
     registry = build_registry(cfg, catalog, allow_imports=allow_imports)
     bus = EventBus(sink=build_sink(cfg, catalog))
     for trace_sink in build_trace_sinks(cfg, catalog):
         bus.add_destination(trace_sink)
-    return provider, registry, bus
+    return provider, registry, bus, providers_by_tier
 
 
 # Re-exported so callers can introspect the plugin kinds without importing the
@@ -443,6 +470,7 @@ __all__ = [
     "coerce_config",
     "coerce_task",
     "build_provider",
+    "build_providers_by_tier",
     "build_registry",
     "build_sink",
     "assemble",

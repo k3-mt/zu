@@ -143,13 +143,13 @@ def create_app(
             allow_imports = req.config is None
             cfg = coerce_config(req.config) if req.config is not None else default_cfg
             spec = coerce_task(req.task, cfg.budget, allow_paths=False)
-            provider, registry, bus = assemble(cfg, allow_imports=allow_imports)
+            provider, registry, bus, providers = assemble(cfg, allow_imports=allow_imports)
         except ConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         bus.subscribe(_tee)  # feed the dashboard + review queue
 
         try:
-            result = await run_task(spec, provider, registry, bus)
+            result = await run_task(spec, provider, registry, bus, providers=providers)
         except Exception as exc:  # noqa: BLE001 - a model/infra failure is a 502, not a crash
             raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
 
@@ -167,7 +167,7 @@ def create_app(
             allow_imports = req.config is None  # see /run: networked config can't import code
             cfg = coerce_config(req.config) if req.config is not None else default_cfg
             spec = coerce_task(req.task, cfg.budget, allow_paths=False)
-            provider, registry, bus = assemble(cfg, allow_imports=allow_imports)
+            provider, registry, bus, providers = assemble(cfg, allow_imports=allow_imports)
         except ConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
@@ -188,7 +188,7 @@ def create_app(
 
         async def runner() -> None:
             try:
-                result = await run_task(spec, provider, registry, bus)
+                result = await run_task(spec, provider, registry, bus, providers=providers)
                 await queue.put(("result", result))
             except asyncio.CancelledError:
                 raise

@@ -7,6 +7,33 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — per-tier model selection + a required (no-default) provider
+
+A run now declares a **required global provider** and an **optional per-tier
+override map**, validated live end-to-end (real models via an OpenAI-compatible
+endpoint, with escalation):
+
+```yaml
+provider:                       # global — required; an agent must name what it runs on
+  name: openai-compatible
+  model: openai/gpt-4o-mini
+providers:                      # optional per-tier overrides
+  2: { name: openai-compatible, model: openai/gpt-4o }   # takes over on escalation to tier 2
+```
+
+- **No default provider.** There is no hard-coded fallback (it used to default to
+  `anthropic`). A run that names no provider fails fast with a clear message — a
+  provider the runtime cannot actually call is not a usable default. `zu demo`
+  likewise requires `--provider`.
+- **The loop switches providers per tier.** `run_task(..., providers={tier: p})`
+  selects the provider bound to the current tier each turn; on a climb, the bound
+  provider continues the same conversation (the neutral message format makes the
+  hand-off seamless). A cheap/fast model does tier-1 work; a frontier/vision model
+  takes over on escalation. `harness.turn.completed` records the tier→model that
+  produced each turn, so cost is attributable per tier.
+- `assemble()` now returns `(provider, registry, bus, providers_by_tier)`;
+  `build_providers_by_tier()` builds the map from config.
+
 ### Fixed — review hardening pass (correctness, isolation, and honest red-team docs)
 
 A repo-wide review turned up a set of edge-case correctness and containment gaps;

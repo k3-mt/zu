@@ -81,7 +81,7 @@ def build_server() -> FastMCP:
         error with a clear message. ``config``/``task`` may be a path or a dict."""
         try:
             cfg = coerce_config(config)
-            provider, registry, _bus = assemble(cfg)
+            provider, registry, _bus, _providers = assemble(cfg)
             active = {kind: registry.names(kind) for kind in ("tools", "detectors", "validators")}
             checked_task = None
             if task is not None:
@@ -106,7 +106,7 @@ def build_server() -> FastMCP:
         try:
             cfg = coerce_config(config)
             spec = coerce_task(task, cfg.budget, allow_paths=True)
-            provider, registry, bus = assemble(cfg)
+            provider, registry, bus, providers = assemble(cfg)
         except ConfigError as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -124,7 +124,7 @@ def build_server() -> FastMCP:
 
         attach_observability(bus, cfg.observability)
         try:
-            result = await run_task(spec, provider, registry, bus)
+            result = await run_task(spec, provider, registry, bus, providers=providers)
         except Exception as exc:  # noqa: BLE001 - a model/infra failure is data, not a crash
             return {"ok": False, "run_id": str(spec.task_id), "error": f"{type(exc).__name__}: {exc}"}
 

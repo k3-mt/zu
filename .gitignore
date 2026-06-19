@@ -46,3 +46,7 @@ zu_review.jsonl
 # BUILD.md is the internal build-sequence / deferred-gaps ledger — kept local.
 # (ARCHITECTURE.md is public: an onboarding agent needs the structural map.)
 docs/BUILD.md
+
+# Local secret — API key for live validation, never commit
+zu_demo_key.md
+*_key.md
