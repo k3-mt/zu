@@ -7,6 +7,25 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — `zu mcp`: drive Zu from any coding agent (MCP)
+
+Live in your harness of choice (Claude Code, Cursor, Codex) and let it design,
+deploy, run, and inspect Zu agents for you in natural language.
+
+- **`zu mcp`** — a FastMCP **stdio** server (the optional `[mcp]` extra) exposing
+  the engine over the Model Context Protocol. One server works across every
+  MCP-capable client; register it once and the harness launches it as a
+  session-scoped child process (no port, no daemon, idle until a tool is called).
+- **Tools:** `zu_scaffold` (starter config + task), `zu_validate`, `zu_plugins`,
+  `zu_run` (runs and **streams every step back live** via MCP log messages — the
+  same `format_event` trace as the CLI/SSE — returning a concise result + run_id),
+  and `zu_traces` (read the always-on event store for any run). **Resources:**
+  `zu://plugins`, `zu://config/schema`.
+- Ready-to-paste client configs in `examples/integrations/` (Claude Code `.mcp.json`,
+  Cursor `.cursor/mcp.json`, Codex `config.toml`) and a QUICKSTART section.
+- `pip install 'zu-runtime[mcp]'`; also folded into `[all]`. 6 new tests drive the
+  tools in-process offline.
+
 ### Added — live observability: stream the loop in real time
 
 The loop is no longer a black box — you watch it run as it runs.

@@ -1,0 +1,9 @@
+{
+  "//": "Cursor — copy to .cursor/mcp.json (project) or ~/.cursor/mcp.json (global). Same shape as Claude Code. Needs: pip install 'zu-runtime[mcp]'. Verify the path against your Cursor version.",
+  "mcpServers": {
+    "zu": {
+      "command": "zu",
+      "args": ["mcp"]
+    }
+  }
+}

@@ -48,6 +48,7 @@ dev = [
     "fastapi>=0.110",     # exercises `zu serve` (the serve extra) in tests
     "httpx",              # FastAPI TestClient transport
     "docker>=7",          # exercises the local-docker backend (real tier-2 render)
+    "mcp>=1.2",           # exercises `zu mcp` (the MCP server) in tests
 ]
 
 [tool.pytest.ini_options]

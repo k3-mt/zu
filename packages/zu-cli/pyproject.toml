@@ -18,6 +18,8 @@ dependencies = [
 # `zu serve` — the HTTP wrapper. Kept optional so the CLI/library never force a
 # web framework on a user who only embeds or runs one-shot tasks.
 serve = ["fastapi>=0.110", "uvicorn>=0.27"]
+# `zu mcp` — the MCP server, so coding agents (Claude Code, Cursor, …) drive Zu.
+mcp = ["mcp>=1.2"]
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

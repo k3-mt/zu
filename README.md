@@ -113,6 +113,12 @@ reasoning, each tool call and result, detector verdicts, and escalations — to 
 console as it happens (`zu run`), or over Server-Sent Events (`POST /run/stream`)
 so you can watch a local or containerized run in real time, no refresh.
 
+**Live in your coding agent.** `pip install 'zu-runtime[mcp]'` adds a `zu mcp`
+server so Claude Code / Cursor / Codex can design, validate, run, and inspect Zu
+agents for you in natural language — and stream the run back live. One stdio
+server, every MCP client; register it once. See
+[`examples/integrations/`](examples/integrations/).
+
 **→ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md)** — install, define
 a task + config, embed, serve, containerize, schedule, and write your own plugin.
 

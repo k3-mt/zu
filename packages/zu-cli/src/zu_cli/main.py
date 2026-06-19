@@ -236,6 +236,25 @@ def demo(
 
 
 @app.command()
+def mcp() -> None:
+    """Run the MCP server (stdio) so a coding agent — Claude Code, Cursor, … —
+    can design, validate, run, and inspect Zu agents for you in natural language.
+
+    You don't run this by hand: register it once (see the docs) and your harness
+    launches `zu mcp` as a child process per session. Needs the 'mcp' extra:
+    pip install 'zu-runtime[mcp]'.
+    """
+    try:
+        from .mcp_server import build_server
+    except ModuleNotFoundError:
+        typer.echo(
+            "zu mcp needs the MCP SDK; install it with: pip install 'zu-runtime[mcp]'", err=True
+        )
+        raise typer.Exit(code=2)
+    build_server().run(transport="stdio")
+
+
+@app.command()
 def plugins() -> None:
     """List every plugin Zu can discover (providers, tools, detectors, ...)."""
     # The shared process registry, so this lists the same plugins the loop sees

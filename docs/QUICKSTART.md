@@ -295,7 +295,33 @@ Or drive it from cron / a cloud scheduler — each tick is a one-shot `zu run`:
 */15 * * * *  cd /srv/agent && /usr/local/bin/zu run task.yaml -c zu.yaml >> run.log 2>&1
 ```
 
-## 8. Make it yours: custom plugins
+## 8. Drive it from your coding agent (MCP)
+
+Live in Claude Code / Cursor / Codex and let the agent design, validate, run, and
+inspect Zu agents for you — in natural language. One stdio server works across
+all of them:
+
+```bash
+pip install 'zu-runtime[mcp]'      # adds the `zu mcp` server
+```
+
+Register it once (the harness then launches `zu mcp` as a child process per
+session — stdio, no port, no daemon, killed on exit; nothing runs until asked):
+
+```bash
+# Claude Code
+claude mcp add --transport stdio zu -- zu mcp
+# Cursor   → copy examples/integrations/cursor.mcp.json to .cursor/mcp.json
+# Codex    → append examples/integrations/codex-config.toml to ~/.codex/config.toml
+```
+
+Then talk to your agent — *"use zu to build a price-extraction agent, validate it,
+run it, and show me what it does."* It calls `zu_scaffold` → `zu_validate` →
+`zu_run` (which **streams every step back live**: train of thought, tool calls,
+escalations) → `zu_traces` (read the full log of any run). See
+[`examples/integrations/`](../examples/integrations/) for the exact configs.
+
+## 9. Make it yours: custom plugins
 
 Every built-in is a plugin behind a port, registered exactly the way yours would
 be. The fastest path is the in-process decorator:

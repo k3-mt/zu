@@ -1,0 +1,7 @@
+# OpenAI Codex CLI — add to ~/.codex/config.toml.
+# MCP support is version-dependent: recent Codex CLI versions support MCP servers
+# via [mcp_servers.NAME]; older ones do not. Verify with your installed version.
+# Needs: pip install 'zu-runtime[mcp]'.
+[mcp_servers.zu]
+command = "zu"
+args = ["mcp"]

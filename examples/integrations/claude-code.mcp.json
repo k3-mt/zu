@@ -1,0 +1,10 @@
+{
+  "//": "Claude Code — copy to your project's .mcp.json (or run: claude mcp add --transport stdio zu -- zu mcp). Needs: pip install 'zu-runtime[mcp]'.",
+  "mcpServers": {
+    "zu": {
+      "type": "stdio",
+      "command": "zu",
+      "args": ["mcp"]
+    }
+  }
+}
