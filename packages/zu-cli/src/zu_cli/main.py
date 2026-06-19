@@ -269,6 +269,73 @@ def init(
 
 
 @app.command()
+def deploy(
+    target: str = typer.Argument("local", help="local | dockerfile | compose | fly | render"),
+    config: str = typer.Option("zu.yaml", "--config", "-c", help="The run config to deploy."),
+    name: str = typer.Option("zu-agent", "--name", help="Image / app / container name."),
+    port: int = typer.Option(8000, "--port", help="Service port."),
+    extras: str = typer.Option("all", "--extras", help="zu-runtime extras to install in the image."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing Dockerfile."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With target=local, print the docker commands instead of running them."),
+) -> None:
+    """Deploy the agent as an HTTP service. `local` builds + runs a container;
+    `dockerfile`/`compose`/`fly`/`render` emit a manifest you apply yourself.
+
+    Secrets are never baked in — the provider's key env is passed through at run
+    time (local) or referenced in the manifest (cloud).
+    """
+    from . import deploy as _deploy
+
+    if target not in _deploy.TARGETS:
+        typer.echo(f"unknown target {target!r}; choose: {', '.join(_deploy.TARGETS)}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        load_config(config)  # fail fast on a bad/missing config before building
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    if target != "local":
+        paths = _deploy.generate(
+            target, ".", name=name, config=config, extras=extras, port=port, force=force
+        )
+        for p in paths:
+            typer.echo(f"wrote {p}")
+        typer.echo(f"\nnext: apply the {target} manifest with your platform's tooling "
+                   "(set the provider's API key as a secret there).")
+        return
+
+    # target == local: generate a Dockerfile (if absent), build, run.
+    import shutil
+    import subprocess
+
+    df = _deploy.write_dockerfile(".", config, extras=extras, port=port, force=force)
+    typer.echo(f"Dockerfile: {df}")
+    build, run = _deploy.local_commands(name, config, port=port)
+    if dry_run:
+        typer.echo("$ " + " ".join(build))
+        typer.echo("$ " + " ".join(run))
+        return
+    if shutil.which("docker") is None:
+        typer.echo("docker not found — install Docker, or use a manifest target (compose/fly/render).", err=True)
+        raise typer.Exit(code=2)
+    typer.echo("building image…")
+    if subprocess.run(build).returncode != 0:
+        typer.echo("docker build failed", err=True)
+        raise typer.Exit(code=1)
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True)  # replace any prior
+    if subprocess.run(run).returncode != 0:
+        typer.echo("docker run failed", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"\n✅ {name} running → http://localhost:{port}\n"
+        f"  POST /run · POST /run/stream (live)\n"
+        f"  logs:  docker logs -f {name}\n"
+        f"  stop:  docker rm -f {name}"
+    )
+
+
+@app.command()
 def mcp() -> None:
     """Run the MCP server (stdio) so a coding agent — Claude Code, Cursor, … —
     can design, validate, run, and inspect Zu agents for you in natural language.

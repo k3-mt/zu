@@ -274,17 +274,28 @@ from zu import create_app
 app = create_app("zu.yaml")   # a FastAPI/ASGI app
 ```
 
-## 6. Containerize it
+## 6. Deploy it — container, locally or to the cloud
+
+`zu deploy` turns your config into a running service. It generates a Dockerfile
+that `pip install`s `zu-runtime` and serves your config — secrets are never baked
+in (passed at run time / referenced as platform secrets).
 
 ```bash
-docker build -t zu .
-docker run -p 8000:8000 -v "$PWD/zu.yaml:/app/zu.yaml" -e ANTHROPIC_API_KEY zu
+zu deploy local                 # generate Dockerfile, build, and run a container
+                                #   → http://localhost:8000  (POST /run · /run/stream)
+zu deploy local --dry-run       # just print the docker commands
+
+# …or emit a manifest you apply with your platform's tooling:
+zu deploy compose               # docker-compose.yml
+zu deploy fly                   # fly.toml      (then: fly secrets set …, fly deploy)
+zu deploy render                # render.yaml   (then: create a Blueprint)
+zu deploy dockerfile            # just the Dockerfile
 ```
 
-The image serves on `:8000` by default. Override the command for a one-shot or
-scheduled run: `docker run ... zu run task.yaml -c zu.yaml --every 5m`. Secrets
-are passed with `-e` (read by the adapter at call time), never baked into the
-image.
+A local deploy passes through whichever provider key env is set (`-e
+ANTHROPIC_API_KEY`); the cloud manifests reference those keys as secrets you set
+on the platform. Pair a deployment with a **trace sink** (above) so you can watch
+it work in production via `zu_traces` / your log pipeline.
 
 ## 7. Schedule it
 

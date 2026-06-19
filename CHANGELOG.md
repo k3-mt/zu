@@ -7,6 +7,21 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — `zu deploy`: container, locally or to the cloud (Phase 4)
+
+Closes the design → deploy → run → confirm loop from the CLI.
+
+- **`zu deploy local`** generates a project Dockerfile (pip-installs
+  `zu-runtime`, copies the config), builds it, and runs `zu serve` in a
+  container — passing through whichever provider key env is set. `--dry-run`
+  prints the docker commands; refuses nothing destructive.
+- **`zu deploy compose|fly|render|dockerfile`** emit a manifest you apply with
+  your platform's own tooling (Fly, Render, docker-compose).
+- **Secrets are never baked in** — no `ENV` sets a key, no `.env` is copied; keys
+  are passed at run time (local) or referenced as platform secrets (cloud).
+- Pairs with trace sinks so a deployed agent is observable in production.
+- Manifest generation is deterministic text (no Docker needed) and fully tested.
+
 ### Added — trace sinks: ship events to local or cloud storage (Phase 3)
 
 - **`trace_sinks:` in config** — a list of secondary `EventSink` destinations.
