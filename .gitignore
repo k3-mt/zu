@@ -38,3 +38,5 @@ zu.yaml.local
 # Internal design / strategy docs — kept local, never in the public repo
 *.docx
 *.pdf
+docs/ARCHITECTURE.md
+docs/BUILD.md

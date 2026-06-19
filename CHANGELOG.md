@@ -25,7 +25,7 @@ queryable event log.
 - Quickstart, README, and `examples/README.md` updated to lead with the demo;
   3 new tests run it offline (as a subprocess — the literal "clean machine" path
   — and by inspecting the produced event log). This completes the nine-step v1
-  core; what remains is breadth behind the existing ports (see BUILD.md).
+  core; what remains is breadth behind the existing ports.
 
 ### Added — build step 8: the config system + `zu run`
 
@@ -50,7 +50,7 @@ block, no code change, because the loop only ever speaks to the provider port.
 - **One provider drives the run.** A configured `backend` is injected into a tool
   that accepts one (e.g. `render_dom`); a missing API key / unreachable endpoint
   is reported as a clean message and a non-zero exit, not a traceback. Binding a
-  *distinct model per tier* remains the deferred next rung (see BUILD.md).
+  *distinct model per tier* remains the deferred next rung.
 - `examples/zu.example.yaml` rewritten to the implemented single-`provider`
   shape; `zu-cli` now depends on every built-in plugin package so `zu run`
   discovers them out of the box. 20 new tests (full suite green; mypy clean).
@@ -125,8 +125,7 @@ clean). The two high-severity items were live bypasses, not theoretical:
   surfaces failures on stderr.
 - **Mutable-default cleanup** — port models use `Field(default_factory=...)`
   for `dict`/`list` defaults.
-- Tracked a known design gap (plugin interface-versioning, MLR §6) in
-  `docs/BUILD.md`.
+- Noted a known design gap to revisit: plugin interface-versioning.
 
 ### Security
 
@@ -215,7 +214,7 @@ code closed the following gaps (each with a regression test; suite + mypy green)
   the in-memory `payload` dict's contents are read-only **by convention**
   (deep-freezing rejected — payloads carry large fetched HTML on the hot path).
 
-Deferred items from the same review are recorded in `docs/BUILD.md` (Known gaps).
+Deferred items from the same review are tracked as known gaps.
 
 ### Added — build step 4 (the interpreter loop)
 
@@ -263,7 +262,7 @@ each with a test (suite + mypy green):
   model call (so a turn that itself overshoots is caught, not just a later one),
   and a new `Budget.max_tool_calls` caps tool calls in a single response,
   bounding a runaway turn. Budgets remain soft between turns; the hard per-call
-  token cap is deferred to step 7 (see `docs/BUILD.md`).
+  token cap is deferred to the real model adapters.
 - **Fetched content stored once.** The loop kept the full page HTML in both the
   `data.source.fetched` and `harness.tool.returned` events; `tool.returned` now
   carries a summary (lengths, non-content fields) so a page isn't duplicated in
@@ -381,7 +380,7 @@ fixed here, each with a regression test (suite + mypy green):
 - **`openai-compatible` adapter** — one adapter, pointed at a different base URL,
   reaches OpenAI, OpenRouter, and local servers (Ollama/vLLM) via the `openai`
   SDK. Base URL and key from the environment. (The prompt-based tool fallback for
-  models without native tool-calling is deferred — see BUILD.md.)
+  models without native tool-calling is deferred.)
 - **Neutral tool-call id matching.** The loop's neutral history carries no
   tool-call ids (results match by order); the adapters synthesize ids on the
   assistant turn and assign them to results FIFO, satisfying both wire formats

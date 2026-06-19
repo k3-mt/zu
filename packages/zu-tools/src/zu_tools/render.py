@@ -65,7 +65,7 @@ class RenderDom:
         # the page it is asked to render. The sandbox is *where* egress is
         # controlled (vs. tier 1's host-level SSRF guard); scoping that egress
         # to the target — an allowlist / DNS-pinned connection — is the deferred
-        # SandboxBackend egress-policy work (see BUILD.md).
+        # SandboxBackend egress-policy work.
         sandbox = await backend.launch({"image": self.image, "tier": self.tier, "network": True})
         try:
             obs = await backend.exec(sandbox, ToolCall(name=self.name, args={"url": url}))

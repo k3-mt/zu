@@ -156,8 +156,8 @@ async def test_openai_usage_includes_total_tokens() -> None:
 
 
 async def test_native_tools_false_raises_not_implemented() -> None:
-    # The prompt-based tool fallback for non-native-tool models is deferred
-    # (BUILD.md); the adapter must raise clearly, never silently guess.
+    # The prompt-based tool fallback for non-native-tool models is deferred;
+    # the adapter must raise clearly, never silently guess.
     p = OpenAICompatibleProvider(model="local", native_tools=False, client=object())
     with pytest.raises(NotImplementedError):
         await p.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))

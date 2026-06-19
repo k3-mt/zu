@@ -37,4 +37,4 @@ change touches any of these, confirm it:
 
 ## Related
 
-Issue(s), or the build step from `docs/BUILD.md` this belongs to.
+Related issue(s), if any.

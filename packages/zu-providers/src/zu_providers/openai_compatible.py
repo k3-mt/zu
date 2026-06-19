@@ -14,7 +14,7 @@ neutral behaviour from two different wire formats.
 
 A model without native tool-calling would need the prompt-based tool fallback
 (inject schemas into the prompt, parse a structured action out of the text);
-that path is deferred (see BUILD.md). The native path is what ships here.
+that path is deferred. The native path is what ships here.
 """
 
 from __future__ import annotations
@@ -69,8 +69,8 @@ class OpenAICompatibleProvider:
     async def complete(self, req: ModelRequest) -> ModelResponse:
         if not self.capabilities.native_tools:
             raise NotImplementedError(
-                "prompt-based tool fallback for non-native-tool models is deferred "
-                "(see BUILD.md); set native_tools=True to use the Chat Completions path."
+                "prompt-based tool fallback for non-native-tool models is deferred; "
+                "set native_tools=True to use the Chat Completions path."
             )
         client = self._ensure_client()
         kwargs: dict[str, Any] = {

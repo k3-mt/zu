@@ -46,9 +46,6 @@ You need Python 3.11+ and uv. Nothing else for the offline suite.
 | a sandbox backend           | `zu-backends`     | `zu.backends`     |
 | an event sink (storage)     | `zu-backends`     | `zu.sinks`        |
 
-See [`docs/BUILD.md`](docs/BUILD.md) for the nine-step build sequence and which
-step a given piece belongs to.
-
 ## Submitting a change
 
 1. Branch from `main`.

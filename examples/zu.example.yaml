@@ -39,4 +39,4 @@ budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }
 # Note: one provider drives the whole run today. The escalation ladder still
 # climbs tiers — a tool's own `tier` gates when it unlocks (render_dom is tier
 # 2) — but binding a *different model per tier* (a cheap model at tier 1, a
-# frontier model at tier 2) is the deferred next rung; see docs/BUILD.md.
+# frontier model at tier 2) is a deferred next rung.

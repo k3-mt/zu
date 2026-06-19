@@ -39,8 +39,7 @@ with a one-line config change.
 
 ## Status
 
-The v1 core is complete: all **nine build steps are done and green** (see
-[`docs/BUILD.md`](docs/BUILD.md)) — the typed contracts, the six ports, the
+The v1 core is complete and green: the typed contracts, the six ports, the
 plugin registry, a scripted (fake) model provider, the event spine (SQLite sink
 + append-before-notify bus + projection), the deterministic interpreter loop
 with tier-1 tools and budgets, the escalation ladder and the tier-2 browser,
@@ -48,8 +47,7 @@ validation against the event log (schema + grounding), the real `anthropic` and
 `openai-compatible` model adapters, the **config system** (`zu run task.yaml`
 wires a whole run from a file, the model a one-line swap), and the **killer
 demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
-with zero setup. What remains is breadth behind the existing ports (see the
-deferred items in `docs/BUILD.md`), not new core.
+with zero setup. What remains is breadth behind the existing ports, not new core.
 
 ## Quickstart (for contributors today)
 
@@ -119,13 +117,10 @@ zu/
     zu-backends/    # local-docker sandbox + sqlite event sink
     zu-cli/         # the `zu` command
   examples/         # runnable demos (the killer demo lives here)
-  docs/             # design, build sequence, architecture
 ```
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the ports-and-adapters design
-- [`docs/BUILD.md`](docs/BUILD.md) — the nine-step build sequence, each step testable offline
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up, test, and submit changes
 
 ## License
