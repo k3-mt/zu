@@ -54,7 +54,7 @@ deferred items in `docs/BUILD.md`), not new core.
 ## Quickstart (for contributors today)
 
 ```bash
-git clone https://github.com/<you>/zu && cd zu
+git clone https://github.com/k3-mt/zu && cd zu
 uv sync                 # create the env, install every workspace package editable
 uv run pytest           # the offline suite — no API keys, no network
 uv run zu plugins       # list every discovered plugin across all six ports
