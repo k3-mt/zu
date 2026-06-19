@@ -60,54 +60,6 @@ def _coerce_task(source: Any, default_budget: Budget) -> TaskSpec:
     raise ConfigError(f"unsupported task type: {type(source).__name__}")
 
 
-# --- scaffold templates ------------------------------------------------------
-
-_TEMPLATES: dict[str, dict[str, str]] = {
-    "web": {
-        "zu.yaml": (
-            "provider:\n"
-            "  name: anthropic\n"
-            "  model: claude-sonnet-4-6\n"
-            "  api_key_env: ANTHROPIC_API_KEY\n"
-            "plugins:\n"
-            "  tools: [http_fetch, html_parse, render_dom]\n"
-            "  detectors: [empty, error, js-shell, bot-wall]\n"
-            "  validators: [schema, grounding]\n"
-            "event_sink: { driver: sqlite, path: ./zu.db }\n"
-            "budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }\n"
-        ),
-        "task.yaml": (
-            "query: \"Extract the product name and price.\"\n"
-            "target: \"https://example.com/product/123\"\n"
-            "output_schema:\n"
-            "  type: object\n"
-            "  properties:\n"
-            "    name: { type: string }\n"
-            "    price: { type: string }\n"
-            "  required: [name, price]\n"
-        ),
-    },
-    "minimal": {
-        "zu.yaml": (
-            "provider:\n"
-            "  name: anthropic\n"
-            "  model: claude-sonnet-4-6\n"
-            "  api_key_env: ANTHROPIC_API_KEY\n"
-            "plugins:\n"
-            "  validators: [schema]\n"
-            "event_sink: { driver: sqlite, path: ./zu.db }\n"
-        ),
-        "task.yaml": (
-            "query: \"Answer the question as JSON.\"\n"
-            "output_schema:\n"
-            "  type: object\n"
-            "  properties: { answer: { type: string } }\n"
-            "  required: [answer]\n"
-        ),
-    },
-}
-
-
 def _discovered() -> dict[str, list[str]]:
     reg = Registry()
     reg.discover()
@@ -126,20 +78,18 @@ def build_server() -> FastMCP:
         return _discovered()
 
     @mcp.tool()
-    async def zu_scaffold(directory: str = ".", template: str = "web") -> dict:
+    async def zu_scaffold(directory: str = ".", template: str = "web", force: bool = False) -> dict:
         """Create a starter zu.yaml + task.yaml in ``directory``. Templates:
-        'web' (a tier-1/2 web-extraction agent) or 'minimal' (no tools)."""
-        import os
+        'web' (tier-1/2 web extraction), 'minimal' (no tools), 'research'
+        (multi-field article extraction)."""
+        from .scaffold import TEMPLATE_NAMES, write_template
 
-        if template not in _TEMPLATES:
-            return {"ok": False, "error": f"unknown template {template!r}; choose: {list(_TEMPLATES)}"}
-        os.makedirs(directory, exist_ok=True)
-        written = []
-        for name, content in _TEMPLATES[template].items():
-            path = os.path.join(directory, name)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            written.append(path)
+        if template not in TEMPLATE_NAMES:
+            return {"ok": False, "error": f"unknown template {template!r}; choose: {list(TEMPLATE_NAMES)}"}
+        try:
+            written = write_template(directory, template, force=force)
+        except FileExistsError as exc:
+            return {"ok": False, "error": f"files exist: {exc} (pass force=true to overwrite)"}
         return {
             "ok": True,
             "template": template,

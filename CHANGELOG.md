@@ -7,6 +7,15 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — `zu init` scaffolder (Phase 2)
+
+- **`zu init [dir] --template web|minimal|research`** writes a runnable starter
+  `zu.yaml` + `task.yaml` — edit the provider block and `zu run`. Refuses to
+  clobber existing files without `--force`.
+- A shared `zu_cli.scaffold` module is the single source of truth for the
+  templates; the MCP `zu_scaffold` tool now uses it too (added the `research`
+  template and `force`). Every template is tested to parse as a valid config+task.
+
 ### Added — `zu mcp`: drive Zu from any coding agent (MCP)
 
 Live in your harness of choice (Claude Code, Cursor, Codex) and let it design,

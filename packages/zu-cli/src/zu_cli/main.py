@@ -236,6 +236,39 @@ def demo(
 
 
 @app.command()
+def init(
+    directory: str = typer.Argument(".", help="Where to write the starter files."),
+    template: str = typer.Option(
+        "web", "--template", "-t", help="Agent shape: web | minimal | research."
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing files."),
+) -> None:
+    """Scaffold a new Zu agent — a starter zu.yaml + task.yaml you can run at once.
+
+    Edit the provider block to choose your model, then `zu run task.yaml`.
+    """
+    from .scaffold import TEMPLATE_NAMES, write_template
+
+    if template not in TEMPLATE_NAMES:
+        typer.echo(f"unknown template {template!r}; choose: {', '.join(TEMPLATE_NAMES)}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        paths = write_template(directory, template, force=force)
+    except FileExistsError as exc:
+        typer.echo(f"refusing to overwrite: {exc} (use --force)", err=True)
+        raise typer.Exit(code=1)
+
+    for p in paths:
+        typer.echo(f"created {p}")
+    typer.echo(
+        "\nnext:\n"
+        "  1. edit zu.yaml — set the provider/model and export its API key\n"
+        "  2. zu run task.yaml -c zu.yaml        # runs with a live trace\n"
+        "  3. zu demo --offline                  # or self-test the wiring first"
+    )
+
+
+@app.command()
 def mcp() -> None:
     """Run the MCP server (stdio) so a coding agent — Claude Code, Cursor, … —
     can design, validate, run, and inspect Zu agents for you in natural language.

@@ -120,6 +120,12 @@ Real providers need their SDK — `pip install 'zu-runtime[anthropic]'` (or
 
 ## 2. Define the agent: a config and a task
 
+Scaffold a starter pair (edit, then run) — or write them by hand as below:
+
+```bash
+zu init --template web        # or: minimal | research   → writes zu.yaml + task.yaml
+```
+
 **`zu.yaml`** — how to run (the model is a one-line swap):
 
 ```yaml
