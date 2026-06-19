@@ -151,6 +151,10 @@ def serve(
 
 @app.command()
 def demo(
+    type: str = typer.Option(
+        "escalation", "--type", "-t",
+        help="Which demo: escalation (web arc, needs [demo] extra) | minimal (no tools, runs on base).",
+    ),
     provider: str = typer.Option(
         "scripted", "--provider", help="scripted (offline, default) | anthropic | openai-compatible"
     ),
@@ -163,30 +167,40 @@ def demo(
         None, "--base-url-env", help="Env var holding the base URL (openai-compatible)."
     ),
 ) -> None:
-    """Run the killer demo: fetch → fail on JS → escalate to a browser → validate.
+    """Run a demo. --type escalation (default) shows the fetch → fail-on-JS →
+    escalate-to-browser → validate arc (needs the [demo] extra); --type minimal
+    is the smallest loop (a model answers, schema-validated) and runs on the base.
 
     Offline by default (fake model, fixtures — no key, no network, no Docker).
-    Pass --provider/--model (and a key) to watch a real model make the same
-    escalation decision; the page stays fixtured so no Docker is needed.
+    Pass --provider/--model (and a key) to watch a real model do it.
     """
     import asyncio as _asyncio
 
     from . import demo as _demo
 
-    # The demo exercises the web tools (an opt-in extra); fail fast with the
-    # install hint rather than partway through the run.
-    try:
-        _demo.ensure_web_tools()
-    except RuntimeError as exc:
-        typer.echo(str(exc), err=True)
+    if type not in _demo.DEMOS:
+        typer.echo(
+            f"unknown demo type {type!r}; choose one of: {', '.join(_demo.DEMO_TYPES)}", err=True
+        )
         raise typer.Exit(code=2)
 
+    # Fail fast with the install hint if this demo needs the web tools and they
+    # aren't installed — rather than partway through the run.
+    if _demo.DEMOS[type]["needs_web"]:
+        try:
+            _demo.ensure_web_tools()
+        except RuntimeError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2)
+
     try:
-        prov, label = _demo.build_provider(provider, model, api_key, api_key_env, base_url_env)
+        prov, label = _demo.build_provider(
+            provider, model, api_key, api_key_env, base_url_env, kind=type
+        )
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
         raise typer.Exit(code=2)
-    raise typer.Exit(code=_asyncio.run(_demo.run_demo(prov, label)))
+    raise typer.Exit(code=_asyncio.run(_demo.run_demo(prov, label, kind=type)))
 
 
 @app.command()

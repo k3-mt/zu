@@ -26,6 +26,21 @@ client), and `[all]`. Every plugin remains a standalone package
   mid-run. `zu_cli.demo` imports its plugins lazily so the module still loads on
   the lean base.
 
+### Added — selectable demo types, `[demo]` extra, explicit prerequisites
+
+- **`zu demo --type`** chooses the demo: `escalation` (default — the web
+  fetch → fail-on-JS → escalate → validate arc, needs the web tools) or
+  `minimal` (the smallest real loop: a model answers, schema-validated — **no
+  tools, no network, runs on the bare base**). Both run offline by default or
+  against a real model.
+- **`zu-runtime[demo]`** — an alias for `[web]`, so the docs say one thing:
+  `pip install 'zu-runtime[demo]' && zu demo`.
+- **Prerequisites made explicit** (README + QUICKSTART): Python 3.11+ is the only
+  hard requirement; an API key is needed only for a real model; **Docker is
+  needed only** when a run escalates to the real tier-2 browser (`render_dom` via
+  `local-docker`) — not for installing, the demos, embedding, `zu serve`, or
+  tier-1 web extraction.
+
 ### Added — `zu demo`, and providers accept a direct API key
 
 Make the demo runnable straight from a `pip install`, and let the package take a

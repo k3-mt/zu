@@ -24,6 +24,9 @@ dependencies = [
 # Web tools: http_fetch, html_parse, render_dom (the browser tier). Needed for
 # the killer demo and any web-extraction task.
 web = ["zu-tools==0.1.0"]
+# Alias for [web], so the docs can say one clean thing: `pip install
+# 'zu-runtime[demo]'` then `zu demo` (the escalation demo uses the web tools).
+demo = ["zu-tools==0.1.0"]
 # Real model SDKs (the adapters ship in the base; these add the vendor client).
 anthropic = ["zu-providers[anthropic]==0.1.0"]
 openai = ["zu-providers[openai]==0.1.0"]

@@ -12,6 +12,20 @@ and in a container — plus how to schedule it. Every step works offline first
 
 ---
 
+## Prerequisites
+
+| Requirement | When you need it |
+|---|---|
+| **Python 3.11+** | Always — the only hard requirement. |
+| **An API key** | Only to run against a **real model** (Anthropic / OpenAI / OpenRouter). Offline/scripted runs and both demos' default mode need no key. A local model (Ollama / vLLM) needs no key either. |
+| **Docker** | **Not required** for the base, embedding, `zu serve`, the tier-1 web tools (`http_fetch`, `html_parse`), or the demos (they fixture the browser). It is required **only** when a real run actually escalates to the **tier-2 browser** — `render_dom` via the default `local-docker` backend launches a headless-Chromium container, so that needs the Docker daemon running plus `pip install 'zu-runtime[docker]'`. |
+
+**So: you do _not_ need Docker to install Zu, run the demos, embed it, serve it,
+or run tier-1 web extraction.** You need it only to render JavaScript pages in a
+real browser (tier 2). Until then, everything runs with just Python.
+
+---
+
 ## 1. Install
 
 A lean base, plugins opt-in (the same shape as dbt: a small core, adapters you
@@ -45,16 +59,23 @@ zu plugins
 
 ### Try it instantly
 
+Two demos, pick with `--type`:
+
 ```bash
-pip install 'zu-runtime[web]'     # the demo uses the web tools
+# minimal — the smallest real loop (a model answers, schema-validated). No tools,
+# no network, no extra install: runs on the bare base.
+zu demo --type minimal
+
+# escalation (default) — the full arc: fetch → fail on JS → escalate to a browser
+# → validate. Uses the web tools, so install the demo extra first:
+pip install 'zu-runtime[demo]'    # alias for [web]
 zu demo
 ```
 
-Runs the whole arc — fetch → fail on JavaScript → escalate to a browser →
-validate — with the fake model and saved fixtures: no key, no network, no
-Docker. (On the bare base, `zu demo` prints the one-line `[web]` install hint.)
-To watch a **real model** make the same escalation decision (the page stays
-fixtured, so still no Docker), pass a provider, a model, and your key:
+Both run offline with the fake model and saved fixtures — no key, no network, no
+Docker. (On the bare base, `zu demo` prints the one-line `[demo]` install hint.)
+To watch a **real model** do it (the page stays fixtured, so still no Docker),
+pass a provider, a model, and your key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...

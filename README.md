@@ -65,15 +65,19 @@ pip install 'zu-runtime[all]'         # everything (web + both SDKs + server + D
 Each plugin is also a standalone package (`pip install zu-tools`, `zu-providers`, …),
 the way dbt ships adapters. `zu plugins` lists whatever you've installed.
 
-See the whole arc — fetch a JS page, **fail on JavaScript, escalate to a
-browser**, return validated data — offline and deterministic (no key, no
-network, no Docker):
+Try it offline and deterministic — no key, no network, no Docker:
 
 ```bash
-pip install 'zu-runtime[web]'     # the demo uses the web tools
-zu demo                           # run it
+zu demo --type minimal            # smallest loop (model answers, schema-validated) — runs on the base
+pip install 'zu-runtime[demo]'    # the escalation demo uses the web tools
+zu demo                           # fetch → fail on JS → escalate to a browser → validate
 zu demo --provider anthropic --model claude-sonnet-4-6   # with ANTHROPIC_API_KEY or --api-key
 ```
+
+**Prerequisites:** Python 3.11+ is all you need to install, demo, embed, serve,
+or run tier-1 web extraction. An API key is needed only for a **real model**, and
+**Docker only** if a run escalates to the real tier-2 browser (`render_dom`). See
+[`docs/QUICKSTART.md`](docs/QUICKSTART.md#prerequisites).
 
 ```
 providers   anthropic, openai-compatible, scripted

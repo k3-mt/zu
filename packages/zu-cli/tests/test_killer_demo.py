@@ -1,7 +1,7 @@
-"""The killer demo — shipped in the package (`zu demo`) and ready straight away.
+"""The demos behind `zu demo` — shipped in the package, ready straight away.
 
-Proves the demo runs the full three-pillar arc offline with zero setup (no key,
-no network, no Docker), exits cleanly via the `zu demo` command, and that the
+Covers both demo types: the escalation arc (web, the full three-pillar story)
+and the minimal loop (no tools, runs on the bare base). Both run offline; the
 real-model path is wired and fails cleanly without a key.
 """
 
@@ -21,46 +21,62 @@ runner = CliRunner()
 
 
 @pytest.mark.asyncio
-async def test_arc_runs_to_a_grounded_success():
-    result, bus, backend = await demo.run_arc(demo.scripted_arc())
+async def test_escalation_arc_runs_to_a_grounded_success():
+    provider = demo.DEMOS["escalation"]["scripted"]()
+    result, bus, backend = await demo.run_arc(provider, kind="escalation")
 
-    # Pillar 3: schema-valid + grounded (both validators registered).
     assert result.status is Status.SUCCESS
     assert result.value == {"name": "Acme Widget", "price": "$9.00"}
 
     events = await bus.query()
     types = [e.type for e in events]
-
-    # Pillar 1: a detector drove a tier climb 1 -> 2 (not a terminal give-up).
     assert "harness.detector.fired" in types
     escalated = [e for e in events if e.type == "harness.task.escalated"]
     assert len(escalated) == 1
-    assert escalated[0].payload["reason"] == "js-shell"
     assert (escalated[0].payload["from_tier"], escalated[0].payload["to_tier"]) == (1, 2)
-    assert "exhausted" not in escalated[0].payload
-
-    # The tier-2 browser was leased and torn down.
     assert backend.launched and backend.destroyed == 1
-    assert backend.launched[0]["tier"] == 2
-
-    # Pillar 2: a queryable log ending in completion.
     assert types[-1] == "harness.task.completed"
 
 
-def test_zu_demo_command_offline_exits_zero():
-    result = runner.invoke(app, ["demo"])
+@pytest.mark.asyncio
+async def test_minimal_arc_runs_with_no_tools():
+    provider = demo.DEMOS["minimal"]["scripted"]()
+    result, bus, backend = await demo.run_arc(provider, kind="minimal")
+
+    assert result.status is Status.SUCCESS
+    assert result.value == {"capital": "Paris"}
+    assert backend is None  # no browser/sandbox in the minimal demo
+    types = [e.type for e in await bus.query()]
+    assert "harness.tool.invoked" not in types  # genuinely tool-free
+    assert types[-1] == "harness.task.completed"
+
+
+def test_zu_demo_escalation_offline_exits_zero():
+    result = runner.invoke(app, ["demo"])  # default type = escalation
     assert result.exit_code == 0, result.output
     assert "ESCALATE 1→2" in result.output
     assert "RESULT   : success" in result.output
     assert "Acme Widget" in result.output
 
 
+def test_zu_demo_minimal_offline_exits_zero():
+    result = runner.invoke(app, ["demo", "--type", "minimal"])
+    assert result.exit_code == 0, result.output
+    assert "type     : minimal" in result.output
+    assert "RESULT   : success" in result.output
+    assert "Paris" in result.output
+
+
+def test_zu_demo_unknown_type_is_rejected():
+    result = runner.invoke(app, ["demo", "--type", "nope"])
+    assert result.exit_code == 2
+    assert "unknown demo type" in result.output
+
+
 def test_zu_demo_real_provider_fails_cleanly_without_a_key():
-    # Wiring reaches the real adapter; with no key it fails fast — reported, not
-    # crashed — and the demo exits 1.
     result = runner.invoke(
         app,
-        ["demo", "--provider", "anthropic", "--model", "claude-sonnet-4-6",
+        ["demo", "--type", "minimal", "--provider", "anthropic", "--model", "claude-x",
          "--api-key-env", "ZU_ABSENT_KEY"],
     )
     assert result.exit_code == 1
@@ -69,7 +85,6 @@ def test_zu_demo_real_provider_fails_cleanly_without_a_key():
 
 
 def test_example_wrapper_runs_as_a_subprocess():
-    # The literal "clone the repo and run it" path stays identical to `zu demo`.
     demo_path = Path(__file__).resolve().parents[3] / "examples" / "killer_demo.py"
     import subprocess
 

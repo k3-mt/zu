@@ -1,18 +1,19 @@
-"""The killer demo, shipped in the package so ``zu demo`` runs after a pip
-install — no repo clone needed.
+"""The demos behind ``zu demo`` — shipped in the package so they run after a
+pip install, no repo clone needed.
 
-It runs the whole arc in one go: an agent tries the cheap HTTP tier, **fails on
-a JavaScript page**, a *detector* (not the model) **escalates to a browser**,
-returns the product, and the answer is **validated** against what the run
-actually fetched — with the run queryable afterward as an event log.
+Two demo types, selectable with ``--type``:
 
-Two modes, both initialised straight away:
+* **escalation** (default) — the killer arc: an agent tries the cheap HTTP tier,
+  **fails on a JavaScript page**, a *detector* (not the model) **escalates to a
+  browser**, returns the product, and the answer is **validated** against what
+  the run fetched. Uses the web tools (the ``[web]``/``[demo]`` extra); the
+  network and browser are fixtured, so no real site and no Docker are involved.
+* **minimal** — the smallest real loop: a model answers a question as JSON,
+  validated against a schema. No tools, no network — so it runs on the **bare
+  base install**, with the fake model or a real one.
 
-* **offline (default)** — a fake model and saved fixtures: deterministic, no API
-  key, no network, no Docker. Works the instant the package is installed.
-* **real model** — pass a provider + model (and your key, via ``--api-key`` or an
-  env var). The page is still fixtured, so no Docker is needed; you watch a live
-  model make the same escalation decision. We never ship or require a key.
+Both run offline by default (a deterministic fake model). Pass a provider, a
+model, and your key to watch a real model do it. We never ship or require a key.
 """
 
 from __future__ import annotations
@@ -25,12 +26,12 @@ from zu_core.loop import run_task
 from zu_core.ports import ModelProvider, ToolCall
 from zu_core.registry import Registry
 
-# Plugin packages are imported lazily inside the functions below: the demo needs
-# the web tools (zu-tools), which are an opt-in extra, so this module must still
+# Plugin packages are imported lazily inside the functions below: the escalation
+# demo needs the web tools (zu-tools), an opt-in extra, so this module must still
 # import on the lean base. ``ensure_web_tools`` turns a missing-tools install
 # into a clear, actionable message rather than an ImportError mid-run.
 
-_WEB_HINT = "the demo needs the web tools — install them with: pip install 'zu-runtime[web]'"
+_WEB_HINT = "the escalation demo needs the web tools — install them with: pip install 'zu-runtime[demo]'"
 
 
 def ensure_web_tools() -> None:
@@ -39,6 +40,9 @@ def ensure_web_tools() -> None:
         import zu_tools  # noqa: F401
     except ModuleNotFoundError as exc:
         raise RuntimeError(_WEB_HINT) from exc
+
+
+# --- the escalation demo (web) -----------------------------------------------
 
 # The product page, two ways. Over plain HTTP it's an empty JS shell (a mount
 # point and a script, no content). A real browser runs the JS and the product
@@ -51,7 +55,7 @@ _RENDERED = (
     "</main></body></html>"
 )
 
-_TASK = TaskSpec(
+_ESCALATION_TASK = TaskSpec(
     query="Extract the product name and price.",
     target=_URL,
     max_tier=2,
@@ -59,6 +63,18 @@ _TASK = TaskSpec(
         "type": "object",
         "properties": {"name": {"type": "string"}, "price": {"type": "string"}},
         "required": ["name", "price"],
+    },
+)
+
+# --- the minimal demo (no tools, runs on the bare base) ----------------------
+
+_MINIMAL_TASK = TaskSpec(
+    query="Reply with the capital of France as a JSON object: {\"capital\": ...}.",
+    max_tier=1,
+    output_schema={
+        "type": "object",
+        "properties": {"capital": {"type": "string"}},
+        "required": ["capital"],
     },
 )
 
@@ -95,7 +111,7 @@ def _shell_fetch() -> Any:
     return HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
 
 
-def build_demo_registry(backend: _FixtureBrowser) -> Registry:
+def _escalation_registry() -> tuple[Registry, _FixtureBrowser]:
     """The real built-ins (only the network and browser are fixtured): tier-1
     http_fetch, tier-2 render_dom, all four detectors, both validators."""
     ensure_web_tools()
@@ -108,6 +124,7 @@ def build_demo_registry(backend: _FixtureBrowser) -> Registry:
     from zu_validators.grounding import GroundingValidator
     from zu_validators.schema import SchemaValidator
 
+    backend = _FixtureBrowser(_RENDERED)
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())
     reg.register("tools", "html_parse", HtmlParse())
@@ -121,35 +138,73 @@ def build_demo_registry(backend: _FixtureBrowser) -> Registry:
         reg.register("detectors", name, det)
     reg.register("validators", "schema", SchemaValidator())
     reg.register("validators", "grounding", GroundingValidator())
-    return reg
+    return reg, backend
 
 
-def scripted_arc() -> Any:
-    """The deterministic fake model: http_fetch (a shell -> escalate), render_dom
-    on the new tier, then finalise the product. The answer is grounded in the
-    rendered DOM, so validation passes."""
+def _minimal_registry() -> tuple[Registry, None]:
+    """No tools, no network — just the schema validator. Runs on the bare base."""
+    from zu_validators.schema import SchemaValidator
+
+    reg = Registry()
+    reg.register("validators", "schema", SchemaValidator())
+    return reg, None
+
+
+def _escalation_scripted() -> Any:
     from zu_providers.scripted import ScriptedProvider
 
     return ScriptedProvider.from_moves(
         [
-            {"tool": "http_fetch", "args": {"url": _URL}},
-            {"tool": "render_dom", "args": {"url": _URL}},
+            {"tool": "http_fetch", "args": {"url": _URL}},   # tier 1 -> JS shell
+            {"tool": "render_dom", "args": {"url": _URL}},   # tier 2 -> real DOM
             {"text": '{"name": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
         ]
     )
 
 
-async def run_arc(provider: ModelProvider) -> tuple[Result, EventBus, _FixtureBrowser]:
-    """Drive the arc; return the result, the event bus (the log), and the fixture
-    browser (so a caller can confirm the tier-2 lease)."""
-    backend = _FixtureBrowser(_RENDERED)
-    bus = EventBus()
-    result = await run_task(_TASK, provider, build_demo_registry(backend), bus)
-    return result, bus, backend
+def _minimal_scripted() -> Any:
+    from zu_providers.scripted import ScriptedProvider
+
+    return ScriptedProvider.from_moves([{"text": '{"capital": "Paris"}', "finish": "stop"}])
+
+
+# The demo catalogue: each type names its task, registry/provider builders, the
+# header title, whether it needs the web extra, and the closing blurb.
+DEMOS: dict[str, dict[str, Any]] = {
+    "escalation": {
+        "task": _ESCALATION_TASK,
+        "registry": _escalation_registry,
+        "scripted": _escalation_scripted,
+        "needs_web": True,
+        "title": "killer demo — fetch, fail on JavaScript, escalate, validate",
+        "blurb": (
+            "Three pillars in one run: a detector (not the model) escalated to a "
+            "browser, the\nresult is grounded in the rendered DOM, and the whole "
+            "run is a queryable log."
+        ),
+    },
+    "minimal": {
+        "task": _MINIMAL_TASK,
+        "registry": _minimal_registry,
+        "scripted": _minimal_scripted,
+        "needs_web": False,
+        "title": "minimal demo — a model answers, schema-validated (no tools, no network)",
+        "blurb": (
+            "The smallest real loop: the model produced a JSON answer and the "
+            "schema validator\nconfirmed its shape — all captured as a queryable "
+            "event log. Runs on the bare base."
+        ),
+    },
+}
+
+DEMO_TYPES = tuple(DEMOS)
+
+
+# --- running + narration -----------------------------------------------------
 
 
 _NARRATION = {
-    "harness.task.started": "📋 task started — try the cheap tier first",
+    "harness.task.started": "📋 task started",
     "harness.tool.invoked": "🔧 tool: {tool}",
     "harness.detector.fired": "🔎 detector fired: {detector} ({severity}) — {detail}",
     "harness.task.escalated": "⬆️  ESCALATE {from_tier}→{to_tier}: {reason} — climbing to a browser",
@@ -170,21 +225,38 @@ def _narrate(event_type: str, payload: dict) -> str | None:
         return template
 
 
-async def run_demo(provider: ModelProvider, provider_label: str = "scripted") -> int:
-    """Run the arc and print the narrated timeline + result. Returns a process
-    exit code (0 success, 1 otherwise)."""
+async def run_arc(
+    provider: ModelProvider, kind: str = "escalation"
+) -> tuple[Result, EventBus, Any]:
+    """Drive the chosen demo; return the result, the event bus (the log), and the
+    fixture browser (escalation) or None (minimal)."""
+    registry, backend = DEMOS[kind]["registry"]()
+    bus = EventBus()
+    result = await run_task(DEMOS[kind]["task"], provider, registry, bus)
+    return result, bus, backend
+
+
+async def run_demo(
+    provider: ModelProvider, provider_label: str = "scripted", kind: str = "escalation"
+) -> int:
+    """Run the chosen demo and print the narrated timeline + result. Returns a
+    process exit code (0 success, 1 otherwise)."""
+    meta = DEMOS[kind]
+    task = meta["task"]
     model = getattr(provider, "model", None) or provider_label
 
     print("=" * 72)
-    print("Zu · killer demo — fetch, fail on JavaScript, escalate, validate")
+    print(f"Zu · {meta['title']}")
     print("=" * 72)
-    print(f"task     : {_TASK.query}")
-    print(f"target   : {_TASK.target}")
+    print(f"type     : {kind}")
+    print(f"task     : {task.query}")
+    if task.target:
+        print(f"target   : {task.target}")
     print(f"provider : {provider_label}  model: {model}")
     print("-" * 72)
 
     try:
-        result, bus, backend = await run_arc(provider)
+        result, bus, backend = await run_arc(provider, kind)
     except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
         print(f"\nrun failed: {type(exc).__name__}: {exc}")
         return 1
@@ -200,18 +272,16 @@ async def run_demo(provider: ModelProvider, provider_label: str = "scripted") ->
         print(f"value    : {result.value}")
     if result.reason is not None:
         print(f"reason   : {result.reason}")
-    print(
-        f"provenance: {await bus.count()} events recorded · "
-        f"tier-2 browser leased {len(backend.launched)}×, torn down {backend.destroyed}×"
-    )
+    if backend is not None:
+        print(
+            f"provenance: {await bus.count()} events recorded · "
+            f"tier-2 browser leased {len(backend.launched)}×, torn down {backend.destroyed}×"
+        )
+    else:
+        print(f"provenance: {await bus.count()} events recorded")
 
     if result.status is Status.SUCCESS:
-        print(
-            "\nThree pillars in one run: a detector (not the model) escalated to a "
-            "browser, the\nresult is grounded in the rendered DOM, and the whole "
-            "run is a queryable log.\nSwap the model with one config line — see the "
-            "quickstart."
-        )
+        print(f"\n{meta['blurb']}\nSwap the model with one config line — see the quickstart.")
         return 0
     print("\nThe run did not succeed — inspect the timeline above and the event log.")
     return 1
@@ -223,11 +293,12 @@ def build_provider(
     api_key: str | None,
     api_key_env: str | None,
     base_url_env: str | None,
+    kind: str = "escalation",
 ) -> tuple[ModelProvider, str]:
     """Pick the demo's model: ``scripted`` (default, offline) or any real provider
     selected the same way ``zu run`` does — proving one config surface."""
     if provider == "scripted":
-        return scripted_arc(), "scripted"
+        return DEMOS[kind]["scripted"](), "scripted"
     from .config import ProviderConfig, build_provider as cfg_build_provider
 
     prov = cfg_build_provider(

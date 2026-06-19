@@ -1475,6 +1475,9 @@ all = [
 anthropic = [
     { name = "zu-providers", extra = ["anthropic"] },
 ]
+demo = [
+    { name = "zu-tools" },
+]
 docker = [
     { name = "zu-backends", extra = ["docker"] },
 ]
@@ -1503,10 +1506,11 @@ requires-dist = [
     { name = "zu-providers", extras = ["openai"], marker = "extra == 'all'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["openai"], marker = "extra == 'openai'", editable = "packages/zu-providers" },
     { name = "zu-tools", marker = "extra == 'all'", editable = "packages/zu-tools" },
+    { name = "zu-tools", marker = "extra == 'demo'", editable = "packages/zu-tools" },
     { name = "zu-tools", marker = "extra == 'web'", editable = "packages/zu-tools" },
     { name = "zu-validators", editable = "packages/zu-validators" },
 ]
-provides-extras = ["web", "anthropic", "openai", "serve", "docker", "all"]
+provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "all"]
 
 [[package]]
 name = "zu-tools"

@@ -25,7 +25,8 @@ from zu_cli import demo
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Zu killer demo — the escalation arc.")
+    p = argparse.ArgumentParser(description="Zu demo — the escalation arc (or --type minimal).")
+    p.add_argument("--type", default="escalation", choices=demo.DEMO_TYPES, help="which demo to run")
     p.add_argument("--provider", default="scripted", help="scripted (default) | anthropic | openai-compatible")
     p.add_argument("--model", default=None, help="model id for a real provider")
     p.add_argument("--api-key", default=None, help="API key for a real provider (or use an env var)")
@@ -33,9 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base-url-env", default=None, help="env var holding the base URL (openai-compatible)")
     a = p.parse_args(argv)
     provider, label = demo.build_provider(
-        a.provider, a.model, a.api_key, a.api_key_env, a.base_url_env
+        a.provider, a.model, a.api_key, a.api_key_env, a.base_url_env, kind=a.type
     )
-    return asyncio.run(demo.run_demo(provider, label))
+    return asyncio.run(demo.run_demo(provider, label, kind=a.type))
 
 
 if __name__ == "__main__":
