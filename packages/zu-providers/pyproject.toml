@@ -3,7 +3,8 @@ name = "zu-providers"
 version = "0.1.0"
 description = "Zu model-provider adapters: scripted, anthropic, openai-compatible"
 requires-python = ">=3.11"
-dependencies = ["zu-core"]
+license = "Apache-2.0"
+dependencies = ["zu-core==0.1.0"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
@@ -13,6 +14,10 @@ openai = ["openai>=1.40"]
 scripted = "zu_providers.scripted:ScriptedProvider"
 anthropic = "zu_providers.anthropic:AnthropicProvider"
 openai-compatible = "zu_providers.openai_compatible:OpenAICompatibleProvider"
+
+[project.urls]
+Homepage = "https://github.com/k3-mt/zu"
+Repository = "https://github.com/k3-mt/zu"
 
 [build-system]
 requires = ["hatchling"]

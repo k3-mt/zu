@@ -3,7 +3,12 @@ name = "zu-core"
 version = "0.1.0"
 description = "Zu core: contracts, ports, registry, loop, event bus"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = ["pydantic>=2"]        # nothing else — the core stays SDK-free
+
+[project.urls]
+Homepage = "https://github.com/k3-mt/zu"
+Repository = "https://github.com/k3-mt/zu"
 
 [build-system]
 requires = ["hatchling"]

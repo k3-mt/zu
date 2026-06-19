@@ -17,6 +17,7 @@ dependencies = [
     "zu-validators",
     "zu-backends",
     "zu-cli",
+    "zu-runtime",
 ]
 
 [tool.uv]
@@ -33,6 +34,7 @@ zu-detectors  = { workspace = true }
 zu-validators = { workspace = true }
 zu-backends   = { workspace = true }
 zu-cli        = { workspace = true }
+zu-runtime    = { workspace = true }
 
 # Dev tooling installed by `uv sync` (PEP 735 dependency group).
 [dependency-groups]
@@ -43,6 +45,8 @@ dev = [
     "cryptography>=42",   # exercises zu-backends[encryption] in CI
     "anthropic>=0.40",    # exercises zu-providers[anthropic] in CI
     "openai>=1.40",       # exercises zu-providers[openai] in CI
+    "fastapi>=0.110",     # exercises `zu serve` (the serve extra) in tests
+    "httpx",              # FastAPI TestClient transport
 ]
 
 [tool.pytest.ini_options]

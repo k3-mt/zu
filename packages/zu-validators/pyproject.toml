@@ -3,11 +3,16 @@ name = "zu-validators"
 version = "0.1.0"
 description = "Zu built-in validators: schema, grounding"
 requires-python = ">=3.11"
-dependencies = ["zu-core", "jsonschema>=4"]
+license = "Apache-2.0"
+dependencies = ["zu-core==0.1.0", "jsonschema>=4"]
 
 [project.entry-points."zu.validators"]
 schema = "zu_validators.schema:SchemaValidator"
 grounding = "zu_validators.grounding:GroundingValidator"
+
+[project.urls]
+Homepage = "https://github.com/k3-mt/zu"
+Repository = "https://github.com/k3-mt/zu"
 
 [build-system]
 requires = ["hatchling"]

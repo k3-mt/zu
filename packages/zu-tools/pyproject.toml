@@ -3,15 +3,20 @@ name = "zu-tools"
 version = "0.1.0"
 description = "Zu built-in tools: http_fetch, html_parse, render_dom"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 # zu-backends supplies render_dom's default sandbox (local-docker); it is
 # imported lazily, so a tier-1-only run never touches it, but the default
 # tier-2 render works out of the box once installed.
-dependencies = ["zu-core", "httpx", "selectolax", "zu-backends"]
+dependencies = ["zu-core==0.1.0", "httpx", "selectolax", "zu-backends==0.1.0"]
 
 [project.entry-points."zu.tools"]      # <- how a tool is registered
 http_fetch = "zu_tools.fetch:HttpFetch"
 html_parse = "zu_tools.parse:HtmlParse"
 render_dom = "zu_tools.render:RenderDom"
+
+[project.urls]
+Homepage = "https://github.com/k3-mt/zu"
+Repository = "https://github.com/k3-mt/zu"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,86 @@
+"""`zu serve` — the HTTP wrapper over the same run path as the CLI.
+
+Proves the service runs a task end to end offline and returns the Result plus
+the event log, honours a per-request config override, and turns bad input into
+clean 4xx/5xx responses rather than tracebacks. FastAPI is a dev dependency so
+these run in CI; it is an optional extra for users (`zu-cli[serve]`).
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from zu_cli.server import create_app  # noqa: E402
+
+
+def _cfg(answer: dict) -> dict:
+    return {
+        "provider": {"name": "scripted", "script": [{"text": json.dumps(answer), "finish": "stop"}]},
+        "plugins": {"validators": ["schema"]},
+    }
+
+
+_TASK = {
+    "query": "extract",
+    "output_schema": {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "price": {"type": "string"}},
+        "required": ["name", "price"],
+    },
+}
+
+
+def _client(cfg: dict) -> TestClient:
+    return TestClient(create_app(cfg))
+
+
+def test_healthz():
+    assert _client(_cfg({"name": "A", "price": "$1"})).get("/healthz").json() == {"status": "ok"}
+
+
+def test_run_returns_result_and_events():
+    c = _client(_cfg({"name": "Acme", "price": "$9"}))
+    resp = c.post("/run", json={"task": _TASK})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"]["status"] == "success"
+    assert body["result"]["value"] == {"name": "Acme", "price": "$9"}
+    assert body["events"][-1]["type"] == "harness.task.completed"
+
+
+def test_include_events_false_omits_the_log():
+    c = _client(_cfg({"name": "Acme", "price": "$9"}))
+    body = c.post("/run", json={"task": _TASK, "include_events": False}).json()
+    assert "events" not in body
+    assert body["result"]["status"] == "success"
+
+
+def test_per_request_config_override():
+    # Server default answers "Default"; the request overrides the whole config.
+    c = _client(_cfg({"name": "Default", "price": "$0"}))
+    body = c.post("/run", json={"task": _TASK, "config": _cfg({"name": "Override", "price": "$5"})}).json()
+    assert body["result"]["value"] == {"name": "Override", "price": "$5"}
+
+
+def test_bad_task_is_422_not_a_crash():
+    c = _client(_cfg({"name": "A", "price": "$1"}))
+    resp = c.post("/run", json={"task": {"no_query": True}})
+    assert resp.status_code == 422
+    assert "invalid task" in resp.json()["detail"]
+
+
+def test_model_failure_is_502():
+    # A real provider with no key fails fast inside the loop; the server reports
+    # 502 (an upstream/model failure) rather than crashing.
+    cfg = {
+        "provider": {"name": "anthropic", "model": "claude-x", "api_key_env": "ZU_ABSENT_KEY"},
+        "plugins": {"validators": ["schema"]},
+    }
+    resp = _client(cfg).post("/run", json={"task": _TASK})
+    assert resp.status_code == 502
+    assert "ZU_ABSENT_KEY" in resp.json()["detail"]

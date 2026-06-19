@@ -49,13 +49,12 @@ wires a whole run from a file, the model a one-line swap), and the **killer
 demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
 with zero setup. What remains is breadth behind the existing ports, not new core.
 
-## Quickstart (for contributors today)
+## Quickstart
 
 ```bash
-git clone https://github.com/k3-mt/zu && cd zu
-uv sync                 # create the env, install every workspace package editable
-uv run pytest           # the offline suite — no API keys, no network
-uv run zu plugins       # list every discovered plugin across all six ports
+pip install zu-runtime            # the library + the `zu` CLI + every built-in plugin
+pip install 'zu-runtime[all]'     # + HTTP server, Anthropic/OpenAI SDKs, Docker sandbox
+zu plugins                        # list every discovered plugin across all six ports
 ```
 
 ```
@@ -67,27 +66,40 @@ backends    local-docker
 sinks       sqlite
 ```
 
+Embed it in three lines — swap models by editing one config block:
+
+```python
+import zu
+result = zu.run("task.yaml", config="zu.yaml")
+print(result.status, result.value)
+```
+
+Or run it from the CLI, on a schedule, or as a service:
+
+```bash
+zu run task.yaml -c zu.yaml             # one-shot
+zu run task.yaml -c zu.yaml --every 5m  # scheduled worker
+zu serve -c zu.yaml                     # HTTP: POST /run   (needs the [serve] extra)
+docker build -t zu . && docker run -p 8000:8000 -v "$PWD/zu.yaml:/app/zu.yaml" -e ANTHROPIC_API_KEY zu
+```
+
+**→ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md)** — install, define
+a task + config, embed, serve, containerize, schedule, and write your own plugin.
+
 Every built-in above is registered through the **same** plugin API you'd use for your
 own — which is how we prove the plugin system is real, not a second-class add-on.
 
-See the whole arc in one run — zero setup, no API key, no Docker:
+See the whole arc in one run — zero setup, no API key, no Docker (from a clone of
+this repo):
 
 ```bash
-uv run python examples/killer_demo.py
+python examples/killer_demo.py
 ```
 
 It fetches a JS-heavy page, **fails on JavaScript, escalates to a browser**, and
 returns **validated** structured data, then prints the queryable event log — all
 three pillars in one run. Add `--provider anthropic --model claude-sonnet-4-6`
 (with a key set) to watch a real model make the same escalation decision.
-
-Run a task from a config file — the model, plugins, and event sink are all
-declarative, and swapping models is a one-line edit to the `provider` block:
-
-```bash
-cp examples/zu.example.yaml zu.yaml          # pick the model + plugins
-uv run zu run examples/task.example.yaml -c zu.yaml
-```
 
 ## The five-minute promise (real today)
 
@@ -115,13 +127,15 @@ zu/
     zu-detectors/   # empty, error, js-shell, bot-wall
     zu-validators/  # schema, grounding
     zu-backends/    # local-docker sandbox + sqlite event sink
-    zu-cli/         # the `zu` command
+    zu-cli/         # the `zu` command + `zu serve` (HTTP)
+    zu/             # the `import zu` embed facade (published as zu-runtime)
   examples/         # runnable demos (the killer demo lives here)
 ```
 
 ## Documentation
 
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up, test, and submit changes
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install, define a task + config, embed, serve, containerize, schedule, and write your own plugin
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up from a clone (`uv sync`), test, and submit changes
 
 ## License
 

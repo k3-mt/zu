@@ -13,6 +13,7 @@ members = [
     "zu-core",
     "zu-detectors",
     "zu-providers",
+    "zu-runtime",
     "zu-tools",
     "zu-validators",
     "zu-workspace",
@@ -286,6 +287,18 @@ wheels = [
 ]
 
 [[package]]
+name = "click"
+version = "8.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/98/518d8e5081007684232226f475082b30087d0f585e8457db087298259f49/click-8.4.1.tar.gz", hash = "sha256:918b5633eddf6b41c32d4f454bf0de810065c74e3f7dbf8ee5452f8be88d3e96", size = 353007, upload-time = "2026-05-22T04:08:37.769Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/0d/67e5b4109ea4a837e80daa87c2c696711955e40449a97e8926672534def2/click-8.4.1-py3-none-any.whl", hash = "sha256:482be17c6991b8c19c5429a1e995d9b0efdbb63172824c41f99965dc0ade8ec2", size = 116639, upload-time = "2026-05-22T04:08:35.26Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -380,6 +393,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e0/4d/f332313098c1de1b2d2ff91cf2674415cc7cddab2ca1b01ae29774bd5fdf/docstring_parser-0.18.0.tar.gz", hash = "sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015", size = 29341, upload-time = "2026-04-14T04:09:19.867Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/5f/ed01f9a3cdffbd5a008556fc7b2a08ddb1cc6ace7effa7340604b1d16699/docstring_parser-0.18.0-py3-none-any.whl", hash = "sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b", size = 22484, upload-time = "2026-04-14T04:09:18.638Z" },
+]
+
+[[package]]
+name = "fastapi"
+version = "0.137.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e2/29/cc5819dc24d3daa80cdaa1aec023bf8652a70dd7fd1c96b0b225c99a7690/fastapi-0.137.2.tar.gz", hash = "sha256:b9d893bebc97dcfbdcb1917e88a292d062844ea19445a5fa4f7eb28c4baea9e3", size = 410332, upload-time = "2026-06-18T06:58:24.434Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/ed/0c6b644e99fb5697d8bdcd36cdb47c52e77a63fc7a1514b1f03a6ecab955/fastapi-0.137.2-py3-none-any.whl", hash = "sha256:791d36261e916a98b25ac85ee591bc3db159394070f6d3d096d94fb378f60ce2", size = 122252, upload-time = "2026-06-18T06:58:26.074Z" },
 ]
 
 [[package]]
@@ -1246,6 +1275,19 @@ wheels = [
 ]
 
 [[package]]
+name = "starlette"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/eb/e3/7c1dc7381d9f8ab7d854328ebfa884e62cb3f3d8549ddfd37c7814f42afa/starlette-1.3.1.tar.gz", hash = "sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0", size = 2703240, upload-time = "2026-06-12T09:23:11.602Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/bb/2799cc2ede3ed41131f8975621e7213dfc7ef4acbbaadfa440f32500c370/starlette-1.3.1-py3-none-any.whl", hash = "sha256:c7372aae11c3c3f26a42df7bd626cec2f47d03483d261d369516a615a53714c6", size = 73632, upload-time = "2026-06-12T09:23:10.017Z" },
+]
+
+[[package]]
 name = "tqdm"
 version = "4.68.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1303,6 +1345,19 @@ wheels = [
 ]
 
 [[package]]
+name = "uvicorn"
+version = "0.49.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "h11" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/1f/fa18009dea8469069cca78a4e877a008ab78f08b064bfc9ab891579077ff/uvicorn-0.49.0.tar.gz", hash = "sha256:ebf4271aa580d9de97f93192d4595176df6e91f9aae919ca73e4fc07df1e66a3", size = 91284, upload-time = "2026-06-03T22:01:30.448Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/fa/e1388bbcf24ef3274f45c0c1c7b501fd14971037c1b6ee23610553307497/uvicorn-0.49.0-py3-none-any.whl", hash = "sha256:ba3d14c3ee7e41c6c654c46c9eb489d33213cdd30aa1696eab1374337c13f68f", size = 71376, upload-time = "2026-06-03T22:01:29.037Z" },
+]
+
+[[package]]
 name = "zu-backends"
 version = "0.1.0"
 source = { editable = "packages/zu-backends" }
@@ -1341,10 +1396,18 @@ dependencies = [
     { name = "zu-validators" },
 ]
 
+[package.optional-dependencies]
+serve = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+]
+
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.110" },
     { name = "pyyaml" },
     { name = "typer" },
+    { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.27" },
     { name = "zu-backends", editable = "packages/zu-backends" },
     { name = "zu-core", editable = "packages/zu-core" },
     { name = "zu-detectors", editable = "packages/zu-detectors" },
@@ -1352,6 +1415,7 @@ requires-dist = [
     { name = "zu-tools", editable = "packages/zu-tools" },
     { name = "zu-validators", editable = "packages/zu-validators" },
 ]
+provides-extras = ["serve"]
 
 [[package]]
 name = "zu-core"
@@ -1400,6 +1464,47 @@ requires-dist = [
 provides-extras = ["anthropic", "openai"]
 
 [[package]]
+name = "zu-runtime"
+version = "0.1.0"
+source = { editable = "packages/zu" }
+dependencies = [
+    { name = "zu-cli" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "zu-backends", extra = ["docker"] },
+    { name = "zu-cli", extra = ["serve"] },
+    { name = "zu-providers", extra = ["anthropic", "openai"] },
+]
+anthropic = [
+    { name = "zu-providers", extra = ["anthropic"] },
+]
+docker = [
+    { name = "zu-backends", extra = ["docker"] },
+]
+openai = [
+    { name = "zu-providers", extra = ["openai"] },
+]
+serve = [
+    { name = "zu-cli", extra = ["serve"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "zu-backends", extras = ["docker"], marker = "extra == 'all'", editable = "packages/zu-backends" },
+    { name = "zu-backends", extras = ["docker"], marker = "extra == 'docker'", editable = "packages/zu-backends" },
+    { name = "zu-cli", editable = "packages/zu-cli" },
+    { name = "zu-cli", extras = ["serve"], marker = "extra == 'all'", editable = "packages/zu-cli" },
+    { name = "zu-cli", extras = ["serve"], marker = "extra == 'serve'", editable = "packages/zu-cli" },
+    { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'all'", editable = "packages/zu-providers" },
+    { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'anthropic'", editable = "packages/zu-providers" },
+    { name = "zu-providers", extras = ["openai"], marker = "extra == 'all'", editable = "packages/zu-providers" },
+    { name = "zu-providers", extras = ["openai"], marker = "extra == 'openai'", editable = "packages/zu-providers" },
+]
+provides-extras = ["serve", "anthropic", "openai", "docker", "all"]
+
+[[package]]
 name = "zu-tools"
 version = "0.1.0"
 source = { editable = "packages/zu-tools" }
@@ -1443,6 +1548,7 @@ dependencies = [
     { name = "zu-core" },
     { name = "zu-detectors" },
     { name = "zu-providers" },
+    { name = "zu-runtime" },
     { name = "zu-tools" },
     { name = "zu-validators" },
 ]
@@ -1451,6 +1557,8 @@ dependencies = [
 dev = [
     { name = "anthropic" },
     { name = "cryptography" },
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "mypy" },
     { name = "openai" },
     { name = "pytest" },
@@ -1464,6 +1572,7 @@ requires-dist = [
     { name = "zu-core", editable = "packages/zu-core" },
     { name = "zu-detectors", editable = "packages/zu-detectors" },
     { name = "zu-providers", editable = "packages/zu-providers" },
+    { name = "zu-runtime", editable = "packages/zu" },
     { name = "zu-tools", editable = "packages/zu-tools" },
     { name = "zu-validators", editable = "packages/zu-validators" },
 ]
@@ -1472,6 +1581,8 @@ requires-dist = [
 dev = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "cryptography", specifier = ">=42" },
+    { name = "fastapi", specifier = ">=0.110" },
+    { name = "httpx" },
     { name = "mypy", specifier = ">=1.8" },
     { name = "openai", specifier = ">=1.40" },
     { name = "pytest", specifier = ">=8" },

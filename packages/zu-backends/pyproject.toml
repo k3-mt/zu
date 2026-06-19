@@ -3,7 +3,8 @@ name = "zu-backends"
 version = "0.1.0"
 description = "Zu sandbox backends and event sinks: local-docker, sqlite"
 requires-python = ">=3.11"
-dependencies = ["zu-core"]
+license = "Apache-2.0"
+dependencies = ["zu-core==0.1.0"]
 
 [project.optional-dependencies]
 docker = ["docker>=7"]
@@ -14,6 +15,10 @@ local-docker = "zu_backends.local_docker:LocalDockerBackend"
 
 [project.entry-points."zu.sinks"]
 sqlite = "zu_backends.sqlite_sink:SqliteSink"
+
+[project.urls]
+Homepage = "https://github.com/k3-mt/zu"
+Repository = "https://github.com/k3-mt/zu"
 
 [build-system]
 requires = ["hatchling"]

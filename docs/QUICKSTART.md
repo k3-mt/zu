@@ -1,0 +1,207 @@
+# Quickstart — build, run, and deploy an agent
+
+This is the builder's guide: install Zu, define an agent with a task + config,
+then run it four ways — embedded in your code, from the CLI, as an HTTP service,
+and in a container — plus how to schedule it. Every step works offline first
+(with the fake model), so you can see the whole shape before spending a token.
+
+> **Concepts in one line.** A **task** is *what you want* (a query, a target, and
+> the JSON shape of the answer). A **config** is *how to run it* (which model,
+> which plugins, where to store the event log). The runtime drives a tool-using
+> loop to a validated `Result`, recording every step as an event.
+
+---
+
+## 1. Install
+
+```bash
+pip install zu-runtime            # the library + the `zu` CLI + all built-in plugins
+pip install 'zu-runtime[all]'     # + HTTP server, Anthropic & OpenAI SDKs, Docker sandbox
+```
+
+Extras, if you want only some: `zu-runtime[serve]` (HTTP server),
+`zu-runtime[anthropic]`, `zu-runtime[openai]`, `zu-runtime[docker]`.
+
+Verify and see every plugin the runtime discovered:
+
+```bash
+zu plugins
+```
+
+## 2. Define the agent: a config and a task
+
+**`zu.yaml`** — how to run (the model is a one-line swap):
+
+```yaml
+provider:
+  name: anthropic                 # scripted | anthropic | openai-compatible | <module:Class>
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY  # the env var NAME — never the key itself
+plugins:
+  tools: [http_fetch, html_parse, render_dom]
+  detectors: [empty, error, js-shell, bot-wall]
+  validators: [schema, grounding]
+event_sink: { driver: sqlite, path: ./zu.db }
+budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }
+```
+
+Swap to OpenRouter or a local model by editing only the `provider` block:
+
+```yaml
+provider:
+  name: openai-compatible
+  model: "anthropic/claude-3.5-haiku"   # any model the endpoint serves
+  base_url_env: OPENROUTER_BASE_URL     # or OPENAI_BASE_URL=http://localhost:11434/v1 for Ollama
+  api_key_env: OPENROUTER_API_KEY
+```
+
+**`task.yaml`** — what you want:
+
+```yaml
+query: "Extract the product name and price."
+target: "https://example.com/product/123"
+output_schema:
+  type: object
+  properties:
+    name: { type: string }
+    price: { type: string }
+  required: [name, price]
+```
+
+Put your keys in the environment (never in the files):
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+```
+
+## 3. Run it — from the CLI
+
+```bash
+zu run task.yaml -c zu.yaml
+```
+
+You'll see the status, the extracted value, and how many events were recorded.
+A non-success run exits non-zero, so it composes in a shell or CI.
+
+## 4. Embed it — in your code
+
+```python
+import zu
+
+# from files…
+result = zu.run("task.yaml", config="zu.yaml")
+
+# …or from plain dicts, no files needed
+result = zu.run(
+    {"query": "Extract the product name and price.",
+     "target": "https://example.com/product/123",
+     "output_schema": {"type": "object",
+                       "properties": {"name": {"type": "string"}, "price": {"type": "string"}},
+                       "required": ["name", "price"]}},
+    config="zu.yaml",
+)
+
+print(result.status, result.value)
+
+# also want the event log (the queryable provenance)?
+result, events = zu.run_with_events("task.yaml", config="zu.yaml")
+
+# load a config once, run many tasks; async variants exist too (arun / arun_with_events)
+agent = zu.Zu(config="zu.yaml")
+r = agent.run({"query": "..."})
+```
+
+## 5. Serve it — as an HTTP service
+
+```bash
+pip install 'zu-runtime[serve]'
+zu serve -c zu.yaml --host 0.0.0.0 --port 8000
+```
+
+```bash
+curl -s localhost:8000/run \
+  -H 'content-type: application/json' \
+  -d '{"task": {"query": "Extract the title.", "target": "https://example.com",
+                "output_schema": {"type":"object","properties":{"title":{"type":"string"}}}}}'
+```
+
+The response is `{"result": {...}, "events": [...]}`. A request may include a
+`config` object to override the server default per call, and `include_events:
+false` to omit the log. `GET /healthz` is the liveness probe.
+
+Mounting in your own ASGI app instead of running `zu serve`:
+
+```python
+from zu import create_app
+app = create_app("zu.yaml")   # a FastAPI/ASGI app
+```
+
+## 6. Containerize it
+
+```bash
+docker build -t zu .
+docker run -p 8000:8000 -v "$PWD/zu.yaml:/app/zu.yaml" -e ANTHROPIC_API_KEY zu
+```
+
+The image serves on `:8000` by default. Override the command for a one-shot or
+scheduled run: `docker run ... zu run task.yaml -c zu.yaml --every 5m`. Secrets
+are passed with `-e` (read by the adapter at call time), never baked into the
+image.
+
+## 7. Schedule it
+
+Built-in interval worker (good inside a container or a process supervisor):
+
+```bash
+zu run task.yaml -c zu.yaml --every 5m            # forever, every 5 minutes
+zu run task.yaml -c zu.yaml --every 1h --max-runs 24
+```
+
+Or drive it from cron / a cloud scheduler — each tick is a one-shot `zu run`:
+
+```cron
+*/15 * * * *  cd /srv/agent && /usr/local/bin/zu run task.yaml -c zu.yaml >> run.log 2>&1
+```
+
+## 8. Make it yours: custom plugins
+
+Every built-in is a plugin behind a port, registered exactly the way yours would
+be. The fastest path is the in-process decorator:
+
+```python
+import zu
+from zu_core.registry import tool
+
+@tool
+class MyTool:
+    name = "my_tool"
+    tier = 1
+    schema = {"name": "my_tool", "description": "...", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "my_tool(): does the thing."
+    async def __call__(self, ctx, **kwargs):
+        return {"text": "..."}   # an observation
+
+# then list it in your config's plugins.tools, or reference it by import path:
+#   plugins: { tools: ["my_module:MyTool"] }
+```
+
+The other ports — `Detector`, `Validator`, `ModelProvider`, `SandboxBackend`,
+`EventSink` — work the same way (`@detector`, `@validator`, …), or ship them as a
+pip package that declares a `zu.*` entry point and Zu discovers it on install.
+
+---
+
+## Run it offline first
+
+Every step above works with **no API key** using the deterministic `scripted`
+provider — handy for tests and CI. Set the provider to:
+
+```yaml
+provider:
+  name: scripted
+  script: [{ text: '{"name": "Acme", "price": "$9"}', finish: stop }]
+```
+
+…and the loop will replay that answer with no network and no model. See
+[`examples/killer_demo.py`](../examples/killer_demo.py) for the full
+fetch → fail-on-JS → escalate → validate arc running entirely offline.
