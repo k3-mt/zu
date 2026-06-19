@@ -27,6 +27,19 @@ from zu_tools.parse import HtmlParse
 _PAGE = "<html><body><h1>Acme Widget</h1><span class='price'>$9.00</span></body></html>"
 
 
+def test_parse_value_handles_plain_fenced_and_scalar() -> None:
+    from zu_core.loop import _parse_value
+
+    assert _parse_value('{"a": 1}') == {"a": 1}
+    # markdown-fenced JSON — what real models routinely emit — is unwrapped
+    assert _parse_value('```json\n{"title": "X"}\n```') == {"title": "X"}
+    assert _parse_value("```\n{\"b\": 2}\n```") == {"b": 2}
+    # a bare scalar or prose is wrapped into a dict, never lost
+    assert _parse_value("42") == {"value": 42}
+    assert _parse_value("just words") == {"text": "just words"}
+    assert _parse_value(None) is None
+
+
 def _fetch_fixture() -> HttpFetch:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_PAGE)

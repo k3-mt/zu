@@ -26,6 +26,7 @@ inert when none are registered (the step-4 case).
 from __future__ import annotations
 
 import json
+import re
 import logging
 import time
 from typing import Any, Iterable
@@ -72,14 +73,25 @@ def _usage_tokens(usage: dict) -> int:
     return int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
 
 
+_FENCE = re.compile(r"^```[a-zA-Z0-9]*\s*\n?(.*?)\n?```$", re.DOTALL)
+
+
 def _parse_value(text: str | None) -> dict | None:
     """Turn the model's final text into a structured value. A JSON object is
     used as-is; any other JSON or plain text is wrapped so the result is always
-    a dict (what schema/grounding validation and the result contract expect)."""
+    a dict (what schema/grounding validation and the result contract expect).
+
+    Real models routinely wrap JSON in a markdown code fence (```json … ```);
+    strip a single enclosing fence before parsing so that common output isn't
+    treated as opaque text (which would fail grounding and waste retries)."""
     if not text:
         return None
+    candidate = text.strip()
+    fenced = _FENCE.match(candidate)
+    if fenced:
+        candidate = fenced.group(1).strip()
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(candidate)
     except (ValueError, TypeError):
         return {"text": text}
     return parsed if isinstance(parsed, dict) else {"value": parsed}

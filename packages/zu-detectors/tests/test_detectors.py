@@ -27,6 +27,14 @@ def test_empty_passes_on_content() -> None:
     assert EmptyDetector().inspect(_ctx({"html": "<p>hi</p>"})) is None
 
 
+def test_empty_ignores_non_page_observations() -> None:
+    # Regression: a successful html_parse result (no content key) must NOT be
+    # read as an "empty page" and escalate — that misfired after real extraction.
+    assert EmptyDetector().inspect(_ctx({"selector": "h1", "matches": ["X"], "count": 1})) is None
+    assert EmptyDetector().inspect(_ctx({"error": "boom"})) is None
+    assert EmptyDetector().inspect(_ctx({})) is None
+
+
 def test_error_terminal_on_404() -> None:
     v = ErrorDetector().inspect(_ctx({"status": 404, "html": ""}))
     assert v is not None and v.severity is Severity.TERMINAL

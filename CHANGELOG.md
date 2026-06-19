@@ -7,6 +7,23 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — robustness found by running the real developer flow
+
+Running a real agent end to end (clean install → `zu init` → a live `gpt-4o-mini`
+run via OpenRouter) surfaced two issues fixtured tests had missed:
+
+- **`empty` detector misfired on non-page observations.** It judged *any*
+  observation lacking an `html` key as an "empty page" and escalated — so a
+  successful `html_parse` result (`{"matches": [...]}`) triggered a spurious
+  escalation after real work. It now only judges observations that carry a
+  content key (`html`/`text`/`content`) and is blank; anything else is ignored.
+- **The finaliser didn't unwrap markdown-fenced JSON.** Real models routinely
+  return ```` ```json {...} ``` ````; `_parse_value` treated the fence as opaque
+  text, failing grounding and burning retry turns. It now strips a single
+  enclosing code fence before parsing (the same task dropped from 7 turns to 3).
+
+Both pinned with regression tests.
+
 ### Added — `zu deploy`: container, locally or to the cloud (Phase 4)
 
 Closes the design → deploy → run → confirm loop from the CLI.
