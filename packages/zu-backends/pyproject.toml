@@ -15,6 +15,7 @@ local-docker = "zu_backends.local_docker:LocalDockerBackend"
 
 [project.entry-points."zu.sinks"]
 sqlite = "zu_backends.sqlite_sink:SqliteSink"
+jsonl = "zu_backends.jsonl_sink:JsonlSink"
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

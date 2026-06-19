@@ -7,6 +7,20 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — trace sinks: ship events to local or cloud storage (Phase 3)
+
+- **`trace_sinks:` in config** — a list of secondary `EventSink` destinations.
+  Every event is shipped to each *in addition* to the canonical `event_sink`,
+  attached via the bus's `add_destination` (isolated — a failing trace sink never
+  breaks a run). This is how a run emits observability data, especially for a
+  deployed agent you can't watch directly.
+- **`jsonl` sink** (`zu-backends`) — an append-only EventSink writing one JSON
+  object per line; greppable and exactly what log shippers (Vector, Fluent Bit,
+  Loki, an S3/GCS sidecar) tail. Point it at a local path or a mounted cloud
+  volume. A native cloud sink (S3/OTel) is just another plugin on the same seam.
+- `assemble()` attaches all `trace_sinks`; reads round-trip identically. Tests
+  cover the jsonl sink and end-to-end shipping alongside the canonical store.
+
 ### Added — `zu init` scaffolder (Phase 2)
 
 - **`zu init [dir] --template web|minimal|research`** writes a runnable starter

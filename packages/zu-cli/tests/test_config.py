@@ -182,6 +182,44 @@ def test_no_event_sink_means_in_memory_default():
     assert build_sink(cfg) is None  # bus falls back to MemoryEventSink
 
 
+@pytest.mark.asyncio
+async def test_trace_sinks_ship_events_alongside_the_canonical_store(tmp_path):
+    # A run with a canonical sqlite store AND a jsonl trace sink: events land in
+    # both. The trace sink is how a run emits to local/cloud storage.
+    import json as _json
+
+    from zu_cli.config import assemble
+    from zu_core.contracts import Status
+    from zu_core.loop import run_task
+
+    canonical = tmp_path / "canonical.db"
+    trace = tmp_path / "trace.jsonl"
+    cfg = RunConfig.model_validate(
+        {
+            "provider": {"name": "scripted", "script": [{"text": '{"x": 1}', "finish": "stop"}]},
+            "plugins": {"validators": ["schema"]},
+            "event_sink": {"driver": "sqlite", "path": str(canonical)},
+            "trace_sinks": [{"driver": "jsonl", "path": str(trace)}],
+        }
+    )
+    provider, registry, bus = assemble(cfg)
+    result = await run_task(load_task_spec(), provider, registry, bus)
+
+    assert result.status is Status.SUCCESS
+    # The jsonl trace sink received the same events as the canonical store.
+    lines = trace.read_text().splitlines()
+    assert lines, "trace sink wrote nothing"
+    types = [_json.loads(line)["type"] for line in lines]
+    assert "harness.task.started" in types and types[-1] == "harness.task.completed"
+    assert await bus.count() == len(lines)  # canonical and trace agree
+
+
+def load_task_spec():
+    from zu_core.contracts import TaskSpec
+
+    return TaskSpec(query="x", output_schema={"type": "object"})
+
+
 # --- loading & budget fall-through -------------------------------------------
 
 

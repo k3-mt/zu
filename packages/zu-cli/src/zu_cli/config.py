@@ -91,7 +91,12 @@ class RunConfig(BaseModel):
     provider: ProviderConfig
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     backend: str | None = None
+    # The canonical store (the single source of truth for the run).
     event_sink: EventSinkConfig | None = None
+    # Secondary trace destinations — events are shipped to each *in addition* to
+    # the canonical store, isolated (a failing sink never breaks the run). This is
+    # how a run emits to local files or cloud storage for observability.
+    trace_sinks: list[EventSinkConfig] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
 
 
@@ -268,29 +273,45 @@ def build_registry(cfg: RunConfig, catalog: Registry | None = None) -> Registry:
     return reg
 
 
+def _build_one_sink(spec: EventSinkConfig, catalog: Registry) -> Any:
+    """Construct one EventSink from its config (driver name + path/options)."""
+    try:
+        factory = catalog.get("sinks", spec.driver)
+    except KeyError:
+        raise ConfigError(
+            f"unknown event sink {spec.driver!r}; discovered: "
+            f"{', '.join(catalog.names('sinks')) or 'none'} (is its package installed?)"
+        ) from None
+    candidate = {"path": spec.path, **spec.options}
+    return _construct(factory, candidate)
+
+
 def build_sink(cfg: RunConfig, catalog: Registry | None = None) -> Any:
     """The canonical EventSink for the run, or None for the in-memory default."""
     if cfg.event_sink is None:
         return None
+    return _build_one_sink(cfg.event_sink, catalog or _catalog())
+
+
+def build_trace_sinks(cfg: RunConfig, catalog: Registry | None = None) -> list[Any]:
+    """The secondary trace destinations (shippers) — one EventSink per
+    ``trace_sinks`` entry, attached to the bus alongside the canonical store."""
+    if not cfg.trace_sinks:
+        return []
     catalog = catalog or _catalog()
-    try:
-        factory = catalog.get("sinks", cfg.event_sink.driver)
-    except KeyError:
-        raise ConfigError(
-            f"unknown event sink {cfg.event_sink.driver!r}; discovered: "
-            f"{', '.join(catalog.names('sinks')) or 'none'} (is its package installed?)"
-        ) from None
-    candidate = {"path": cfg.event_sink.path, **cfg.event_sink.options}
-    return _construct(factory, candidate)
+    return [_build_one_sink(s, catalog) for s in cfg.trace_sinks]
 
 
 def assemble(cfg: RunConfig) -> tuple[ModelProvider, Registry, EventBus]:
     """Turn a parsed config into the three things ``run_task`` needs: the
-    provider, the run registry, and a bus whose canonical sink is configured."""
+    provider, the run registry, and a bus whose canonical sink is configured.
+    Any ``trace_sinks`` are attached as isolated secondary destinations."""
     catalog = _catalog()
     provider = build_provider(cfg.provider, catalog)
     registry = build_registry(cfg, catalog)
     bus = EventBus(sink=build_sink(cfg, catalog))
+    for trace_sink in build_trace_sinks(cfg, catalog):
+        bus.add_destination(trace_sink)
     return provider, registry, bus
 
 

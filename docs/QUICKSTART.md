@@ -301,7 +301,27 @@ Or drive it from cron / a cloud scheduler — each tick is a one-shot `zu run`:
 */15 * * * *  cd /srv/agent && /usr/local/bin/zu run task.yaml -c zu.yaml >> run.log 2>&1
 ```
 
-## 8. Drive it from your coding agent (MCP)
+## 8. Trace sinks — ship events to local or cloud storage
+
+The canonical `event_sink` is the run's source of truth. Add **`trace_sinks`** to
+ship a copy of every event somewhere else — for observability, especially for
+deployed/production agents you can't watch directly. Each is an isolated
+destination (a failing trace sink never breaks a run):
+
+```yaml
+event_sink: { driver: sqlite, path: ./zu.db }     # canonical store
+trace_sinks:
+  - { driver: jsonl, path: /var/log/zu/trace.jsonl }   # one JSON object per line
+```
+
+The `jsonl` sink is greppable and exactly what log shippers tail — point it at a
+local path or a mounted cloud volume (then Vector / Fluent Bit / an S3·GCS
+sidecar / Loki carries it onward). A native cloud sink (S3, OTel) is just another
+`EventSink` plugin on the same seam — `pip install` it and name its `driver`.
+A deployed agent emitting to a shared trace sink is how your harness (`zu_traces`)
+confirms it's working in production.
+
+## 9. Drive it from your coding agent (MCP)
 
 Live in Claude Code / Cursor / Codex and let the agent design, validate, run, and
 inspect Zu agents for you — in natural language. One stdio server works across
@@ -327,7 +347,7 @@ run it, and show me what it does."* It calls `zu_scaffold` → `zu_validate` →
 escalations) → `zu_traces` (read the full log of any run). See
 [`examples/integrations/`](../examples/integrations/) for the exact configs.
 
-## 9. Make it yours: custom plugins
+## 10. Make it yours: custom plugins
 
 Every built-in is a plugin behind a port, registered exactly the way yours would
 be. The fastest path is the in-process decorator:
