@@ -1565,6 +1565,7 @@ dependencies = [
 dev = [
     { name = "anthropic" },
     { name = "cryptography" },
+    { name = "docker" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "mypy" },
@@ -1589,6 +1590,7 @@ requires-dist = [
 dev = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "cryptography", specifier = ">=42" },
+    { name = "docker", specifier = ">=7" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx" },
     { name = "mypy", specifier = ">=1.8" },

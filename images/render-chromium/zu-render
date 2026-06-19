@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""zu-render — the tier-2 render entrypoint, run inside the browser container.
+
+The ``local-docker`` backend execs ``zu-render <url>`` and reads one JSON line
+from stdout: ``{"status", "html", "url"}`` — the same observation shape
+``http_fetch`` produces, so the loop and detectors stay tool-agnostic. It renders
+the URL in a real headless Chromium (JavaScript executed) via Playwright.
+
+Chromium runs with ``--no-sandbox`` on purpose: the *container* is the sandbox
+(the backend drops all Linux capabilities and forbids privilege escalation), so
+Chromium's own setuid sandbox — which would need a capability we deny — is not
+the security boundary here.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+
+def main() -> int:
+    url = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not url:
+        print(json.dumps({"status": 400, "html": "", "error": "usage: zu-render <url>"}))
+        return 2
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page()
+                resp = page.goto(url, wait_until="networkidle", timeout=30000)
+                html = page.content()
+                status = resp.status if resp is not None else 200
+            finally:
+                browser.close()
+        print(json.dumps({"status": status, "html": html, "url": url}))
+        return 0
+    except Exception as exc:  # noqa: BLE001 - report as an observation, never crash
+        print(json.dumps({"status": 500, "html": "", "url": url, "error": f"{type(exc).__name__}: {exc}"}))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -26,6 +26,18 @@ client), and `[all]`. Every plugin remains a standalone package
   mid-run. `zu_cli.demo` imports its plugins lazily so the module still loads on
   the lean base.
 
+### Added — a real tier-2 browser image (`render_dom` works for real)
+
+- **`images/render-chromium/`** — a real headless-Chromium render image
+  (Playwright base + a `zu-render <url>` entrypoint that prints
+  `{"status","html","url"}`). The container stays running so the `local-docker`
+  backend execs one render per tool call. Verified end to end: a real
+  `RenderDom()` renders a live JS page through Docker and returns the
+  JS-executed DOM (status 200, the JS-injected content present).
+- `docker>=7` added to the dev group so the local-docker backend is exercised.
+- Published as `ghcr.io/k3-mt/zu-render-chromium` (see QUICKSTART); until then,
+  build it locally from `images/render-chromium`.
+
 ### Changed — `zu demo` proves runnability (real model required), demo types, prerequisites
 
 - **`zu demo` now runs against a real model by default** — the point is to prove

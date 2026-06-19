@@ -24,6 +24,21 @@ and in a container — plus how to schedule it. Every step works offline first
 or run tier-1 web extraction.** You need it only to render JavaScript pages in a
 real browser (tier 2). Until then, everything runs with just Python.
 
+### The tier-2 browser image
+
+`render_dom` runs a headless Chromium inside a container via the `local-docker`
+backend. That needs the Docker daemon, `pip install 'zu-runtime[docker]'`, and a
+render image (published as `ghcr.io/k3-mt/zu-render-chromium`). Point `render_dom`
+at it, or build it yourself from this repo:
+
+```bash
+docker build -t ghcr.io/k3-mt/zu-render-chromium:latest images/render-chromium
+```
+
+The image stays running and exposes a `zu-render <url>` entrypoint that prints
+`{"status","html","url"}` — render any URL in a real browser (JS executed). This
+is the only part of Zu that needs Docker.
+
 ---
 
 ## 1. Install
