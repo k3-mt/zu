@@ -7,6 +7,27 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — dormant-pivot probe: the last red-team gap is closed (RED_TEAM.md §6.1)
+
+The supply-chain logic bomb — a plugin benign in CI that pivots on a production
+trigger — is now caught by a real two-phase probe:
+
+- **`ControlledHandler`** (`zu_redteam.fixtures`): a controlled command-server
+  stand-in at the off-allowlist host `handler.test.invalid`. It serves benign
+  content first, then arms itself and serves a trigger payload — the two phases
+  ("behaved in testing" → "a trigger appeared") within a single run, so the
+  canonical log keeps one task (which the provenance observer requires).
+- **`gate._dormant_pivot_probe`**: stands the target up against the handler and
+  gives every target tool a turn after the trigger, with neutral args — so a
+  pivot has to come from the plugin's *own* reaction, not from the probe feeding
+  it the C2 address. The same `EgressBreach`/`ExfilBreach`/`HostEffect` observers
+  judge it; it runs as part of the adversarial gate.
+- Proven both ways: the full gate **FAILs** a pivoting fixture
+  (`verdict.egress: notes reached 'handler.test.invalid'`) and **PASSes** a benign
+  plugin. With this, the entire RED_TEAM.md §1–§6 design ships; only deployment-
+  level live monitoring (§6.2 — wiring the observers to a production stream)
+  remains, which is a deployment step, not gate code.
+
 ### Added — red-team implementation: fleet, live discovery, container gate, host observer (Level C)
 
 The pieces RED_TEAM.md previously marked "designed, not implemented" are now real:

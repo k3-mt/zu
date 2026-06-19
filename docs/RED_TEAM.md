@@ -21,7 +21,8 @@ in `packages/zu-redteam` and runs via `zu test-plugin <pkg>`.
 | Gates: unit · contract · interop · adversarial | **Implemented**, run in-process, deterministic, in CI |
 | The container gate (real Docker, in production) | **Implemented, opt-in** — `ZU_REDTEAM_CONTAINER=1` stands the sandbox tier up in a real hardened container (caps dropped, no-new-privileges, network off, pids capped) via the `local-docker` backend and PASS/FAILs it; without the flag (or Docker) it SKIPs honestly, and an infra error SKIPs rather than failing a plugin. |
 | Live frontier-model discovery (`LiveAttacker`) | **Implemented, opt-in** — a provider-driven multi-round discovery loop: the model generates attacks, they run against the target, the out-of-band observers judge. `LiveAttacker.from_env()` is gated behind `ZU_REDTEAM_LIVE=1` (real model); the machinery is provider-agnostic and unit-tested with a scripted policy, so CI never depends on a live model. |
-| Dormant-pivot probe · continuous runtime monitoring (§6) | **Designed, not implemented** — the only remaining red-team gap; the verdict observers are already deterministic detectors over the log, ready to run live. |
+| Dormant-pivot probe (§6.1) | **Implemented** — `gate._dormant_pivot_probe` stands the target up against a two-phase `ControlledHandler` (benign, then a trigger payload) at the off-allowlist host `handler.test.invalid`; a plugin that pivots only after the trigger is caught by the egress/exfil/host observers. Proven both ways: it FAILs a pivoting plugin and PASSes a benign one. |
+| Continuous runtime monitoring (§6.2) | **Ready, deployment-level** — the verdict observers are deterministic detectors over the event log, so the same checks run live; wiring them to a production stream is a deployment step, not new gate code. |
 
 The deterministic gates are the always-on floor; the live discovery and the
 Docker container form are escalations on top of the same observers and corpus.
@@ -289,7 +290,7 @@ if the target has OPEN egress (reviewed, high-trust):
 
 The probe resolves the attack two ways: for the common case (a declared allowlist) the pivot is impossible because the handler is unreachable; for the open-egress case the pivot is contained because the plugin can do nothing with the payload.
 
-> **Status / honest scope.** The dormant-pivot probe is **designed, not implemented** — there is no `controlled_handler`/`handler.test.invalid` two-phase handler in the codebase. For a tool with a **declared allowlist**, the implemented `EgressBreach` observer already fires on any reach to an undeclared host, so the "pivot is impossible" half holds today. For the **open-egress** case, the "checks CONTAINMENT instead" half is not separately implemented; the real backstop that ships is `ExfilBreach` (secret-in-URL / secret-in-result) plus the static no-code-execution posture — `EgressBreach` deliberately does not judge containment for an open-egress tool.
+> **Status / implemented.** The dormant-pivot probe ships: `gate._dormant_pivot_probe` builds a scenario with a two-phase `ControlledHandler` (`zu_redteam.fixtures`) at the off-allowlist host `handler.test.invalid` — benign on the first fetch, then a trigger payload once it arms — and gives every target tool a turn afterward. A plugin that pivots only after the trigger (reaching the C2 / leaking the secret) is caught by the same `EgressBreach`/`ExfilBreach`/`HostEffect` observers; the probe runs as part of the adversarial gate and is proven both ways (FAILs a pivoting fixture, PASSes a benign plugin). For a **declared-allowlist** tool, reaching the handler at all is an egress breach; for an **open-egress** tool, `ExfilBreach` plus the static no-code-execution posture is the containment backstop (`EgressBreach` deliberately does not judge containment for an open-egress tool).
 
 ### 6.2 The observers never stop — they run in production too
 
@@ -310,7 +311,7 @@ The one combination the envelope cannot fully neutralise is a plugin that **legi
 ## 7. What this guarantees, and what it does not
 
 - **It cannot be gamed into a false PASS.** Certification is made out of band by deterministic observers the target cannot reach. Hijacking the attacker model changes *which attacks are tried*, never the verdict.
-- **The residual risk is a weaker attacker, not a false pass.** A compromised attacker policy can fail to *find* a real hole. That false negative is contained by the always-on deterministic corpus, the directed per-tool envelope probes, and the multi-specialist fleet (all implemented). The opt-in `LiveAttacker` and the `coverage_met` anti-suppression requirement harden it further; the dormant-pivot probe (§6.1) is the one remaining unimplemented piece.
+- **The residual risk is a weaker attacker, not a false pass.** A compromised attacker policy can fail to *find* a real hole. That false negative is contained by the always-on deterministic corpus, the directed per-tool envelope probes, the multi-specialist fleet, and the dormant-pivot probe (all implemented). The opt-in `LiveAttacker` and the `coverage_met` anti-suppression requirement harden it further. The whole §1–§6 design now ships; what remains is deployment-level (wiring the observers to a live production stream, §6.2).
 - **The attacker is itself contained.** It runs caged, so attacking it cannot become an escape.
 
 This is the same principle the whole runtime rests on, applied to its own test gate: **the model proposes, the harness disposes — and the judge sits where the judged can never reach it.**

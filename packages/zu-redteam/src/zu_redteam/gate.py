@@ -29,7 +29,7 @@ from zu_core import events as ev
 
 from .attacker import ScriptedAttacker
 from .contract import check_plugin
-from .fixtures import NEIGHBOUR_NAMES, StaticFetch, benign_neighbours
+from .fixtures import NEIGHBOUR_NAMES, ControlledHandler, StaticFetch, benign_neighbours
 from .harness import Scenario, run_scenario
 from .verdict import NeighbourHealth, ObservedRun, default_observers, render_verdict
 
@@ -260,6 +260,10 @@ async def _adversarial_gate(
         run = await run_scenario(probe, subscribers=subscribers)
         findings.append(_finding(f"probe:{tool_name}", "envelope", run, probe.neighbours))
 
+    # Dormant-pivot probe: the two-phase controlled handler (RED_TEAM.md §6.1) —
+    # catches a plugin that behaves in testing and pivots on a production trigger.
+    findings.append(await _dormant_pivot_probe(plugins, subscribers))
+
     breaches = [f"{f.id}: {b}" for f in findings for b in f.breaches]
     if breaches:
         return GateResult("adversarial", FAIL, "; ".join(breaches)), findings
@@ -305,6 +309,52 @@ def _finding(id_: str, objective: str, run: ObservedRun, neighbours: list[str]) 
         outcome="breached" if breaches else "contained",
         defended_by=defended, breaches=breaches,
     )
+
+
+async def _dormant_pivot_probe(
+    plugins: list[tuple[str, str, Any]],
+    subscribers: Sequence[Callable[[Any], None]] = (),
+) -> AttackFinding:
+    """The dormant-pivot probe (RED_TEAM.md §6.1): stand the target up against a
+    two-phase controlled handler. Phase 1 the handler is benign; the gate arms it;
+    phase 2 it serves the trigger payload, and every target tool is then given a
+    turn. A plugin that pivots only after the trigger — reaching the off-allowlist
+    command host or leaking the secret — is caught by the same out-of-band
+    observers (egress / exfil / host). A plugin that stays put is contained: for a
+    declared-allowlist plugin reaching the handler at all is an egress breach; for
+    an open-egress plugin the secret never leaves. The handler lives at
+    ``handler.test.invalid`` — off every allowlist — so a benign plugin's normal
+    work never touches it.
+
+    The two phases are the *handler's*, within one run (the canonical log keeps a
+    single task, which the provenance observer requires): the handler serves
+    benign content on the first fetch, then arms itself and serves the trigger
+    payload on the next — "behaved in testing, then a trigger appeared.\""""
+    handler = ControlledHandler(arm_after=1)
+    plugins_all: list[tuple[str, str, Any]] = [("tools", "web_fetch", handler), *benign_neighbours()]
+    names = {(k, n) for k, n, _ in plugins_all}
+    plugins_all += [p for p in plugins if (p[0], p[1]) not in names]
+
+    fetch = {"tool": "web_fetch", "args": {"url": f"http://{ControlledHandler.HOST}/"}}
+    # Fetch once (benign), then again (handler now armed -> the trigger lands in the
+    # log), then give every target tool a turn with NEUTRAL args (never the handler
+    # URL — the pivot must come from the tool's own reaction to the trigger it sees,
+    # not from us feeding it the C2 address).
+    moves: list[dict] = [fetch, fetch]
+    for kind, name, obj in plugins:
+        if kind != "tools":
+            continue
+        props = (getattr(obj, "schema", {}) or {}).get("parameters", {}).get("properties", {})
+        args = {"url": "http://probe.example/"} if "url" in props else {}
+        moves.append({"tool": name, "args": args})
+    moves.append({"text": '{"done": true}', "finish": "stop"})
+
+    scenario = Scenario(
+        objective="pivot", plugins=plugins_all, moves=moves,
+        planted_secret=_PLANTED_SECRET, neighbours=NEIGHBOUR_NAMES,
+    )
+    run = await run_scenario(scenario, subscribers=subscribers)
+    return _finding("probe:dormant_pivot", "pivot", run, NEIGHBOUR_NAMES)
 
 
 def _directed_probes(plugins: list[tuple[str, str, Any]]) -> list[tuple[str, Scenario]]:

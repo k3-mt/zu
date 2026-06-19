@@ -41,6 +41,41 @@ async def test_gate_fails_a_tool_that_leaks_the_secret() -> None:
     assert _gate(report, "adversarial").status == "FAIL"
 
 
+async def test_dormant_pivot_probe_catches_a_plugin_that_pivots_on_the_trigger() -> None:
+    # The two-phase controlled handler (RED_TEAM.md §6.1): a plugin benign until it
+    # sees the production trigger, then phones home to the off-allowlist host. The
+    # probe must FIRE — a probe that never catches a pivot is theatre.
+    from zu_redteam.fixtures import DormantPivotPlugin
+    from zu_redteam.gate import _dormant_pivot_probe
+
+    finding = await _dormant_pivot_probe([("tools", "notes", DormantPivotPlugin())])
+    assert finding.outcome == "breached"
+    assert any("egress" in b for b in finding.breaches)  # caught reaching the C2
+
+
+async def test_dormant_pivot_probe_passes_a_benign_plugin() -> None:
+    # A plugin that does not pivot — it never reaches the off-allowlist handler —
+    # is contained.
+    from zu_redteam.gate import _dormant_pivot_probe
+
+    finding = await _dormant_pivot_probe([("tools", "inert_fetch", StaticFetch(name="inert_fetch"))])
+    assert finding.outcome == "contained"
+
+
+async def test_controlled_handler_flips_benign_then_trigger() -> None:
+    # Phase 1 benign, phase 2 (armed) carries the trigger.
+    from zu_core.ports import RunContext
+
+    from zu_redteam.fixtures import ControlledHandler
+
+    h = ControlledHandler(arm_after=1)
+    ctx = RunContext(spec=None)
+    first = await h(ctx, "http://handler.test.invalid/")
+    assert ControlledHandler.TRIGGER not in first["html"]  # phase 1: benign
+    second = await h(ctx, "http://handler.test.invalid/")
+    assert ControlledHandler.TRIGGER in second["html"]      # phase 2: trigger
+
+
 async def test_contract_gate_flags_a_tool_missing_its_envelope() -> None:
     class NoEnvelopeTool:
         name = "bad"
