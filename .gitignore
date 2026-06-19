@@ -34,3 +34,7 @@ zu.yaml.local
 
 # Microsoft Office temp/lock files
 ~$*
+
+# Internal design / strategy docs — kept local, never in the public repo
+*.docx
+*.pdf
