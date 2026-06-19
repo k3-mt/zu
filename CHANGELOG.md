@@ -7,6 +7,30 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — red-team implementation: fleet, live discovery, container gate, host observer (Level C)
+
+The pieces RED_TEAM.md previously marked "designed, not implemented" are now real:
+
+- **`HostEffect` observer** — ships in `default_observers()`; fires deterministically
+  (off the declared envelope on the log) when a reviewed plugin declares a
+  host/filesystem/subprocess capability, surfacing that high-trust combination for
+  human review instead of an automated pass.
+- **The multi-specialist fleet** — `ScriptedAttacker.run_fleet()` runs each `FLEET`
+  specialist over its objectives' cases; the adversarial gate reports per-specialist
+  coverage (a suppressed objective shows as an empty specialist).
+- **`LiveAttacker`** — a real, provider-driven multi-round discovery loop (the model
+  generates attacks, they run against the target, the out-of-band observers judge).
+  `from_env()` is gated behind `ZU_REDTEAM_LIVE=1` for the real-model path; the
+  machinery is provider-agnostic and unit-tested with a scripted policy, so CI never
+  depends on a live model. (It no longer raises `NotImplementedError`.)
+- **The container gate** — `ZU_REDTEAM_CONTAINER=1` stands the sandbox tier up in a
+  real hardened container (caps dropped, no-new-privileges, network off, pids capped)
+  via `local-docker` and PASS/FAILs it; without the flag (or Docker) it SKIPs
+  honestly, and an infra error SKIPs rather than failing a plugin. (No longer
+  always-SKIP.) Validated against a real Docker daemon.
+
+Only the dormant-pivot probe (§6.1) remains designed-not-implemented.
+
 ### Added — managed-key encryption: KeyProvider seam, rotation, authenticated index columns (Level C)
 
 Encryption-at-rest grows from "one env key" to a managed, rotatable, KMS-pluggable

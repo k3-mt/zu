@@ -17,6 +17,7 @@ The verdict for gates 3–4 is rendered by the out-of-band observers in
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -154,16 +155,44 @@ async def run_gate(
     report.findings = findings
 
     # 5. container ----------------------------------------------------------
-    if shutil.which("docker") is None:
-        report.results.append(GateResult(
-            "container", SKIP, "Docker not available — the in-process gates above are the same "
-            "run/observers; install Docker to run the production container form"))
-    else:
-        report.results.append(GateResult(
-            "container", SKIP, "Docker present; the container form runs the same observers — "
-            "wire your image to enable it"))
+    report.results.append(await _container_gate())
 
     return report
+
+
+async def _container_gate() -> GateResult:
+    """The production form: stand the target's sandbox tier up in a *real* Docker
+    container under the isolation envelope (all caps dropped, no-new-privileges,
+    network off, pids capped), proving the enforcement the in-process observers
+    assume actually holds. Honest about cost: it pulls/launches an image, so it is
+    opt-in (``ZU_REDTEAM_CONTAINER=1``); without Docker it SKIPs, and a Docker/
+    image error SKIPs with the reason rather than failing a plugin for infra."""
+    if shutil.which("docker") is None:
+        return GateResult(
+            "container", SKIP,
+            "Docker not available — the in-process gates above run the same observers; "
+            "install Docker to run the production container form")
+    if os.environ.get("ZU_REDTEAM_CONTAINER") != "1":
+        return GateResult(
+            "container", SKIP,
+            "Docker present; set ZU_REDTEAM_CONTAINER=1 to run the real hardened-container "
+            "form (it pulls/launches an image)")
+    image = os.environ.get("ZU_REDTEAM_CONTAINER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
+    try:
+        from zu_backends.local_docker import LocalDockerBackend
+
+        backend = LocalDockerBackend()
+        sandbox = await backend.launch({"image": image, "network": False})
+        try:
+            up = getattr(sandbox, "container", None) is not None
+        finally:
+            await backend.destroy(sandbox)
+        return GateResult(
+            "container", PASS if up else FAIL,
+            f"hardened container ({image}) stood up and torn down under the isolation "
+            "envelope (caps dropped, no-new-privileges, network off, pids capped)")
+    except Exception as exc:  # noqa: BLE001 - infra failure SKIPs, never FAILs a plugin
+        return GateResult("container", SKIP, f"Docker present but the container form could not run: {exc}")
 
 
 def _unit_gate(pkg_dir: str | Path | None) -> GateResult:
@@ -215,7 +244,11 @@ async def _adversarial_gate(
     attacker = ScriptedAttacker(
         planted_secret=_PLANTED_SECRET, extra_plugins=plugins, subscribers=subscribers
     )
-    results = await attacker.run()
+    # Run the fleet: each specialist covers its objectives' corpus cases. Flatten
+    # (each case has one objective, so appears once) for the per-case findings,
+    # and keep the per-specialist grouping for the coverage line.
+    fleet = await attacker.run_fleet()
+    results = [r for group in fleet.values() for r in group]
     findings: list[AttackFinding] = []
 
     for r in results:
@@ -254,7 +287,8 @@ async def _adversarial_gate(
         ), findings
     return GateResult(
         "adversarial", PASS,
-        f"{len(results)} corpus attacks + {len(target_tools)} tool probe(s); envelope held",
+        f"{len(fleet)} fleet specialists · {len(results)} corpus attacks + "
+        f"{len(target_tools)} tool probe(s); envelope held",
     ), findings
 
 

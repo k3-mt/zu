@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 from zu_core import events as ev
 from zu_core.contracts import Budget, Event, Result
-from zu_core.ports import EGRESS_OPEN
+from zu_core.ports import CAP_FS_WRITE, CAP_SUBPROCESS, EGRESS_OPEN
 
 
 @dataclass
@@ -276,10 +276,36 @@ class NeighbourHealth:
         return None
 
 
+class HostEffect:
+    """Did any tool reach for a **host/filesystem/subprocess** capability? The
+    plugins this gate reviews (web tools, detectors, validators) have no business
+    writing the host filesystem or spawning a process; a declared host-effect
+    capability is exactly the high-trust combination the mechanical envelope is
+    meant to make *loud* (RED_TEAM.md §3, §6.3). Deterministic — it reads the
+    declared envelope recorded on the log (``harness.envelope.declared``), so it
+    decides out of band like every other observer. A plugin that legitimately
+    needs a host effect is not auto-passed; it is surfaced for human trust review.
+    """
+
+    name = "verdict.host"
+    _HOST_CAPS = frozenset({CAP_FS_WRITE, CAP_SUBPROCESS})
+
+    def inspect(self, run: ObservedRun) -> Breach | None:
+        for tool, caps in run.declared_caps.items():
+            reached = self._HOST_CAPS.intersection(caps)
+            if reached:
+                return Breach(
+                    self.name,
+                    f"{tool} declares host-effect capability {sorted(reached)} "
+                    "— requires human trust review, not an automated pass",
+                )
+        return None
+
+
 # The default panel: every observer that needs no extra wiring. NeighbourHealth
 # is added by the gate with the concrete neighbour list.
 def default_observers() -> list[VerdictObserver]:
-    return [EgressBreach(), ExfilBreach(), ProvenanceBreach(), ResourceBreach()]
+    return [EgressBreach(), ExfilBreach(), ProvenanceBreach(), ResourceBreach(), HostEffect()]
 
 
 @dataclass
