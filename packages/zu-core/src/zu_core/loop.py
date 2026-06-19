@@ -93,12 +93,24 @@ def _materialize(obj: Any) -> Any:
     return obj() if isinstance(obj, type) else obj
 
 
+def _as_int(value: Any) -> int:
+    """Coerce a usage field to int, tolerating a missing or malformed value.
+
+    A provider's usage dict is semi-trusted adapter output; a non-numeric or
+    ``None`` token count must not crash the loop mid-run (the budget simply sees
+    zero for that field rather than raising ``TypeError``/``ValueError``)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _usage_tokens(usage: dict) -> int:
     if not usage:
         return 0
     if "total_tokens" in usage:
-        return int(usage["total_tokens"])
-    return int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+        return _as_int(usage["total_tokens"])
+    return _as_int(usage.get("input_tokens")) + _as_int(usage.get("output_tokens"))
 
 
 _FENCE = re.compile(r"^```[a-zA-Z0-9]*\s*\n?(.*?)\n?```$", re.DOTALL)
@@ -138,6 +150,19 @@ def _summarize_observation(obs: dict) -> dict:
 
 def _worst(verdicts: list[Verdict]) -> Verdict | None:
     return max(verdicts, key=lambda v: _RANK[v.severity], default=None)
+
+
+def _budget_reason(elapsed: float, tokens: int, budget: Any) -> str | None:
+    """The terminal reason if a budget bound is exceeded, else None.
+
+    Wall-time and tokens are checked together so the two control-plane bounds
+    have one definition: this is called before spending a model call and again
+    after, so a turn that itself overshoots is caught, not only a later one."""
+    if elapsed > budget.wall_time_s:
+        return "budget:wall_time_s"
+    if tokens >= budget.max_tokens:
+        return "budget:max_tokens"
+    return None
 
 
 class _EventsView(Sequence):
@@ -339,10 +364,9 @@ async def run_task(
 
     for step in range(budget.max_steps):
         # --- budget checkpoints (time / tokens) before spending a model call ---
-        if time.monotonic() - start > budget.wall_time_s:
-            return await run.terminal("budget:wall_time_s")
-        if tokens >= budget.max_tokens:
-            return await run.terminal("budget:max_tokens")
+        reason = _budget_reason(time.monotonic() - start, tokens, budget)
+        if reason is not None:
+            return await run.terminal(reason)
 
         # Recompute per turn so a tier climbed last turn takes effect now: the
         # model is offered exactly the tools unlocked at the current tier, and
@@ -386,10 +410,9 @@ async def run_task(
         )
         # Re-check after the call so a turn that itself overshoots is caught,
         # not just a subsequent one.
-        if tokens >= budget.max_tokens:
-            return await run.terminal("budget:max_tokens")
-        if time.monotonic() - start > budget.wall_time_s:
-            return await run.terminal("budget:wall_time_s")
+        reason = _budget_reason(time.monotonic() - start, tokens, budget)
+        if reason is not None:
+            return await run.terminal(reason)
 
         # A truncated response is unusable whether it finalised OR called tools:
         # tool-call arguments cut off mid-generation are exactly the malformed

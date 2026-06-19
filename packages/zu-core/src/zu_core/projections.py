@@ -27,6 +27,23 @@ _TERMINAL_TYPES = frozenset(
 )
 
 
+def _is_terminal(event: Event) -> bool:
+    """A run-ending event for eviction purposes.
+
+    ``TASK_ESCALATED`` is emitted on *both* a mid-run tier climb (carries
+    ``from_tier``/``to_tier``) and the run's terminal end when the ladder is
+    exhausted (carries ``exhausted: True``) — see ``_Run.escalate`` in the loop.
+    Only the exhausted form ends the run, so keying eviction on the type alone
+    would either miss the exhausted-ESCALATE terminal (leaking session state) or
+    wrongly evict a still-running task on a climb. We distinguish on the flag."""
+    if event.type in _TERMINAL_TYPES:
+        return True
+    if event.type == event_types.TASK_ESCALATED:
+        payload = event.payload or {}
+        return bool(payload.get("exhausted"))
+    return False
+
+
 @dataclass
 class SessionState:
     """Compact per-task facts — never the full event list."""
@@ -55,7 +72,7 @@ class SessionStore:
             state.turn_count += 1
         state.last = event
         state.recent.append(event)
-        if self._evict_on_terminal and event.type in _TERMINAL_TYPES:
+        if self._evict_on_terminal and _is_terminal(event):
             self._by_task.pop(event.task_id, None)
 
     # --- compact accessors (full history comes from the canonical store) ---

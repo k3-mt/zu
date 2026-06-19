@@ -37,6 +37,14 @@ from typing import Any
 
 from zu_core.contracts import Budget, Event, Result, Status, TaskSpec
 from zu_core.loop import run_task
+from zu_core.registry import (
+    backend,
+    detector,
+    provider,
+    sink,
+    tool,
+    validator,
+)
 from zu_cli.config import (
     ConfigError,
     RunConfig,
@@ -47,6 +55,11 @@ from zu_cli.config import (
 
 __version__ = "0.1.0"
 
+# In-process plugin registration decorators, re-exported from the core registry
+# so the documented ``@zu.tool`` / ``@zu.detector`` / … surface (see
+# docs/ARCHITECTURE.md and AGENTS.md) actually resolves on ``import zu``. They
+# register onto the process-wide REGISTRY the loop reads, so a decorator-
+# registered plugin is visible to ``zu.run`` and ``zu plugins`` alike.
 __all__ = [
     "Zu",
     "run",
@@ -60,6 +73,12 @@ __all__ = [
     "Budget",
     "Event",
     "create_app",
+    "tool",
+    "detector",
+    "validator",
+    "provider",
+    "backend",
+    "sink",
     "__version__",
 ]
 

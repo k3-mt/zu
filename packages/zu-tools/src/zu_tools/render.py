@@ -16,13 +16,12 @@ escalation ladder is proven offline.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import urlsplit
 
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, SandboxBackend, ToolCall
 
-from .net import check_url, pin_ip
+from .net import validate_and_pin
 
 # Default browser viewport. Chromium otherwise falls back to Playwright's
 # implicit 1280x720; we set it explicitly so the rendered DOM is reproducible
@@ -93,13 +92,19 @@ class RenderDom:
         # Apply the same host-level SSRF backstop tier-1 http_fetch uses, *before*
         # leasing a browser: escalating to tier 2 must not become a way to fetch
         # an internal address (cloud metadata, loopback, RFC1918) with the guard
-        # bypassed. Raises BlockedURLError (a SecurityBlock) → the loop records a
+        # bypassed. ``validate_and_pin`` does the scheme/host check, the SSRF
+        # validation, AND returns the pinned IP from a SINGLE host resolution —
+        # so the target's DNS pin below uses the exact address that was validated,
+        # closing the double-resolve TOCTOU that a separate check_url + pin_ip
+        # opened. Raises BlockedURLError (a SecurityBlock) → the loop records a
         # harness.defense.blocked event and surfaces it as an error observation.
-        # Scoping the *sandbox's* egress to this validated target (allowlist /
-        # DNS-pinned connection) remains the deferred SandboxBackend work; this
-        # is the backstop, identical to tier 1, that must not be missing on the
-        # higher-privilege tool.
-        check_url(url, allow_private=self.allow_private)
+        #
+        # Scope: this is the per-target rebind backstop, identical in strength to
+        # tier 1. It does NOT scope the *sandbox's* egress — a page's in-browser
+        # redirects and subresources can still reach other hosts unvalidated.
+        # Full egress allowlisting (blocking those) needs a firewall-capable
+        # SandboxBackend and remains deferred; the loud declaration is EGRESS_OPEN.
+        pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
         backend = self._resolve_backend()
         # Lease a sandbox for the render and always tear it down — a browser
         # container is expensive and must not leak even if the render raises.
@@ -108,16 +113,11 @@ class RenderDom:
         spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
         # Pin the container's DNS for the target host to the validated IP, so the
         # browser cannot be DNS-rebound to an internal address at connect time —
-        # the tier-2 analogue of tier-1's PinnedTransport. (Full egress
-        # *allowlisting* — blocking other hosts a page's subresources point at —
-        # needs a firewall-capable sandbox; this closes the rebind for the target.)
-        allow_private = (
-            self.allow_private if self.allow_private is not None
-            else os.environ.get("ZU_HTTP_ALLOW_PRIVATE") == "1"
-        )
+        # the tier-2 analogue of tier-1's PinnedTransport. ``pinned_ip`` is None
+        # only when allow_private skips pinning (local dev).
         host = urlsplit(url).hostname
-        if not allow_private and host:
-            spec["extra_hosts"] = {host: pin_ip(host)}
+        if pinned_ip is not None and host:
+            spec["extra_hosts"] = {host: pinned_ip}
         sandbox = await backend.launch(spec)
         args: dict[str, Any] = {
             "url": url,

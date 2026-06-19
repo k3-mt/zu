@@ -125,6 +125,12 @@ def _to_model_response(resp: Any) -> ModelResponse:
                 raw,
             )
         calls.append(ToolCall(name=tc.function.name, args=args))
+    if not calls and choice.finish_reason == "content_filter":
+        # The provider's moderation stopped generation. The neutral Finish set has
+        # no distinct moderation value, so it maps to STOP — but we do NOT collapse
+        # it silently: surface it so a refusal/cut-off is visible, not mistaken for
+        # a clean completion (the same "fail loudly" posture as malformed args).
+        logger.warning("model response stopped by content_filter (mapped to STOP)")
     finish = Finish.TOOL_CALLS if calls else _FINISH.get(choice.finish_reason, Finish.STOP)
     usage: dict = {}
     if resp.usage is not None:

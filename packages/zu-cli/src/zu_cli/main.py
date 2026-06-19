@@ -23,6 +23,17 @@ from .config import ConfigError, assemble, load_config, load_task
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
 
+def _installed_version(dist: str) -> str | None:
+    """The installed version of ``dist`` (e.g. ``zu-runtime``), or None if it
+    can't be determined — used to pin a generated deploy image reproducibly."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(dist)
+    except PackageNotFoundError:
+        return None
+
+
 def _parse_duration(text: str) -> float:
     """Parse a human duration ('30s', '5m', '2h', '90') into seconds. A bare
     number is seconds. Used by ``run --every`` for the scheduling interval."""
@@ -148,11 +159,30 @@ def serve(
     port: int = typer.Option(8000, help="Bind port."),
 ) -> None:
     """Serve the runtime over HTTP (POST /run). Needs the 'serve' extra:
-    pip install 'zu-runtime[serve]'."""
+    pip install 'zu-runtime[serve]'.
+
+    Binding to a non-localhost host (e.g. 0.0.0.0, as a container does) exposes
+    arbitrary, budget-spending agent runs, so it requires an auth token: set
+    ZU_SERVE_TOKEN and clients must send `Authorization: Bearer <token>`."""
+    import os
+
     try:
         load_config(config)  # fail fast on a bad config before binding a port
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    # An exposed bind with no token would let anyone who can reach the port run
+    # the agent (spending your model budget) and read the cross-run event feed.
+    # Refuse rather than start an unauthenticated public service.
+    local_hosts = {"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"}
+    if host not in local_hosts and not os.environ.get("ZU_SERVE_TOKEN"):
+        typer.echo(
+            f"refusing to bind {host!r} without authentication: set ZU_SERVE_TOKEN "
+            "(clients then send 'Authorization: Bearer <token>'), or bind 127.0.0.1 "
+            "for local-only access.",
+            err=True,
+        )
         raise typer.Exit(code=2)
     try:
         import uvicorn
@@ -304,14 +334,21 @@ def deploy(
         typer.echo(f"unknown target {target!r}; choose: {', '.join(_deploy.TARGETS)}", err=True)
         raise typer.Exit(code=2)
     try:
-        load_config(config)  # fail fast on a bad/missing config before building
+        cfg = load_config(config)  # fail fast on a bad/missing config before building
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    # Pin the image to the installed zu-runtime so a rebuild is reproducible, and
+    # pass through exactly the env vars THIS config's provider(s) name (plus the
+    # defaults), so a custom provider's key isn't silently dropped.
+    version = _installed_version("zu-runtime")
+    envs = _deploy.key_envs_for_config(cfg)
+
     if target != "local":
         paths = _deploy.generate(
-            target, ".", name=name, config=config, extras=extras, port=port, force=force
+            target, ".", name=name, config=config, extras=extras, port=port, force=force,
+            version=version, envs=envs,
         )
         for p in paths:
             typer.echo(f"wrote {p}")
@@ -323,9 +360,9 @@ def deploy(
     import shutil
     import subprocess
 
-    df = _deploy.write_dockerfile(".", config, extras=extras, port=port, force=force)
+    df = _deploy.write_dockerfile(".", config, extras=extras, port=port, force=force, version=version)
     typer.echo(f"Dockerfile: {df}")
-    build, run = _deploy.local_commands(name, config, port=port)
+    build, run = _deploy.local_commands(name, config, port=port, envs=envs)
     if dry_run:
         typer.echo("$ " + " ".join(build))
         typer.echo("$ " + " ".join(run))

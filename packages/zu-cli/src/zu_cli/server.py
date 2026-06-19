@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -74,13 +75,21 @@ class _Hub:
 def create_app(
     config: Any = None, *, title: str = "Zu",
     review_queue: str | None = None, view_scope: str | None = None,
+    auth_token: str | None = None,
 ) -> Any:
     """Build the ASGI app. ``config`` is the server's default run config; a request
     may override it per call. ``review_queue`` (JSONL path for blocked attempts)
     and ``view_scope`` (``render`` | ``full``) default to the config's
-    ``observability`` block. Fails fast if the default config can't be loaded."""
+    ``observability`` block. Fails fast if the default config can't be loaded.
+
+    ``auth_token`` (defaulting to the ``ZU_SERVE_TOKEN`` env var) gates every
+    endpoint except ``/healthz``: when set, a request must present it as an
+    ``Authorization: Bearer <token>`` header — or, for the SSE/dashboard GETs
+    that can't set headers, a ``?token=`` query parameter. When unset the server
+    is open (the localhost-dev default); the ``zu serve`` CLI refuses to bind a
+    non-localhost host without a token so an exposed deploy can't be tokenless."""
     try:
-        from fastapi import FastAPI, HTTPException
+        from fastapi import Depends, FastAPI, Header, HTTPException
         from fastapi.responses import HTMLResponse, StreamingResponse
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via message
         raise RuntimeError(
@@ -88,6 +97,25 @@ def create_app(
         ) from exc
 
     from .trace import format_event
+
+    required_token = auth_token if auth_token is not None else os.environ.get("ZU_SERVE_TOKEN")
+
+    def require_auth(
+        authorization: str | None = Header(default=None),
+        token: str | None = None,
+    ) -> None:
+        # No token configured -> open (localhost dev). Otherwise require the token
+        # via an ``Authorization: Bearer <token>`` header, or a ``?token=`` query
+        # param for the SSE/dashboard GETs that can't set headers. Applied to every
+        # route except /healthz (liveness must not need a credential).
+        if not required_token:
+            return
+        header = authorization or ""
+        presented = header[7:] if header[:7].lower() == "bearer " else token
+        if presented != required_token:
+            raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+
+    auth = [Depends(require_auth)]  # applied per protected route below
 
     default_cfg = coerce_config(config)
     # Networked surfaces are allowlist-render by default (safe to leave on in
@@ -133,7 +161,7 @@ def create_app(
     async def healthz() -> dict:
         return {"status": "ok"}
 
-    @app.post("/run")
+    @app.post("/run", dependencies=auth)
     async def run_endpoint(req: RunRequest) -> dict:
         try:
             # A per-request config arrived over the network: it may select
@@ -159,7 +187,7 @@ def create_app(
             body["events"] = [e.model_dump(mode="json") for e in events]
         return body
 
-    @app.post("/run/stream")
+    @app.post("/run/stream", dependencies=auth)
     async def run_stream(req: RunRequest) -> Any:
         """Run a task and stream the loop live as Server-Sent Events — one
         ``event`` frame per loop event, then a final ``result`` and ``done``."""
@@ -224,7 +252,7 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    @app.get("/events")
+    @app.get("/events", dependencies=auth)
     async def events_stream() -> Any:
         """A global live feed of every run's events (SSE) — what the dashboard
         consumes. ``event`` frames carry a human ``line`` and the raw event;
@@ -246,13 +274,13 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    @app.get("/review")
+    @app.get("/review", dependencies=auth)
     async def review_queue_endpoint() -> dict:
         """The defense review queue: contained adversarial attempts awaiting
         triage (most recent first), from the in-memory view of this process."""
         return {"pending": len(review), "items": review}
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/", response_class=HTMLResponse, dependencies=auth)
     async def dashboard() -> Any:
         return _DASHBOARD_HTML
 
@@ -291,7 +319,12 @@ _DASHBOARD_HTML = """<!doctype html>
    feed.appendChild(d);feed.scrollTop=feed.scrollHeight;
    while(feed.childNodes.length>500)feed.removeChild(feed.firstChild);}
  function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
- const es=new EventSource('/events');
+ // When the server requires a token, this page is opened as /?token=... — carry
+ // it to the SSE feed (query param: EventSource can't set headers) and to /review
+ // (bearer header). No token -> open server, both calls are unauthenticated.
+ const token=new URLSearchParams(location.search).get('token');
+ const authHeaders=token?{'Authorization':'Bearer '+token}:{};
+ const es=new EventSource('/events'+(token?('?token='+encodeURIComponent(token)):''));
  es.onopen=()=>{dot.classList.add('live');status.textContent='live';};
  es.onerror=()=>{dot.classList.remove('live');status.textContent='reconnecting…';};
  es.addEventListener('event',e=>{const d=JSON.parse(e.data);const ev=d.event||{};
@@ -306,7 +339,7 @@ _DASHBOARD_HTML = """<!doctype html>
      '<div class="m">'+esc(r.detail||'')+(r.target?' · '+esc(r.target):'')+'</div>'+
      '<div class="m">'+esc(r.ts||'')+' · status: '+esc(r.status||'pending')+'</div>';
    defs.insertBefore(c,defs.firstChild);});
- fetch('/review').then(r=>r.json()).then(d=>{if(d.items&&d.items.length){nd=d.items.length;dcount.textContent=nd;
+ fetch('/review',{headers:authHeaders}).then(r=>r.json()).then(d=>{if(d.items&&d.items.length){nd=d.items.length;dcount.textContent=nd;
    defs.innerHTML='';for(const r of d.items){const c=document.createElement('div');c.className='card';
    c.innerHTML='<div><span class="k">⚠ '+esc(r.kind||'blocked')+'</span> '+esc(r.tool||'')+'</div>'+
      '<div class="m">'+esc(r.detail||'')+'</div><div class="m">'+esc(r.ts||'')+'</div>';defs.appendChild(c);}}}).catch(()=>{});

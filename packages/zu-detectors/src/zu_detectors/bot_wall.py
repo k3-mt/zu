@@ -6,8 +6,13 @@ from zu_core.ports import RunContext, Scope, Severity, Verdict
 
 from . import _contains_any, _html_of
 
-# Strong markers: specific enough to an anti-bot interstitial that their mere
-# presence is the signal (no legitimate article body contains them).
+# Strong markers: phrasing characteristic of an anti-bot interstitial, specific
+# enough that their presence is treated as the signal on its own. This is a
+# deterministic heuristic, not a proof: a page that *discusses* CAPTCHAs (a news
+# story, this very comment) can contain "captcha" and would escalate — the cost
+# is a wasted tier-2 render, not a wrong answer, and escalating a borderline page
+# is the safer failure. ``cf-browser-verification`` is unambiguous; the natural-
+# language phrases are the ones with residual false-positive surface.
 _STRONG_MARKERS = (
     "captcha",
     "are you a robot",

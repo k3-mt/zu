@@ -43,6 +43,33 @@ def test_healthz():
     assert _client(_cfg({"name": "A", "price": "$1"})).get("/healthz").json() == {"status": "ok"}
 
 
+def _auth_client(cfg: dict, token: str) -> TestClient:
+    return TestClient(create_app(cfg, auth_token=token))
+
+
+def test_auth_token_required_when_configured():
+    c = _auth_client(_cfg({"name": "A", "price": "$1"}), "s3cret")
+    # No credential -> 401 on every protected route.
+    assert c.post("/run", json={"task": _TASK}).status_code == 401
+    assert c.get("/review").status_code == 401
+    assert c.get("/").status_code == 401
+    # Wrong token -> 401.
+    assert c.post("/run", json={"task": _TASK},
+                  headers={"Authorization": "Bearer nope"}).status_code == 401
+    # Liveness stays open regardless.
+    assert c.get("/healthz").json() == {"status": "ok"}
+
+
+def test_auth_token_accepted_via_header_and_query():
+    c = _auth_client(_cfg({"name": "A", "price": "$1"}), "s3cret")
+    # Bearer header on the JSON API.
+    r = c.post("/run", json={"task": _TASK}, headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200, r.text
+    # ?token= query for the dashboard/SSE GETs that can't set a header.
+    assert c.get("/review", params={"token": "s3cret"}).status_code == 200
+    assert c.get("/", params={"token": "s3cret"}).status_code == 200
+
+
 def test_run_returns_result_and_events():
     c = _client(_cfg({"name": "Acme", "price": "$9"}))
     resp = c.post("/run", json={"task": _TASK})

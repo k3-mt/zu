@@ -26,6 +26,11 @@ _SHELL_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__NEXT_DATA
 # ``\s*`` in the close tag tolerates ``</script >``; the second pattern handles
 # an *unterminated* script/style — a browser treats everything after an unclosed
 # <script> as script text, so the heuristic does too (consume to end of input).
+# HTML comments are removed FIRST so a commented-out ``<!-- <script> -->`` (or
+# any literal ``<script`` inside a comment) can't trip the greedy _UNCLOSED rule
+# and erase the real article body after it — a deterministic false-positive the
+# unbalanced-tag heuristic would otherwise produce.
+_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _NONVISIBLE = re.compile(r"<(script|style|template|noscript)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _UNCLOSED = re.compile(r"<(script|style|template|noscript)\b.*\Z", re.IGNORECASE | re.DOTALL)
 _TAGS = re.compile(r"<[^>]+>")
@@ -39,7 +44,8 @@ _MIN_VISIBLE_TEXT = 64
 def _visible_text(html: str) -> str:
     """Human-visible text: drop script/style/template/noscript bodies, strip
     the remaining tags, and collapse whitespace."""
-    without_code = _NONVISIBLE.sub(" ", html)
+    without_code = _COMMENT.sub(" ", html)
+    without_code = _NONVISIBLE.sub(" ", without_code)
     without_code = _UNCLOSED.sub(" ", without_code)
     text = _TAGS.sub(" ", without_code)
     return _WS.sub(" ", text).strip()

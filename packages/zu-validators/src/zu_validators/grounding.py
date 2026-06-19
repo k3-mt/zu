@@ -119,11 +119,18 @@ def _retrieved_corpus(ctx: RunContext) -> str:
         for key in ("html", "text", "content"):
             if isinstance(payload.get(key), str):
                 chunks.append(payload[key])
-    obs = getattr(ctx, "observation", None)
-    if isinstance(obs, dict):
-        for key in ("html", "text", "content"):
-            if isinstance(obs.get(key), str):
-                chunks.append(obs[key])
+    # Fall back to the current observation ONLY when the event log has no fetched
+    # content yet (the loop wires the full log in build step 4). If fetched events
+    # exist, we must not also fold in the raw observation: an observation that is
+    # not itself retrieved page content (e.g. a model-produced turn that happens
+    # to carry a ``text`` key) would reopen the self-grounding hole the event-type
+    # filter above exists to close.
+    if not chunks:
+        obs = getattr(ctx, "observation", None)
+        if isinstance(obs, dict):
+            for key in ("html", "text", "content"):
+                if isinstance(obs.get(key), str):
+                    chunks.append(obs[key])
     return "\n".join(chunks)
 
 
@@ -134,8 +141,13 @@ class GroundingValidator:
         if not result.value:
             return None
         corpus = _normalize(_retrieved_corpus(ctx))
-        for field, value in result.value.items():
-            for leaf in _leaf_strings(value):
+        # The result value is usually a JSON object, but the schema may permit a
+        # non-object root (a list or scalar). Don't assume ``.items()`` — that
+        # would raise AttributeError and silently break the validator ladder.
+        value = result.value
+        fields = value.items() if isinstance(value, dict) else [("value", value)]
+        for field, field_value in fields:
+            for leaf in _leaf_strings(field_value):
                 if not _grounded(_normalize(leaf), corpus):
                     return Verdict(
                         severity=Severity.RETRY,

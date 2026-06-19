@@ -116,6 +116,48 @@ def check_url(url: str, *, allow_private: bool | None = None) -> None:
             )
 
 
+def validate_and_pin(url: str, *, allow_private: bool | None = None) -> str | None:
+    """Scheme/host check + SSRF validation + pin, resolving the host exactly ONCE.
+
+    A combined ``check_url`` + ``pin_ip`` for callers (e.g. ``render_dom``) that
+    need both the backstop *and* a pinned IP: doing them separately resolves the
+    host twice, reopening the very DNS-rebinding TOCTOU the pin exists to close
+    (the two ``getaddrinfo`` calls can disagree under a low-TTL record). Here a
+    single resolution feeds both the validation and the returned pin.
+
+    Returns one validated IP to pin the connection to, or ``None`` when
+    ``allow_private`` skips pinning (local dev). Raises ``BlockedURLError`` on a
+    bad scheme, a missing host, or any internal/non-global resolved address —
+    the same ``kind="ssrf"`` block ``check_url`` raises, so the loop records a
+    ``harness.defense.blocked`` event identically."""
+    if allow_private is None:
+        allow_private = os.environ.get("ZU_HTTP_ALLOW_PRIVATE") == "1"
+    parts = urlsplit(url)
+    if parts.scheme not in _ALLOWED_SCHEMES:
+        raise BlockedURLError(
+            f"scheme {parts.scheme or '(none)'!r} not allowed; use http or https"
+        )
+    host = parts.hostname
+    if not host:
+        raise BlockedURLError(f"no host in URL {url!r}")
+    if allow_private:
+        return None
+    ips = _resolve_ips(host)  # the single, authoritative resolution
+    for ip in ips:
+        reason = _ip_blocked_reason(ip)
+        if reason is not None:
+            raise BlockedURLError(
+                f"refusing to fetch {host!r} -> {ip} ({reason}); "
+                "set ZU_HTTP_ALLOW_PRIVATE=1 to override for local development",
+                kind="ssrf",
+                target=host,
+            )
+    for ip in ips:  # prefer an IPv4 address for the pin (broadest reachability)
+        if ":" not in ip:
+            return ip
+    return next(iter(ips))
+
+
 def pin_ip(host: str) -> str:
     """Resolve ``host`` ONCE, validate every address, and return one validated IP
     to pin a connection to. This is the *authoritative* resolution: closing the

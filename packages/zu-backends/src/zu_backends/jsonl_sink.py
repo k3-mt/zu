@@ -17,9 +17,10 @@ sequence: ``query(after_seq=n)`` returns events written after the n-th line.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
-from typing import Any, AsyncIterator
+from typing import IO, Any, AsyncIterator
 
 from zu_core.contracts import Event
 from zu_core.eventstore import event_matches, validate_filter
@@ -38,6 +39,13 @@ class JsonlSink:
 
     async def append(self, event: Any) -> None:
         line = event.model_dump_json()
+        # File I/O is blocking and the bus awaits this append before fan-out, so
+        # writing directly on the event loop would stall every in-flight request
+        # and SSE stream under ``zu serve`` (the exact pitfall SqliteSink offloads
+        # to a thread for). Run it on a worker thread for the same reason.
+        await asyncio.to_thread(self._sync_append, line)
+
+    def _sync_append(self, line: str) -> None:
         with self._lock:
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
@@ -63,14 +71,47 @@ class JsonlSink:
     async def query(
         self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0
     ) -> list[Event]:
-        events = self._filtered(flt)[after_seq:]
+        # query() returns a materialised list by contract; do the blocking read
+        # off the loop so it doesn't stall other coroutines.
+        events = (await asyncio.to_thread(self._filtered, flt))[after_seq:]
         return events[:limit] if limit is not None else events
+
+    def _read_batch(self, fh: IO[str], batch_size: int) -> list[Event]:
+        """Parse up to ``batch_size`` non-blank lines from the open handle, in a
+        worker thread — so both the read and the JSON parse stay off the loop."""
+        out: list[Event] = []
+        for raw in fh:
+            raw = raw.strip()
+            if raw:
+                out.append(Event.model_validate_json(raw))
+                if len(out) >= batch_size:
+                    break
+        return out
 
     async def stream(
         self, flt: dict | None = None, *, batch_size: int = 500
     ) -> AsyncIterator[Event]:
-        for event in self._filtered(flt):
-            yield event
+        # Genuinely bound memory to one ``batch_size`` page: read and parse the
+        # file incrementally on a worker thread rather than materialising the
+        # whole log (the previous ``_filtered`` read the entire file first,
+        # ignoring batch_size and defeating the streaming contract).
+        if flt is not None:
+            validate_filter(flt)
+        if not os.path.exists(self.path):
+            return
+        fh = await asyncio.to_thread(open, self.path, "r", encoding="utf-8")
+        try:
+            while True:
+                batch = await asyncio.to_thread(self._read_batch, fh, batch_size)
+                if not batch:
+                    return
+                for event in batch:
+                    if flt is None or event_matches(event, flt):
+                        yield event
+                if len(batch) < batch_size:
+                    return
+        finally:
+            await asyncio.to_thread(fh.close)
 
     async def count(self, flt: dict | None = None) -> int:
-        return len(self._filtered(flt))
+        return len(await asyncio.to_thread(self._filtered, flt))

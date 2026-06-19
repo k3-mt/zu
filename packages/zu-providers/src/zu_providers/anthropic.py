@@ -14,12 +14,15 @@ both pass one shared checklist, which is what makes "run on any model" real.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from zu_core.ports import Capabilities, Finish, ModelRequest, ModelResponse, ToolCall
 
 from ._messages import anthropic_tool, to_anthropic_messages
+
+logger = logging.getLogger("zu.providers.anthropic")
 
 # Anthropic stop_reason -> neutral Finish. A tool-call finish is decided by the
 # presence of tool calls, not this map, so the ``tool_use`` reason is absent here
@@ -105,6 +108,11 @@ def _to_model_response(resp: Any) -> ModelResponse:
             text_parts.append(block.text)
         elif block.type == "tool_use":
             calls.append(ToolCall(name=block.name, args=dict(block.input or {})))
+    if not calls and resp.stop_reason == "refusal":
+        # A model refusal. No distinct neutral Finish exists, so it maps to STOP —
+        # but warn rather than collapse it silently, so a refusal isn't mistaken
+        # for a clean completion (mirrors the openai adapter's content_filter).
+        logger.warning("model response was a refusal (mapped to STOP)")
     finish = Finish.TOOL_CALLS if calls else _FINISH.get(resp.stop_reason, Finish.STOP)
     # Normalised usage shape shared with the openai-compatible adapter:
     # input/output/total. Anthropic's API doesn't return a total, so compute it

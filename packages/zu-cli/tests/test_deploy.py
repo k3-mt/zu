@@ -67,6 +67,17 @@ def test_zu_deploy_local_dry_run_prints_commands(tmp_path, monkeypatch):
     assert (tmp_path / "Dockerfile").exists()
 
 
+def test_serve_refuses_nonlocal_bind_without_token(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ZU_SERVE_TOKEN", raising=False)
+    _seed_config(tmp_path)
+    # Binding 0.0.0.0 (what a container does) with no token would expose an
+    # unauthenticated, budget-spending run surface — the CLI must refuse.
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+    assert result.exit_code == 2
+    assert "ZU_SERVE_TOKEN" in result.output
+
+
 def test_zu_deploy_unknown_target_and_missing_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _seed_config(tmp_path)

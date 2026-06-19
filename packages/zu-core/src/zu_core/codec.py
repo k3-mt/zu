@@ -9,11 +9,15 @@ different codecs (e.g. plaintext rows from before encryption was enabled) and
 still be read back — the durable sink decodes each row by its own tag.
 
 Default is `IdentityCodec` (plaintext, zero dependencies). A real AES-256-GCM
-codec ships behind zu-backends' optional ``[encryption]`` extra. Both bind the
-row's ``event_id`` as associated data (AAD), so a ciphertext can't be moved to
-a different row. Managed keys (KMS / envelope encryption / rotation) are a
-future stage; the codec asks for a key, so swapping an env-var key for a KMS
-provider later is a contained change with no on-disk format impact.
+codec ships behind zu-backends' optional ``[encryption]`` extra. The AES codec
+binds the row's indexed columns as associated data (AAD), so a ciphertext can't
+be moved to — or have its index columns edited on — a different row. The default
+`IdentityCodec` is plaintext and provides *no* integrity: it accepts the ``aad``
+argument for interface parity but cannot bind it (there is no authentication tag
+over plaintext), so the move-resistance guarantee applies only once a cipher is
+configured. Managed keys (KMS / envelope encryption / rotation) are a future
+stage; the codec asks for a key, so swapping an env-var key for a KMS provider
+later is a contained change with no on-disk format impact.
 """
 
 from __future__ import annotations
@@ -52,7 +56,13 @@ class KeyProvider(Protocol):
 
 
 class IdentityCodec:
-    """Plaintext. The default: no dependencies, fully queryable on disk."""
+    """Plaintext. The default: no dependencies, fully queryable on disk.
+
+    ``aad`` is accepted for interface parity with authenticated codecs but is
+    intentionally unused: plaintext carries no authentication tag, so there is
+    nothing to bind it to. The AAD row-binding guarantee is a property of the
+    AES codec only — see the module docstring.
+    """
 
     version = 0
 
