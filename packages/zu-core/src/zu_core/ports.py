@@ -15,6 +15,29 @@ from pydantic import BaseModel, Field
 
 from .contracts import Result
 
+# --- interface versioning (MLR §6) ---------------------------------------
+#
+# Each plugin port carries an interface MAJOR version. A plugin declares the
+# major it was built against via a ``__zu_interface__`` class/instance attribute
+# (an int); absent ⇒ 1, the original contract. The registry refuses a plugin
+# whose declared major differs from the runtime's major for that port — the
+# structural Protocol changed incompatibly, so loading it would fail in
+# confusing ways. Bump a port's number here when its Protocol changes in a
+# backward-incompatible way (e.g. a renamed/removed required member); a plugin
+# built for the old contract is then refused with a clear error rather than
+# half-working. Minor/compatible additions do NOT bump the major.
+INTERFACE_VERSION: dict[str, int] = {
+    "providers": 1,
+    "tools": 1,
+    "detectors": 1,
+    "validators": 1,
+    "backends": 1,
+    "sinks": 1,
+}
+
+# The attribute a plugin sets to declare the interface major it targets.
+INTERFACE_ATTR = "__zu_interface__"
+
 # --- model provider (the any-model seam) ---------------------------------
 
 

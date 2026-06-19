@@ -8,6 +8,8 @@ http_fetch via the 'zu.tools' group).
 
 from __future__ import annotations
 
+import pytest
+
 import zu_core.registry as registry_mod
 from zu_core.registry import GROUPS, REGISTRY, Registry, tool
 
@@ -111,3 +113,74 @@ def test_discovery_isolates_a_broken_plugin(monkeypatch) -> None:
     assert failures[0].name == "bad_tool"
     assert isinstance(failures[0].error, RuntimeError)
     assert reg.failures == failures
+
+
+# --- interface versioning (MLR §6) -------------------------------------------
+
+
+def _tool(major=None):
+    class T:
+        name = "v_tool"
+        schema: dict = {}
+        prompt_fragment = "x"
+
+        async def __call__(self, ctx, **kw):  # pragma: no cover - shape only
+            return {}
+
+    if major is not None:
+        T.__zu_interface__ = major
+    return T
+
+
+def test_plugin_with_matching_interface_registers() -> None:
+    from zu_core.ports import INTERFACE_VERSION
+
+    reg = Registry()
+    reg.register("tools", "v_tool", _tool(INTERFACE_VERSION["tools"]))
+    assert "v_tool" in reg.names("tools")
+
+
+def test_plugin_without_declaration_is_treated_as_v1() -> None:
+    # Back-compat: existing built-ins declare nothing and must keep loading.
+    reg = Registry()
+    reg.register("tools", "v_tool", _tool())  # no __zu_interface__
+    assert "v_tool" in reg.names("tools")
+
+
+def test_incompatible_major_is_refused_with_a_clear_error() -> None:
+    from zu_core.registry import IncompatibleInterfaceError
+
+    reg = Registry()
+    with pytest.raises(IncompatibleInterfaceError) as exc:
+        reg.register("tools", "v_tool", _tool(major=999))
+    msg = str(exc.value)
+    assert "v999" in msg and "v_tool" in msg  # names both the bad version and the plugin
+    assert "v_tool" not in reg.names("tools")  # and it did not enter the registry
+
+
+def test_non_integer_declaration_is_refused() -> None:
+    from zu_core.registry import IncompatibleInterfaceError
+
+    reg = Registry()
+    with pytest.raises(IncompatibleInterfaceError):
+        reg.register("tools", "v_tool", _tool(major="two"))
+
+
+def test_discovery_isolates_an_incompatible_plugin(monkeypatch) -> None:
+    # A plugin built against a future interface major is isolated and recorded,
+    # exactly like one that fails to import — discovery of the rest continues.
+    good = _FakeEP("good_tool", lambda: _tool())
+    future = _FakeEP("future_tool", lambda: _tool(major=999))
+
+    def fake_entry_points(group: str):
+        return [good, future] if group == "zu.tools" else []
+
+    monkeypatch.setattr(registry_mod, "entry_points", fake_entry_points)
+    reg = Registry()
+    failures = reg.discover()
+
+    assert "good_tool" in reg.names("tools")
+    assert "future_tool" not in reg.names("tools")
+    assert len(failures) == 1 and failures[0].name == "future_tool"
+    from zu_core.registry import IncompatibleInterfaceError
+    assert isinstance(failures[0].error, IncompatibleInterfaceError)

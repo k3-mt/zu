@@ -7,6 +7,23 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — plugin interface-versioning (MLR §6)
+
+Each plugin port now carries a major interface version (`ports.INTERFACE_VERSION`),
+and the registry refuses a plugin built against an incompatible major — so the
+ecosystem can evolve without silent breakage:
+
+- A plugin declares the interface major it targets via a `__zu_interface__`
+  attribute (absent ⇒ 1, the original contract, so every existing built-in keeps
+  loading unchanged).
+- `Registry.register` raises `IncompatibleInterfaceError` — naming both the
+  plugin's version and the runtime's — when the majors differ, before the plugin
+  can enter the registry and fail confusingly at call time.
+- `Registry.discover` isolates and records an incompatible plugin exactly as it
+  does one that fails to import, so one bad plugin never breaks discovery of the
+  rest. Bump a port's number in `INTERFACE_VERSION` on a backward-incompatible
+  Protocol change.
+
 ### Added — per-tier model selection + a required (no-default) provider
 
 A run now declares a **required global provider** and an **optional per-tier

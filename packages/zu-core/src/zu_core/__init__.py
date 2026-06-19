@@ -22,6 +22,8 @@ from .ports import (
     CAP_SANDBOX,
     CAP_SUBPROCESS,
     EGRESS_OPEN,
+    INTERFACE_ATTR,
+    INTERFACE_VERSION,
     Capabilities,
     Detector,
     EventSink,
@@ -41,9 +43,11 @@ from .ports import (
 )
 from .registry import (
     REGISTRY,
+    IncompatibleInterfaceError,
     LoadFailure,
     Registry,
     backend,
+    check_interface,
     detector,
     provider,
     sink,
@@ -83,6 +87,8 @@ __all__ = [
     "CAP_FS_WRITE",
     "CAP_SUBPROCESS",
     "EGRESS_OPEN",
+    "INTERFACE_VERSION",
+    "INTERFACE_ATTR",
     "declared_envelope",
     "Capabilities",
     "Detector",
@@ -102,6 +108,8 @@ __all__ = [
     # registry
     "REGISTRY",
     "LoadFailure",
+    "IncompatibleInterfaceError",
+    "check_interface",
     "Registry",
     "backend",
     "detector",
