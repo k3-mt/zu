@@ -107,4 +107,60 @@ def create_app(config: Any = None, *, title: str = "Zu") -> Any:
             body["events"] = [e.model_dump(mode="json") for e in events]
         return body
 
+    @app.post("/run/stream")
+    async def run_stream(req: RunRequest) -> Any:
+        """Run a task and stream the loop live as Server-Sent Events — one
+        ``event`` frame per loop event (train of thought, tool calls, detectors,
+        escalations) as it happens, then a final ``result`` and ``done``. No
+        polling, no refresh: ``curl -N`` (or an EventSource in a browser) shows
+        the run unfold in real time, locally or against a container."""
+        import asyncio
+        import json
+
+        from fastapi.responses import StreamingResponse
+
+        from .trace import format_event
+
+        try:
+            cfg = _coerce_config(req.config) if req.config is not None else default_cfg
+            spec = _coerce_task(req.task, cfg.budget)
+            provider, registry, bus = assemble(cfg)
+        except ConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        queue: asyncio.Queue = asyncio.Queue()
+        # Notified per published event (append-before-notify) — the live feed.
+        bus.subscribe(lambda event: queue.put_nowait(("event", event)))
+
+        def sse(kind: str, data: dict) -> str:
+            return f"event: {kind}\ndata: {json.dumps(data, default=str)}\n\n"
+
+        async def runner() -> None:
+            try:
+                result = await run_task(spec, provider, registry, bus)
+                await queue.put(("result", result))
+            except Exception as exc:  # noqa: BLE001 - report as a stream frame, not a 500
+                await queue.put(("error", exc))
+            finally:
+                await queue.put(("done", None))
+
+        async def gen() -> Any:
+            task = asyncio.create_task(runner())
+            try:
+                while True:
+                    kind, val = await queue.get()
+                    if kind == "event":
+                        yield sse("event", {"line": format_event(val), "event": val.model_dump(mode="json")})
+                    elif kind == "result":
+                        yield sse("result", val.model_dump(mode="json"))
+                    elif kind == "error":
+                        yield sse("error", {"error": f"{type(val).__name__}: {val}"})
+                    elif kind == "done":
+                        yield sse("done", {})
+                        break
+            finally:
+                await task
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
     return app

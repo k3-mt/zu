@@ -192,6 +192,26 @@ async def test_grounding_in_loop_rejects_fabrication_then_accepts_correction() -
     assert failed and failed[0].payload["detector"] == "grounding"
 
 
+async def test_grounding_corpus_ignores_the_models_own_text() -> None:
+    # The model's output is recorded on harness.turn.completed (the live "train
+    # of thought"). Grounding must NOT treat that as retrieved content, or a model
+    # could ground a fabrication by simply emitting it. Only the fetched page
+    # (which here does NOT contain the price) counts — so the value fails.
+    provider = ScriptedProvider.from_moves(
+        [
+            {"tool": "http_fetch", "args": {"url": "http://x.test/"}},
+            {"text": '{"price": "$1000.00"}', "finish": "stop"},  # spoken, not on the page
+            {"text": '{"price": "$1000.00"}', "finish": "stop"},  # repeated — still ungrounded
+        ]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="price", output_schema=_SCHEMA), provider, _loop_registry(), bus)
+    # Never succeeds: the price is only ever in the model's own text, never the page.
+    assert result.status != Status.SUCCESS
+    failed = [e for e in await bus.query() if e.type == "harness.validation.failed"]
+    assert any(e.payload["detector"] == "grounding" for e in failed)
+
+
 def test_validators_discoverable() -> None:
     reg = Registry()
     reg.discover()

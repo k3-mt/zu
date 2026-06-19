@@ -170,8 +170,23 @@ export ANTHROPIC_API_KEY=sk-...
 zu run task.yaml -c zu.yaml
 ```
 
-You'll see the status, the extracted value, and how many events were recorded.
-A non-success run exits non-zero, so it composes in a shell or CI.
+A **live trace streams as the loop runs** — the model's train of thought, every
+tool call and result, detector verdicts, and escalations — so the run is never a
+black box:
+
+```
+  09:20:25  ▶ task: Extract the product name and price. → https://…
+  09:20:25  💭 I'll fetch the page first, then read the heading.
+  09:20:25  🔧 http_fetch({'url': 'https://…'})
+  09:20:25  📄 fetched 1024 chars (status 200)
+  09:20:26  🔎 detector js-shell [escalate] — page appears to be a JS shell
+  09:20:26  ⬆️  ESCALATE 1→2: js-shell — climbing a tier
+  09:20:28  📦 extracted: {'name': 'Acme Widget', 'price': '$9.00'}
+  09:20:28  ✅ completed
+```
+
+Disable it with `--no-stream` (e.g. in CI). The status, value, and event count
+print at the end; a non-success run exits non-zero, so it composes in a shell.
 
 ## 4. Embed it — in your code
 
@@ -231,6 +246,20 @@ curl -s localhost:8000/run \
 The response is `{"result": {...}, "events": [...]}`. A request may include a
 `config` object to override the server default per call, and `include_events:
 false` to omit the log. `GET /healthz` is the liveness probe.
+
+**Watch a run live over HTTP** — `POST /run/stream` streams Server-Sent Events as
+the loop runs (one `event` frame per step, then `result`, then `done`). No
+polling, no refresh; works the same against a local process or a container:
+
+```bash
+curl -N localhost:8000/run/stream \
+  -H 'content-type: application/json' \
+  -d '{"task": {"query": "Extract the title.", "target": "https://example.com",
+                "output_schema": {"type":"object","properties":{"title":{"type":"string"}}}}}'
+```
+
+Each frame carries both a human-readable `line` and the full structured `event`,
+so a browser `EventSource` or a dashboard can render the train of thought live.
 
 Mounting in your own ASGI app instead of running `zu serve`:
 

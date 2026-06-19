@@ -258,37 +258,17 @@ DEMOS: dict[str, dict[str, Any]] = {
 DEMO_TYPES = tuple(DEMOS)
 
 
-# --- running + narration -----------------------------------------------------
-
-_NARRATION = {
-    "harness.task.started": "📋 task started",
-    "harness.tool.invoked": "🔧 tool: {tool}",
-    "harness.detector.fired": "🔎 detector fired: {detector} ({severity}) — {detail}",
-    "harness.task.escalated": "⬆️  ESCALATE {from_tier}→{to_tier}: {reason} — climbing to a browser",
-    "harness.validation.failed": "❌ validation: {detector} ({severity}) — {detail}",
-    "data.record.extracted": "📦 extracted: {value}",
-    "harness.task.completed": "✅ completed",
-    "harness.task.terminal": "🛑 terminal: {reason}",
-}
-
-
-def _narrate(event_type: str, payload: dict) -> str | None:
-    template = _NARRATION.get(event_type)
-    if template is None:
-        return None
-    try:
-        return template.format(**payload)
-    except (KeyError, IndexError):
-        return template
+# --- running ------------------------------------------------------------------
 
 
 async def run_arc(
-    provider: ModelProvider, kind: str = "web", offline: bool = False
+    provider: ModelProvider, kind: str = "web", offline: bool = False, bus: EventBus | None = None
 ) -> tuple[Result, EventBus, Any]:
     """Drive the chosen demo; return the result, the event bus, and the fixture
-    browser (escalation) or None."""
+    browser (escalation) or None. Pass a ``bus`` with a subscriber attached to
+    watch the run live."""
     registry, backend = DEMOS[kind]["registry"](offline)
-    bus = EventBus()
+    bus = bus or EventBus()
     result = await run_task(DEMOS[kind]["task"], provider, registry, bus)
     return result, bus, backend
 
@@ -316,16 +296,17 @@ async def run_demo(
     print(f"provider : {provider_label}  model: {model}")
     print("-" * 72)
 
+    # Watch the run live — the train of thought, tools, and escalations stream
+    # to the console as the loop runs (the same trace `zu run` shows).
+    from .trace import live_printer
+
+    bus = EventBus()
+    bus.subscribe(live_printer())
     try:
-        result, bus, backend = await run_arc(provider, kind, offline)
+        result, bus, backend = await run_arc(provider, kind, offline, bus=bus)
     except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
         print(f"\nrun failed: {type(exc).__name__}: {exc}")
         return 1
-
-    for e in await bus.query():
-        line = _narrate(e.type, e.payload)
-        if line is not None:
-            print(f"  {line}")
 
     print("-" * 72)
     print(f"RESULT   : {result.status.value}")

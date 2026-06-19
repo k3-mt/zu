@@ -99,6 +99,12 @@ def _retrieved_corpus(ctx: RunContext) -> str:
     """
     chunks: list[str] = []
     for ev in getattr(ctx, "events", []) or []:
+        # Only *retrieved* content grounds a value — i.e. data.source.fetched
+        # events. Reading text-like keys from any event would let the model
+        # ground its own fabrications: harness.turn.completed carries the model's
+        # output text, which must never count as evidence about the page.
+        if getattr(ev, "type", "") != "data.source.fetched":
+            continue
         payload = getattr(ev, "payload", {}) or {}
         for key in ("html", "text", "content"):
             if isinstance(payload.get(key), str):

@@ -7,6 +7,31 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — live observability: stream the loop in real time
+
+The loop is no longer a black box — you watch it run as it runs.
+
+- **Live CLI trace.** `zu run` (and `zu demo`) stream a real-time trace — the
+  model's train of thought, every tool call and result, detector verdicts, and
+  escalations — to the console as each event is published (append-before-notify),
+  with no polling or refresh. Disable with `--no-stream`.
+- **Live HTTP stream.** `zu serve` adds `POST /run/stream`, a Server-Sent Events
+  endpoint that emits one frame per loop event (each with a readable `line` and
+  the full structured `event`), then `result` and `done` — so a browser
+  `EventSource`, a dashboard, or `curl -N` can watch a local or containerized run
+  unfold in real time.
+- **Train of thought surfaced.** The loop now records the model's natural-language
+  output per turn on `harness.turn.completed` (`text`), so the *why* is visible,
+  not just the mechanics. A shared `zu_cli.trace` formatter renders both the CLI
+  and SSE views identically.
+
+### Fixed — grounding must not read the model's own text
+
+Restricted the grounding corpus to `data.source.fetched` events (retrieved
+content) only. Surfacing the model's text on `harness.turn.completed` had made it
+readable as "evidence", which would let a model ground a fabrication by simply
+emitting it; grounding now ignores it. Pinned with a regression test.
+
 ### Changed — lean base install, plugins opt-in (dbt-style)
 
 `pip install zu-runtime` is now the *runnable base*, not batteries-included:

@@ -74,6 +74,24 @@ def test_bad_task_is_422_not_a_crash():
     assert "invalid task" in resp.json()["detail"]
 
 
+def test_run_stream_emits_live_sse_frames():
+    c = _client(_cfg({"name": "Acme", "price": "$9"}))
+    frames = []
+    with c.stream("POST", "/run/stream", json={"task": _TASK}) as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        for line in r.iter_lines():
+            if line:
+                frames.append(line)
+    text = "\n".join(frames)
+    # A live event stream: per-event frames, then a result, then done.
+    assert "event: event" in text
+    assert "harness.task.started" in text   # the loop's first step streamed
+    assert "harness.task.completed" in text
+    assert "event: result" in text
+    assert '"value": {"name": "Acme", "price": "$9"}' in text
+    assert "event: done" in text
+
+
 def test_model_failure_is_502():
     # A real provider with no key fails fast inside the loop; the server reports
     # 502 (an upstream/model failure) rather than crashing.

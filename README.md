@@ -102,11 +102,16 @@ print(result.status, result.value)
 Or run it from the CLI, on a schedule, or as a service:
 
 ```bash
-zu run task.yaml -c zu.yaml             # one-shot
+zu run task.yaml -c zu.yaml             # one-shot — streams a LIVE trace as it runs
 zu run task.yaml -c zu.yaml --every 5m  # scheduled worker
-zu serve -c zu.yaml                     # HTTP: POST /run   (needs the [serve] extra)
+zu serve -c zu.yaml                     # HTTP: POST /run  ·  POST /run/stream (live SSE)
 docker build -t zu . && docker run -p 8000:8000 -v "$PWD/zu.yaml:/app/zu.yaml" -e ANTHROPIC_API_KEY zu
 ```
+
+**Watch it think, live.** Every run streams its train of thought — the model's
+reasoning, each tool call and result, detector verdicts, and escalations — to the
+console as it happens (`zu run`), or over Server-Sent Events (`POST /run/stream`)
+so you can watch a local or containerized run in real time, no refresh.
 
 **→ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md)** — install, define
 a task + config, embed, serve, containerize, schedule, and write your own plugin.

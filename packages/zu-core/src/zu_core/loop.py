@@ -244,6 +244,10 @@ async def run_task(
                 "tier": ladder.current,
                 "model": getattr(provider, "model", None),
                 "usage": dict(resp.usage),
+                # The model's natural-language output this turn — its "train of
+                # thought" (a plan/explanation before a tool call, or the final
+                # answer). Surfaced so a live trace can show *why*, not just what.
+                "text": resp.text,
             },
             parent=turn,
         )

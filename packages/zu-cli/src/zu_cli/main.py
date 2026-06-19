@@ -39,13 +39,22 @@ def _parse_duration(text: str) -> float:
     return seconds
 
 
-def _execute_once(task_file: str, config: str) -> Result:
+def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result:
     """Assemble from config and drive one task to a Result, printing a summary.
     Shared by the one-shot and scheduled paths. Raises ConfigError for a bad
-    config/task; turns a model/infra failure into a printed terminal Result."""
+    config/task; turns a model/infra failure into a printed terminal Result.
+
+    With ``stream`` (the default), a live trace of the run — the model's train of
+    thought, every tool call and result, detectors, escalations — prints as it
+    happens, so the loop is never a black box."""
     cfg = load_config(config)
     spec = load_task(task_file, default_budget=cfg.budget)
     provider, registry, bus = assemble(cfg)
+
+    if stream:
+        from .trace import live_printer
+
+        bus.subscribe(live_printer())
 
     model = getattr(provider, "model", None) or cfg.provider.name
     typer.echo(f"zu run: {task_file} · provider={cfg.provider.name} model={model}")
@@ -79,17 +88,22 @@ def run(
     max_runs: int = typer.Option(
         0, "--max-runs", help="With --every, stop after N runs (0 = run forever)."
     ),
+    stream: bool = typer.Option(
+        True, "--stream/--no-stream",
+        help="Print a live trace of the run (train of thought, tools, escalations) as it happens.",
+    ),
 ) -> None:
     """Run a task wired by a config file — once, or on a schedule with --every.
 
-    Swapping the model is a one-line edit to the config's ``provider`` block —
-    no code change — because the loop only ever speaks to the provider port.
+    A live trace streams to the console as the loop runs (disable with
+    --no-stream). Swapping the model is a one-line edit to the config's
+    ``provider`` block — the loop only ever speaks to the provider port.
     """
     # One-shot: run, exit non-zero on a non-success result so it composes in a
     # shell. Scheduled: loop and keep going regardless of any single outcome.
     if not every:
         try:
-            result = _execute_once(task_file, config)
+            result = _execute_once(task_file, config, stream=stream)
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
             raise typer.Exit(code=2)
@@ -109,7 +123,7 @@ def run(
         n += 1
         typer.echo(f"--- run {n} ---")
         try:
-            _execute_once(task_file, config)
+            _execute_once(task_file, config, stream=stream)
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)
