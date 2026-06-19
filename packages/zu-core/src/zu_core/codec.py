@@ -30,6 +30,27 @@ class PayloadCodec(Protocol):
     def decode_body(self, body: bytes, aad: bytes) -> str: ...
 
 
+@runtime_checkable
+class KeyProvider(Protocol):
+    """Supplies symmetric data keys *by id*, so a codec can rotate keys and a
+    deployment can source them from the KMS/secret store of its choice (AWS KMS,
+    GCP KMS, Vault, an HSM, …) — the choice belongs to whoever runs Zu, never
+    baked in here. The codec never holds a long-lived master key: it asks the
+    provider for the *current* key id when writing, and for a specific key id
+    (read back off the stored blob) when decrypting an older row.
+
+    Key rotation is the answer to AES-GCM's nonce-scaling bound too: a fresh
+    random 96-bit nonce is safe to ~2^32 events under one key, so rotating the
+    data key (a new ``current_key_id``) resets that budget while old rows keep
+    decrypting under their own key id. Implement this against a KMS to get
+    managed keys with no on-disk format change."""
+
+    @property
+    def current_key_id(self) -> str: ...
+
+    def key(self, key_id: str) -> bytes: ...
+
+
 class IdentityCodec:
     """Plaintext. The default: no dependencies, fully queryable on disk."""
 

@@ -45,9 +45,13 @@ CREATE INDEX IF NOT EXISTS idx_events_type  ON events(type);
 """
 
 
-def _aad(event_id: str) -> bytes:
-    # Bind the ciphertext to its row so it can't be moved to another event.
-    return event_id.encode("utf-8")
+def _aad(event_id: str, trace_id: str, task_id: str, type_: str, source: str) -> bytes:
+    # Bind the row's indexed/plaintext columns into the AEAD associated data, so
+    # the ciphertext can't be moved to another row AND none of the index columns
+    # can be silently edited at rest (e.g. to hide a row from a `type` filter):
+    # any change makes the payload fail to decrypt. \x1f (unit separator) is a
+    # delimiter that cannot appear in a UUID or our type/source spellings.
+    return "\x1f".join((event_id, trace_id, task_id, type_, source)).encode("utf-8")
 
 
 class SqliteSink:
@@ -84,7 +88,8 @@ class SqliteSink:
 
     async def append(self, event: Event) -> None:
         event_id = str(event.event_id)
-        blob = encode_payload(self._codec, event.model_dump_json(), _aad(event_id))
+        aad = _aad(event_id, str(event.trace_id), str(event.task_id), event.type, event.source)
+        blob = encode_payload(self._codec, event.model_dump_json(), aad)
         # The sqlite3 calls are synchronous and ``synchronous=FULL`` makes each
         # commit an fsync — seconds under load. Run off the event loop so a write
         # never blocks the loop (and every other coroutine: the bus awaits this
@@ -127,14 +132,18 @@ class SqliteSink:
         return where, params
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
-        plaintext = decode_payload(row["data"], _aad(row["event_id"]), self._registry)
+        aad = _aad(row["event_id"], row["trace_id"], row["task_id"], row["type"], row["source"])
+        plaintext = decode_payload(row["data"], aad, self._registry)
         return Event.model_validate_json(plaintext)
 
     async def query(
         self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0
     ) -> list[Event]:
         where, params = self._where(flt or {})
-        sql = f"SELECT event_id, data FROM events WHERE seq > ?{where} ORDER BY seq ASC"
+        sql = (
+            "SELECT event_id, trace_id, task_id, type, source, data "
+            f"FROM events WHERE seq > ?{where} ORDER BY seq ASC"
+        )
         args: list = [after_seq, *params]
         if limit is not None:
             sql += " LIMIT ?"
@@ -153,7 +162,7 @@ class SqliteSink:
         # fetchall. Memory is bounded by batch_size regardless of log size.
         where, base_params = self._where(flt or {})
         sql = (
-            f"SELECT seq, event_id, data FROM events "
+            "SELECT seq, event_id, trace_id, task_id, type, source, data FROM events "
             f"WHERE seq > ?{where} ORDER BY seq ASC LIMIT ?"
         )
         after = 0

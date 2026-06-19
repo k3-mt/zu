@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from . import events
 from .bus import EventBus, SubscriberFailure
-from .codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
+from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
 from .projections import SessionState, SessionStore
@@ -74,6 +74,7 @@ __all__ = [
     "validate_filter",
     "IdentityCodec",
     "PayloadCodec",
+    "KeyProvider",
     "encode_payload",
     "decode_payload",
     "SecurityBlock",

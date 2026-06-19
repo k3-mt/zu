@@ -165,6 +165,31 @@ def test_provider_by_import_reference():
     assert provider.model == "claude-x"
 
 
+def test_sink_encryption_selected_from_config(monkeypatch):
+    # The `encryption` field wires a codec onto the sink, from env keys.
+    import os
+
+    pytest.importorskip("cryptography")
+    monkeypatch.setenv("ZU_EVENT_KEY", os.urandom(32).hex())
+    from zu_cli.config import EventSinkConfig, _build_one_sink, _catalog
+
+    sink = _build_one_sink(EventSinkConfig(driver="sqlite", path=":memory:", encryption="aesgcm"), _catalog())
+    assert type(sink._codec).__name__ == "AesGcmCodec"
+
+    monkeypatch.setenv("ZU_EVENT_KEY_ID", "default")
+    managed = _build_one_sink(
+        EventSinkConfig(driver="sqlite", path=":memory:", encryption="managed"), _catalog())
+    assert type(managed._codec).__name__ == "ManagedAesGcmCodec"
+
+
+def test_unknown_encryption_mode_is_a_clear_error():
+    pytest.importorskip("cryptography")
+    from zu_cli.config import EventSinkConfig, _build_one_sink, _catalog
+
+    with pytest.raises(ConfigError, match="unknown encryption mode"):
+        _build_one_sink(EventSinkConfig(driver="sqlite", encryption="rot13"), _catalog())
+
+
 def test_per_tier_providers_built_from_config():
     # A `providers:` block builds one ModelProvider per tier; the global provider
     # is separate and required.

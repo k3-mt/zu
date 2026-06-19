@@ -7,6 +7,25 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — managed-key encryption: KeyProvider seam, rotation, authenticated index columns (Level C)
+
+Encryption-at-rest grows from "one env key" to a managed, rotatable, KMS-pluggable
+story — without an on-disk format change:
+
+- **`KeyProvider` seam** (`zu_core.codec`) supplies data keys *by id*. The KMS is
+  the **deployment's choice** — implement it against AWS KMS / GCP KMS / Vault and
+  pass it in; `EnvKeyProvider` is the zero-infra default. Nothing is baked to a
+  vendor.
+- **`ManagedAesGcmCodec`** (version 2) embeds the key id in each blob, so keys
+  **rotate** without losing readability of old rows (each decrypts under its own
+  key). Rotation is also the answer to AES-GCM's nonce-scaling bound: rotating the
+  data key resets the per-key nonce budget.
+- **Authenticated index columns.** The AEAD associated data now binds the row's
+  indexed tuple (`event_id`, `trace_id`, `task_id`, `type`, `source`), so editing
+  any plaintext index column at rest — e.g. to hide a row from a `type` filter —
+  makes that row fail to decrypt. Tampering is loud, not silent.
+- **Config:** `event_sink.encryption: none | aesgcm | managed`.
+
 ### Fixed — DNS-rebinding closed; tier-2 render DNS-pinned (Level C: scoped egress)
 
 - **`http_fetch` closes the DNS-rebinding TOCTOU.** A new `net.PinnedTransport`

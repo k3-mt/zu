@@ -87,10 +87,19 @@ class PluginsConfig(BaseModel):
 
 class EventSinkConfig(BaseModel):
     """Where the canonical event log is written. ``driver`` is a sink name
-    (built-in: ``sqlite``); omit the whole block to keep the in-memory default."""
+    (built-in: ``sqlite``); omit the whole block to keep the in-memory default.
+
+    ``encryption`` opts the payload into encryption-at-rest (needs
+    ``zu-backends[encryption]`` and a key in the environment):
+      * ``none`` (default) — plaintext, fully queryable on disk.
+      * ``aesgcm`` — AES-256-GCM with a single key (``ZU_EVENT_KEY``).
+      * ``managed`` — AES-256-GCM with a rotatable, KMS-pluggable ``KeyProvider``
+        (``EnvKeyProvider`` by default; the KMS is the deployment's choice).
+    """
 
     driver: str
     path: str | None = None
+    encryption: str = "none"
     options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -400,7 +409,36 @@ def _build_one_sink(spec: EventSinkConfig, catalog: Registry) -> Any:
             f"{', '.join(catalog.names('sinks')) or 'none'} (is its package installed?)"
         ) from None
     candidate = {"path": spec.path, **spec.options}
+    codec = _build_codec(spec.encryption)
+    if codec is not None:
+        candidate["codec"] = codec
     return _construct(factory, candidate)
+
+
+def _build_codec(encryption: str) -> Any:
+    """Map the ``encryption`` config value to a payload codec instance (or None
+    for plaintext). The codec lives in ``zu-backends[encryption]`` and is imported
+    lazily, with a clear error if the extra isn't installed."""
+    mode = (encryption or "none").lower()
+    if mode in ("none", ""):
+        return None
+    try:
+        from zu_backends.encryption import AesGcmCodec, ManagedAesGcmCodec
+    except ModuleNotFoundError as exc:
+        raise ConfigError(
+            "encryption-at-rest needs the optional dependency: "
+            "pip install 'zu-backends[encryption]'"
+        ) from exc
+    try:
+        if mode == "aesgcm":
+            return AesGcmCodec.from_env()
+        if mode == "managed":
+            return ManagedAesGcmCodec.from_env()
+    except RuntimeError as exc:  # a missing/invalid key in the environment
+        raise ConfigError(str(exc)) from exc
+    raise ConfigError(
+        f"unknown encryption mode {encryption!r}; use 'none', 'aesgcm', or 'managed'."
+    )
 
 
 def build_sink(cfg: RunConfig, catalog: Registry | None = None) -> Any:
