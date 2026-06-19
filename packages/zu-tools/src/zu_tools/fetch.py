@@ -6,7 +6,9 @@ from urllib.parse import urljoin
 
 import httpx
 
-from .net import BlockedURLError, check_url
+from zu_core.ports import CAP_NET, EGRESS_OPEN
+
+from .net import BlockedURLError, PinnedTransport, check_url
 
 # Default cap on a single fetched body (decompressed). Untrusted pages can be
 # arbitrarily large, and httpx transparently decompresses, so a small gzip can
@@ -27,6 +29,12 @@ class HttpFetch:
         },
     }
     prompt_fragment = "http_fetch(url): fetch a page's raw HTML. Cheapest; try first."
+    # A general web fetcher reaches model-chosen URLs, so it declares open egress
+    # (EGRESS_OPEN) — the high-trust case PHILOSOPHY.md §6 says earns review. Its
+    # host-level SSRF guard (net.check_url) is what bounds the open egress until a
+    # sandbox scopes it; it declares no fs/subprocess capability.
+    capabilities = frozenset({CAP_NET})
+    egress = frozenset({EGRESS_OPEN})
 
     def __init__(
         self,
@@ -48,8 +56,12 @@ class HttpFetch:
         # redirects manually and re-check each Location before requesting it.
         check_url(url, allow_private=self.allow_private)
         current = url
+        # Default to the DNS-pinning transport: check_url is an early reject, but
+        # the transport is what *closes* the rebind TOCTOU by connecting only to a
+        # validated IP. An injected transport (tests' MockTransport) is used as-is.
+        transport = self._transport or PinnedTransport(allow_private=self.allow_private)
         async with httpx.AsyncClient(
-            follow_redirects=False, timeout=20, transport=self._transport
+            follow_redirects=False, timeout=20, transport=transport
         ) as c:
             for _ in range(self.max_redirects + 1):
                 # Stream so we can stop reading once the body exceeds max_bytes

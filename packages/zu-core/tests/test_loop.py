@@ -13,7 +13,6 @@ no Docker, no real browser, the same fixture discipline as everywhere else.
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from zu_core.bus import EventBus
 from zu_core.contracts import Budget, Status, TaskSpec
@@ -55,6 +54,53 @@ def _registry_with_tools() -> Registry:
     return reg
 
 
+async def test_envelope_declared_records_each_tools_capabilities() -> None:
+    # The capability envelope every active tool declares is recorded on the log
+    # at run start, so the out-of-band verdict observers can judge behaviour
+    # against the declaration. http_fetch declares open egress + net; html_parse
+    # declares nothing (pure CPU).
+    provider = ScriptedProvider.from_moves([{"text": "{}", "finish": "stop"}])
+    bus = EventBus()
+    await run_task(TaskSpec(query="q"), provider, _registry_with_tools(), bus)
+
+    declared = [e for e in await bus.query() if e.type == "harness.envelope.declared"]
+    assert len(declared) == 1
+    tools = declared[0].payload["tools"]
+    assert tools["http_fetch"] == {"tier": 1, "capabilities": ["net"], "egress": ["*"]}
+    assert tools["html_parse"] == {"tier": 1, "capabilities": [], "egress": []}
+
+
+async def test_oversized_tool_observation_is_rejected() -> None:
+    # A schema bomb: shared references that would expand to 2^60 nodes if
+    # serialized naively. The loop must reject it as an error observation rather
+    # than OOM, and the run must still complete cleanly.
+    class Bomb:
+        name = "bomb"
+        tier = 1
+        schema = {"name": "bomb", "parameters": {"type": "object", "properties": {}}}
+        prompt_fragment = "bomb()"
+        capabilities: frozenset[str] = frozenset()
+        egress: frozenset[str] = frozenset()
+
+        async def __call__(self, ctx) -> dict:
+            n: dict = {"x": "y" * 100}
+            for _ in range(60):
+                n = {"a": n, "b": n}
+            return n
+
+    reg = Registry()
+    reg.register("tools", "bomb", Bomb())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "bomb", "args": {}}, {"text": '{"ok": true}', "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="q"), provider, reg, bus)
+
+    assert result.status == Status.SUCCESS  # the bomb did not crash the run
+    returned = [e for e in await bus.query() if e.type == "harness.tool.returned"]
+    assert any("size limit" in str(e.payload) for e in returned)
+
+
 async def test_loop_fetch_then_finalise() -> None:
     provider = ScriptedProvider.from_moves(
         [
@@ -72,6 +118,7 @@ async def test_loop_fetch_then_finalise() -> None:
     types = [e.type for e in await bus.query()]
     assert types == [
         "harness.task.started",
+        "harness.envelope.declared",  # the capability envelope, recorded at run start
         "harness.turn.started",
         "harness.turn.completed",  # per-call usage recorded right after the model call
         "harness.tool.invoked",
@@ -349,7 +396,9 @@ def _registry_with_tiers(backend: _FakeBackend):
 
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())          # tier 1
-    reg.register("tools", "render_dom", RenderDom(backend=backend))  # tier 2
+    # allow_private skips the SSRF DNS check so the fake backend can render a
+    # non-resolvable test host (the real guard is covered in zu-tools tests).
+    reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))  # tier 2
     reg.register("detectors", "js-shell", JsShellDetector())
     return reg
 
@@ -396,6 +445,54 @@ async def test_escalation_climbs_to_tier2_and_succeeds() -> None:
     assert types[-1] == "harness.task.completed"
 
 
+async def test_per_tier_provider_takes_over_on_escalation() -> None:
+    # Global (cheap) provider runs tier 1; on the climb to tier 2 the bound
+    # provider takes over the same conversation. The tier→model record in the
+    # event log proves which provider produced each turn.
+    backend = _FakeBackend(_RENDERED)
+    cheap = _RecordingProvider([{"tool": "http_fetch", "args": {"url": "http://spa.test/"}}])
+    cheap.model = "cheap-tier1"
+    frontier = _RecordingProvider([
+        {"tool": "render_dom", "args": {"url": "http://spa.test/"}},
+        {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
+    ])
+    frontier.model = "frontier-tier2"
+
+    bus = EventBus()
+    result = await run_task(
+        TaskSpec(query="get title and price"), cheap, _registry_with_tiers(backend),
+        bus, providers={2: frontier},
+    )
+    assert result.status == Status.SUCCESS
+    assert result.value == {"title": "Acme Widget", "price": "$9.00"}
+
+    # Each provider was asked to complete only its own tier's turns.
+    assert len(cheap.seen) == 1 and len(frontier.seen) == 2
+
+    # The log attributes each turn to the model that produced it, by tier.
+    completed = [e.payload for e in await bus.query() if e.type == "harness.turn.completed"]
+    by_tier_models = {(p["tier"], p["model"]) for p in completed}
+    assert (1, "cheap-tier1") in by_tier_models      # tier-1 work ran on the global provider
+    assert (2, "frontier-tier2") in by_tier_models    # escalation switched to the bound provider
+    assert (1, "frontier-tier2") not in by_tier_models  # the frontier model never ran tier 1
+
+
+async def test_no_per_tier_override_uses_global_provider_everywhere() -> None:
+    # Back-compat: with no providers map, the global provider runs every tier.
+    backend = _FakeBackend(_RENDERED)
+    only = _RecordingProvider([
+        {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},
+        {"tool": "render_dom", "args": {"url": "http://spa.test/"}},
+        {"text": '{"title": "Acme Widget", "price": "$9.00"}', "finish": "stop"},
+    ])
+    only.model = "solo"
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="x"), only, _registry_with_tiers(backend), bus)
+    assert result.status == Status.SUCCESS
+    models = {e.payload["model"] for e in await bus.query() if e.type == "harness.turn.completed"}
+    assert models == {"solo"}  # every tier ran the one global provider
+
+
 async def test_escalation_via_real_builtin_detectors() -> None:
     # End-to-end through the *real* built-in detectors (empty/error/js-shell/
     # bot-wall registered together), not a hand-rolled one: a JS-shell page must
@@ -409,7 +506,7 @@ async def test_escalation_via_real_builtin_detectors() -> None:
     backend = _FakeBackend(_RENDERED)
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())
-    reg.register("tools", "render_dom", RenderDom(backend=backend))
+    reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))
     for name, det in [
         ("empty", EmptyDetector()),
         ("error", ErrorDetector()),

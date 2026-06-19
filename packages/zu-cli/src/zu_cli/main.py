@@ -23,6 +23,17 @@ from .config import ConfigError, assemble, load_config, load_task
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
 
+def _installed_version(dist: str) -> str | None:
+    """The installed version of ``dist`` (e.g. ``zu-runtime``), or None if it
+    can't be determined — used to pin a generated deploy image reproducibly."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(dist)
+    except PackageNotFoundError:
+        return None
+
+
 def _parse_duration(text: str) -> float:
     """Parse a human duration ('30s', '5m', '2h', '90') into seconds. A bare
     number is seconds. Used by ``run --every`` for the scheduling interval."""
@@ -49,18 +60,24 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
     happens, so the loop is never a black box."""
     cfg = load_config(config)
     spec = load_task(task_file, default_budget=cfg.budget)
-    provider, registry, bus = assemble(cfg)
+    provider, registry, bus, providers = assemble(cfg)
 
-    if stream:
-        from .trace import live_printer
+    # The uniform observability hook: a live trace (when streaming) AND the defense
+    # review queue — so a blocked attempt during `zu run` is queued exactly as it
+    # is under `zu serve`. Same hook in every harness.
+    from .observe import attach_observability
 
-        bus.subscribe(live_printer())
+    attach_observability(bus, cfg.observability, trace=stream)
 
-    model = getattr(provider, "model", None) or cfg.provider.name
-    typer.echo(f"zu run: {task_file} · provider={cfg.provider.name} model={model}")
+    # Only show a model when the provider actually exposes one — otherwise show
+    # just the provider name. The two are not the same thing: a provider like
+    # ``scripted`` has no model, and printing ``model=scripted`` conflates them.
+    model = getattr(provider, "model", None)
+    suffix = f" model={model}" if model else ""
+    typer.echo(f"zu run: {task_file} · provider={cfg.provider.name}{suffix}")
 
     try:
-        result: Result = asyncio.run(run_task(spec, provider, registry, bus))
+        result: Result = asyncio.run(run_task(spec, provider, registry, bus, providers=providers))
     except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
         # A model-call failure (unset key, unreachable endpoint) propagates here;
         # report it as a terminal outcome rather than a traceback.
@@ -142,11 +159,30 @@ def serve(
     port: int = typer.Option(8000, help="Bind port."),
 ) -> None:
     """Serve the runtime over HTTP (POST /run). Needs the 'serve' extra:
-    pip install 'zu-cli[serve]'."""
+    pip install 'zu-runtime[serve]'.
+
+    Binding to a non-localhost host (e.g. 0.0.0.0, as a container does) exposes
+    arbitrary, budget-spending agent runs, so it requires an auth token: set
+    ZU_SERVE_TOKEN and clients must send `Authorization: Bearer <token>`."""
+    import os
+
     try:
         load_config(config)  # fail fast on a bad config before binding a port
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    # An exposed bind with no token would let anyone who can reach the port run
+    # the agent (spending your model budget) and read the cross-run event feed.
+    # Refuse rather than start an unauthenticated public service.
+    local_hosts = {"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"}
+    if host not in local_hosts and not os.environ.get("ZU_SERVE_TOKEN"):
+        typer.echo(
+            f"refusing to bind {host!r} without authentication: set ZU_SERVE_TOKEN "
+            "(clients then send 'Authorization: Bearer <token>'), or bind 127.0.0.1 "
+            "for local-only access.",
+            err=True,
+        )
         raise typer.Exit(code=2)
     try:
         import uvicorn
@@ -154,12 +190,15 @@ def serve(
         from .server import create_app
     except ModuleNotFoundError:
         typer.echo(
-            "the HTTP server needs FastAPI + uvicorn; install with: pip install 'zu-cli[serve]'",
+            "the HTTP server needs FastAPI + uvicorn; install with: pip install 'zu-runtime[serve]'",
             err=True,
         )
         raise typer.Exit(code=2)
 
-    typer.echo(f"zu serve: http://{host}:{port}  (POST /run · config={config})")
+    typer.echo(
+        f"zu serve: http://{host}:{port}  (dashboard at / · POST /run · "
+        f"live feed /events · review queue /review · config={config})"
+    )
     uvicorn.run(create_app(config), host=host, port=port)
 
 
@@ -173,7 +212,7 @@ def demo(
         None, "--model", help="Model id for the real run (required unless --offline)."
     ),
     provider: str = typer.Option(
-        None, "--provider", help="Provider name (defaults to anthropic when --model is given)."
+        None, "--provider", help="Provider name (required for a real run; no default)."
     ),
     api_key: str = typer.Option(
         None, "--api-key", help="API key for the real run (or set the provider's env var)."
@@ -205,13 +244,18 @@ def demo(
         )
         raise typer.Exit(code=2)
 
-    # A real run is the point: require a model unless self-testing the wiring.
-    if not offline and not model:
+    # A real run is the point: require a provider AND a model unless self-testing
+    # the wiring. There is no default provider — an agent must say what it runs on.
+    if not offline and (not model or not provider):
         typer.echo(
-            "zu demo runs against a real model to prove it works. Pass --model "
-            "(provider defaults to anthropic) and set the provider's API key — e.g.:\n"
+            "zu demo runs against a real model to prove it works. Name the provider "
+            "and model (no default provider), and set its API key — e.g.:\n"
             "  export ANTHROPIC_API_KEY=...\n"
-            "  zu demo --model claude-sonnet-4-6\n"
+            "  zu demo --provider anthropic --model claude-opus-4-8\n"
+            "or, for an OpenAI-compatible endpoint (e.g. OpenRouter):\n"
+            "  export OPENAI_API_KEY=...   # and OPENAI_BASE_URL if not api.openai.com\n"
+            "  zu demo --provider openai-compatible --model openai/gpt-4o-mini "
+            "--api-key-env OPENAI_API_KEY --base-url-env OPENAI_BASE_URL\n"
             "Or self-test the wiring offline (no key): zu demo --offline",
             err=True,
         )
@@ -290,14 +334,21 @@ def deploy(
         typer.echo(f"unknown target {target!r}; choose: {', '.join(_deploy.TARGETS)}", err=True)
         raise typer.Exit(code=2)
     try:
-        load_config(config)  # fail fast on a bad/missing config before building
+        cfg = load_config(config)  # fail fast on a bad/missing config before building
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    # Pin the image to the installed zu-runtime so a rebuild is reproducible, and
+    # pass through exactly the env vars THIS config's provider(s) name (plus the
+    # defaults), so a custom provider's key isn't silently dropped.
+    version = _installed_version("zu-runtime")
+    envs = _deploy.key_envs_for_config(cfg)
+
     if target != "local":
         paths = _deploy.generate(
-            target, ".", name=name, config=config, extras=extras, port=port, force=force
+            target, ".", name=name, config=config, extras=extras, port=port, force=force,
+            version=version, envs=envs,
         )
         for p in paths:
             typer.echo(f"wrote {p}")
@@ -309,9 +360,9 @@ def deploy(
     import shutil
     import subprocess
 
-    df = _deploy.write_dockerfile(".", config, extras=extras, port=port, force=force)
+    df = _deploy.write_dockerfile(".", config, extras=extras, port=port, force=force, version=version)
     typer.echo(f"Dockerfile: {df}")
-    build, run = _deploy.local_commands(name, config, port=port)
+    build, run = _deploy.local_commands(name, config, port=port, envs=envs)
     if dry_run:
         typer.echo("$ " + " ".join(build))
         typer.echo("$ " + " ".join(run))
@@ -352,6 +403,91 @@ def mcp() -> None:
         )
         raise typer.Exit(code=2)
     build_server().run(transport="stdio")
+
+
+def _resolve_package_plugins(package: str) -> tuple[list[tuple[str, str, object]], list[str]]:
+    """The (kind, name, instance) Zu plugins a distribution declares via entry
+    points. A plugin that needs constructor args (e.g. a sink wanting a path) is
+    skipped with a note — the gate stands up what it can instantiate no-arg."""
+    from importlib.metadata import PackageNotFoundError, distribution
+
+    groups = {
+        "zu.providers": "providers", "zu.tools": "tools", "zu.detectors": "detectors",
+        "zu.validators": "validators", "zu.backends": "backends", "zu.sinks": "sinks",
+    }
+    try:
+        dist = distribution(package)
+    except PackageNotFoundError:
+        return [], [f"package {package!r} is not installed"]
+    out: list[tuple[str, str, object]] = []
+    notes: list[str] = []
+    for ep in dist.entry_points:
+        kind = groups.get(ep.group)
+        if kind is None:
+            continue
+        try:
+            obj = ep.load()
+            inst = obj() if isinstance(obj, type) else obj
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the gate
+            notes.append(f"skipped {ep.group}:{ep.name} (needs config to instantiate: {exc})")
+            continue
+        out.append((kind, ep.name, inst))
+    return out, notes
+
+
+def _find_package_dir(package: str) -> str | None:
+    from pathlib import Path
+
+    p = Path("packages") / package
+    return str(p) if (p / "tests").is_dir() else None
+
+
+@app.command(name="test-plugin")
+def test_plugin(
+    package: str = typer.Argument(..., help="Distribution name to gate, e.g. zu-tools."),
+    no_unit: bool = typer.Option(False, "--no-unit", help="Skip the plugin's own pytest gate."),
+    json_out: bool = typer.Option(False, "--json", help="Emit the full report (gates + findings) as JSON."),
+    watch: bool = typer.Option(False, "--watch", help="Stream each attack live as it runs (see it happening)."),
+) -> None:
+    """Run a plugin package through the test gate: unit · contract · interop ·
+    adversarial — the frozen red-team corpus + directed probes, judged by
+    out-of-band verdict observers (the attacker never certifies). The container
+    gate is the production form, reported when Docker is present. See
+    docs/RED_TEAM.md. Exits non-zero if the envelope did not hold.
+    """
+    try:
+        from zu_redteam import run_gate
+    except ModuleNotFoundError:
+        typer.echo("zu test-plugin needs the gate: pip install zu-redteam", err=True)
+        raise typer.Exit(code=2)
+
+    plugins_, notes = _resolve_package_plugins(package)
+    for n in notes:
+        typer.echo(f"  note: {n}", err=True)
+    if not plugins_:
+        typer.echo(
+            f"no Zu plugins found for {package!r} — is it installed and does it declare "
+            "zu.* entry points?",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    on_event = None
+    if watch:
+        from .trace import live_printer  # full scope: local, your own terminal
+
+        on_event = live_printer()
+    report = asyncio.run(
+        run_gate(package, plugins=plugins_, pkg_dir=_find_package_dir(package),
+                 run_unit=not no_unit, on_event=on_event)
+    )
+    if json_out:
+        import json
+
+        typer.echo(json.dumps(report.as_dict(), indent=2))
+    else:
+        typer.echo(report.render())
+    raise typer.Exit(code=0 if report.passed else 1)
 
 
 @app.command()

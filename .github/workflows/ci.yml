@@ -11,6 +11,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync
+      - run: uv run ruff check packages
       - run: uv run pytest
       - run: uv run mypy packages
 

@@ -2,7 +2,7 @@
 
 Thanks for considering a contribution. Zu is built in the open, one small,
 testable step at a time. The bar for a change is simple: **the offline test
-suite stays green and mypy stays clean.**
+suite stays green, mypy stays clean, and ruff stays clean.**
 
 ## Setup
 
@@ -13,9 +13,10 @@ others locally — no publishing.
 ```bash
 git clone https://github.com/<you>/zu && cd zu
 uv sync                 # create the env, install every workspace package
-uv run pytest           # the whole suite — no API keys, no network
-uv run mypy packages    # type-check the ports and contracts
-uv run zu plugins       # sanity-check plugin discovery
+uv run pytest             # the whole suite — no API keys, no network
+uv run mypy packages      # type-check the ports and contracts
+uv run ruff check packages  # lint
+uv run zu plugins         # sanity-check plugin discovery
 ```
 
 You need Python 3.11+ and uv. Nothing else for the offline suite.
@@ -50,7 +51,7 @@ You need Python 3.11+ and uv. Nothing else for the offline suite.
 
 1. Branch from `main`.
 2. Make the change **plus its test**. Keep the diff focused.
-3. Run `uv run pytest` and `uv run mypy packages` — both must pass.
+3. Run `uv run pytest`, `uv run mypy packages`, and `uv run ruff check packages` — all must pass.
 4. Open a PR using the template. Describe what the test proves in plain English.
 
 By contributing, you agree your contributions are licensed under

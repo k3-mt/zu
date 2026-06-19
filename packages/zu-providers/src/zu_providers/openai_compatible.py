@@ -20,6 +20,7 @@ that path is deferred. The native path is what ships here.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -27,11 +28,13 @@ from zu_core.ports import Capabilities, Finish, ModelRequest, ModelResponse, Too
 
 from ._messages import openai_tool, to_openai_messages
 
-# OpenAI finish_reason -> neutral Finish (tool_calls handled by presence of calls).
+logger = logging.getLogger("zu.providers.openai")
+
+# OpenAI finish_reason -> neutral Finish. A tool-call finish is decided by the
+# presence of tool calls, not this map, so the tool_calls/function_call reasons
+# are intentionally absent here.
 _FINISH = {
     "stop": Finish.STOP,
-    "tool_calls": Finish.TOOL_CALLS,
-    "function_call": Finish.TOOL_CALLS,
     "length": Finish.LENGTH,
     "content_filter": Finish.STOP,
 }
@@ -104,11 +107,30 @@ def _to_model_response(resp: Any) -> ModelResponse:
     msg = choice.message
     calls: list[ToolCall] = []
     for tc in msg.tool_calls or []:
+        raw = tc.function.arguments or "{}"
         try:
-            args = json.loads(tc.function.arguments or "{}")
+            args = json.loads(raw)
         except (ValueError, TypeError):
             args = {}
-        calls.append(ToolCall(name=tc.function.name, args=args if isinstance(args, dict) else {}))
+        if not isinstance(args, dict):
+            args = {}
+        if args == {} and raw not in ("", "{}"):
+            # Malformed (or non-object) tool args. We keep the run alive — a
+            # malformed-args tool call becomes an empty-args call the loop will
+            # still dispatch — but we do NOT swallow it: surface it as a warning
+            # so a model emitting broken arguments is visible, not silent.
+            logger.warning(
+                "tool call %r produced unparsable arguments, dispatching with {}: %r",
+                tc.function.name,
+                raw,
+            )
+        calls.append(ToolCall(name=tc.function.name, args=args))
+    if not calls and choice.finish_reason == "content_filter":
+        # The provider's moderation stopped generation. The neutral Finish set has
+        # no distinct moderation value, so it maps to STOP — but we do NOT collapse
+        # it silently: surface it so a refusal/cut-off is visible, not mistaken for
+        # a clean completion (the same "fail loudly" posture as malformed args).
+        logger.warning("model response stopped by content_filter (mapped to STOP)")
     finish = Finish.TOOL_CALLS if calls else _FINISH.get(choice.finish_reason, Finish.STOP)
     usage: dict = {}
     if resp.usage is not None:

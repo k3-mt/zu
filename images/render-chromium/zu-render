@@ -14,14 +14,20 @@ the security boundary here.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 
 
 def main() -> int:
-    url = sys.argv[1] if len(sys.argv) > 1 else ""
+    parser = argparse.ArgumentParser(prog="zu-render", add_help=False)
+    parser.add_argument("url", nargs="?", default="")
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
+    args = parser.parse_args(sys.argv[1:])
+    url = args.url
     if not url:
-        print(json.dumps({"status": 400, "html": "", "error": "usage: zu-render <url>"}))
+        print(json.dumps({"status": 400, "html": "", "error": "usage: zu-render <url> [--width W --height H]"}))
         return 2
     try:
         from playwright.sync_api import sync_playwright
@@ -29,8 +35,15 @@ def main() -> int:
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
             try:
-                page = browser.new_page()
-                resp = page.goto(url, wait_until="networkidle", timeout=30000)
+                # Set the viewport explicitly so the rendered DOM is reproducible
+                # and responsive pages render at a known width (Playwright's
+                # implicit default is 1280x720; we make it explicit + overridable).
+                page = browser.new_page(viewport={"width": args.width, "height": args.height})
+                # wait_until="load" — NOT "networkidle": a DOM scraper wants the
+                # document loaded, and "networkidle" never settles on pages with
+                # long-polling / websockets / analytics beacons, so it would time
+                # out on exactly the JS-heavy SPAs tier 2 exists to handle.
+                resp = page.goto(url, wait_until="load", timeout=30000)
                 html = page.content()
                 status = resp.status if resp is not None else 200
             finally:

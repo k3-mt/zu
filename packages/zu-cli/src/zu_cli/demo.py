@@ -183,7 +183,9 @@ def _escalation_registry(offline: bool) -> tuple[Registry, Any]:
     reg = Registry()
     reg.register("tools", "http_fetch", HttpFetch(allow_private=True, transport=httpx.MockTransport(handler)))
     reg.register("tools", "html_parse", HtmlParse())
-    reg.register("tools", "render_dom", RenderDom(backend=backend))
+    # allow_private: the offline demo renders a non-resolvable fixture host
+    # through a fake browser backend (no real egress), so skip the SSRF DNS check.
+    reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))
     for name, det in [
         ("empty", EmptyDetector()),
         ("error", ErrorDetector()),
@@ -283,7 +285,10 @@ async def run_demo(
     process exit code (0 success, 1 otherwise)."""
     meta = DEMOS[kind]
     task = meta["task"]
-    model = getattr(provider, "model", None) or provider_label
+    # Only a real model id, never the provider name standing in for one — a
+    # scripted/offline provider has no model, and "model=scripted" conflates the
+    # two. None here means the provider line below shows the provider alone.
+    model = getattr(provider, "model", None)
 
     print("=" * 72)
     print(f"Zu · demo: {meta['title']}")
@@ -293,7 +298,7 @@ async def run_demo(
     print(f"task     : {task.query}")
     if task.target:
         print(f"target   : {task.target}")
-    print(f"provider : {provider_label}  model: {model}")
+    print(f"provider : {provider_label}" + (f"  model: {model}" if model else ""))
     print("-" * 72)
 
     # Watch the run live — the train of thought, tools, and escalations stream
@@ -344,15 +349,23 @@ def build_provider(
     config surface), defaulting to Anthropic when only a model is given."""
     if offline:
         return DEMOS[kind]["scripted"](), "scripted"
-    from .config import ProviderConfig, build_provider as cfg_build_provider
+    from .config import ConfigError, ProviderConfig, build_provider as cfg_build_provider
 
+    # No hard-coded provider default: an agent must say which provider it runs on.
+    # If a real run names none, fail clearly rather than silently assuming one.
+    if not provider:
+        raise ConfigError(
+            "a real run needs a provider — pass --provider (e.g. --provider "
+            "openai-compatible --model openai/gpt-4o-mini, or --provider anthropic "
+            "--model claude-opus-4-8), or use --offline for the scripted self-test."
+        )
     prov = cfg_build_provider(
         ProviderConfig(
-            name=provider or "anthropic",
+            name=provider,
             model=model,
             api_key=api_key,
             api_key_env=api_key_env,
             base_url_env=base_url_env,
         )
     )
-    return prov, (provider or "anthropic")
+    return prov, provider

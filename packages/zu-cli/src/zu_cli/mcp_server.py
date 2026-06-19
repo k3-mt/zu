@@ -18,46 +18,23 @@ Optional dependency (the ``mcp`` extra): ``pip install 'zu-runtime[mcp]'``.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from zu_core.contracts import Budget, TaskSpec
 from zu_core.loop import run_task
 from zu_core.registry import GROUPS, Registry
 
-from .config import ConfigError, RunConfig, assemble, load_config, load_task
+from .config import ConfigError, RunConfig, assemble, coerce_config, coerce_task
 from .trace import format_event
 
-# --- task/config coercion (a tool arg may be a dict or a file path) ----------
+log = logging.getLogger("zu.mcp")
 
-
-def _coerce_config(source: Any) -> RunConfig:
-    if source is None:
-        return load_config("zu.yaml")
-    if isinstance(source, RunConfig):
-        return source
-    if isinstance(source, str):
-        return load_config(source)
-    if isinstance(source, dict):
-        return RunConfig.model_validate(source)
-    raise ConfigError(f"unsupported config type: {type(source).__name__}")
-
-
-def _coerce_task(source: Any, default_budget: Budget) -> TaskSpec:
-    if isinstance(source, TaskSpec):
-        return source
-    if isinstance(source, str):
-        return load_task(source, default_budget=default_budget)
-    if isinstance(source, dict):
-        doc = dict(source)
-        if "budget" not in doc:
-            doc["budget"] = default_budget.model_dump()
-        try:
-            return TaskSpec.model_validate(doc)
-        except Exception as exc:  # noqa: BLE001
-            raise ConfigError(f"invalid task: {exc}") from exc
-    raise ConfigError(f"unsupported task type: {type(source).__name__}")
+# Config/task coercion (a tool arg may be a dict or a file path) is shared with
+# `zu serve` and the embed facade — see zu_cli.config. The MCP tools accept a str
+# task as a *path* (``allow_paths=True``): the agent driving these tools runs on
+# the same host, so reading a task file it points at is intended.
 
 
 def _discovered() -> dict[str, list[str]]:
@@ -103,12 +80,12 @@ def build_server() -> FastMCP:
         it, discover and select plugins, and build the provider — surfacing any
         error with a clear message. ``config``/``task`` may be a path or a dict."""
         try:
-            cfg = _coerce_config(config)
-            provider, registry, _bus = assemble(cfg)
+            cfg = coerce_config(config)
+            provider, registry, _bus, _providers = assemble(cfg)
             active = {kind: registry.names(kind) for kind in ("tools", "detectors", "validators")}
             checked_task = None
             if task is not None:
-                spec = _coerce_task(task, cfg.budget)
+                spec = coerce_task(task, cfg.budget, allow_paths=True)
                 checked_task = {"query": spec.query, "target": spec.target, "max_tier": spec.max_tier}
         except ConfigError as exc:
             return {"ok": False, "error": str(exc)}
@@ -127,9 +104,9 @@ def build_server() -> FastMCP:
         return a concise result + run_id. ``task``/``config`` may be a path or a
         dict. Use zu_traces with the run_id to read the full event log."""
         try:
-            cfg = _coerce_config(config)
-            spec = _coerce_task(task, cfg.budget)
-            provider, registry, bus = assemble(cfg)
+            cfg = coerce_config(config)
+            spec = coerce_task(task, cfg.budget, allow_paths=True)
+            provider, registry, bus, providers = assemble(cfg)
         except ConfigError as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -138,12 +115,16 @@ def build_server() -> FastMCP:
             if line and ctx is not None:
                 try:
                     await ctx.info(line)  # live to the client; never break the run
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001 - a transport hiccup must not break the run
+                    log.debug("ctx.info failed (dropping a live trace line): %s", exc)
 
         bus.subscribe(_on_event)
+        # The same observability hook: queue any blocked attempt for review.
+        from .observe import attach_observability
+
+        attach_observability(bus, cfg.observability)
         try:
-            result = await run_task(spec, provider, registry, bus)
+            result = await run_task(spec, provider, registry, bus, providers=providers)
         except Exception as exc:  # noqa: BLE001 - a model/infra failure is data, not a crash
             return {"ok": False, "run_id": str(spec.task_id), "error": f"{type(exc).__name__}: {exc}"}
 

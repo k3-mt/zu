@@ -21,6 +21,7 @@ from zu_cli.config import (
     PluginsConfig,
     ProviderConfig,
     RunConfig,
+    assemble,
     build_provider,
     build_registry,
     build_sink,
@@ -164,6 +165,83 @@ def test_provider_by_import_reference():
     assert provider.model == "claude-x"
 
 
+def test_sink_encryption_selected_from_config(monkeypatch):
+    # The `encryption` field wires a codec onto the sink, from env keys.
+    import os
+
+    pytest.importorskip("cryptography")
+    monkeypatch.setenv("ZU_EVENT_KEY", os.urandom(32).hex())
+    from zu_cli.config import EventSinkConfig, _build_one_sink, _catalog
+
+    sink = _build_one_sink(EventSinkConfig(driver="sqlite", path=":memory:", encryption="aesgcm"), _catalog())
+    assert type(sink._codec).__name__ == "AesGcmCodec"
+
+    monkeypatch.setenv("ZU_EVENT_KEY_ID", "default")
+    managed = _build_one_sink(
+        EventSinkConfig(driver="sqlite", path=":memory:", encryption="managed"), _catalog())
+    assert type(managed._codec).__name__ == "ManagedAesGcmCodec"
+
+
+def test_unknown_encryption_mode_is_a_clear_error():
+    pytest.importorskip("cryptography")
+    from zu_cli.config import EventSinkConfig, _build_one_sink, _catalog
+
+    with pytest.raises(ConfigError, match="unknown encryption mode"):
+        _build_one_sink(EventSinkConfig(driver="sqlite", encryption="rot13"), _catalog())
+
+
+def test_per_tier_providers_built_from_config():
+    # A `providers:` block builds one ModelProvider per tier; the global provider
+    # is separate and required.
+    from zu_cli.config import build_providers_by_tier
+
+    cfg = RunConfig(
+        provider=ProviderConfig(name="openai-compatible", model="gpt-4o-mini"),
+        providers={2: ProviderConfig(name="anthropic", model="claude-opus-4-8")},
+    )
+    by_tier = build_providers_by_tier(cfg)
+    assert set(by_tier) == {2}
+    assert type(by_tier[2]).__name__ == "AnthropicProvider"
+    assert by_tier[2].model == "claude-opus-4-8"
+
+
+def test_assemble_returns_global_and_per_tier_providers():
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        providers={2: ProviderConfig(name="anthropic", model="claude-opus-4-8")},
+        plugins=PluginsConfig(validators=["schema"]),
+    )
+    provider, _registry, _bus, by_tier = assemble(cfg)
+    assert type(provider).__name__ == "ScriptedProvider"   # global
+    assert set(by_tier) == {2} and by_tier[2].model == "claude-opus-4-8"
+
+
+def test_no_per_tier_block_means_empty_map():
+    cfg = RunConfig(provider=ProviderConfig(name="scripted"))
+    _p, _r, _b, by_tier = assemble(cfg)
+    assert by_tier == {}
+
+
+def test_import_reference_refused_when_imports_disallowed():
+    # The networked surface (per-request config) forbids the module:Attr door,
+    # so a remote caller cannot make the server import & execute arbitrary code.
+    prov = ProviderConfig(name="zu_providers.anthropic:AnthropicProvider", model="claude-x")
+    with pytest.raises(ConfigError, match="does not permit arbitrary"):
+        build_provider(prov, allow_imports=False)
+
+    plug = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(validators=["zu_validators.schema:SchemaValidator"]),
+    )
+    with pytest.raises(ConfigError, match="does not permit arbitrary"):
+        build_registry(plug, allow_imports=False)
+
+    # A short, installed plugin name is still fine on the restricted surface.
+    named = RunConfig(provider=ProviderConfig(name="scripted"),
+                      plugins=PluginsConfig(validators=["schema"]))
+    assert build_registry(named, allow_imports=False).names("validators") == ["schema"]
+
+
 # --- the event sink is configured --------------------------------------------
 
 
@@ -202,7 +280,7 @@ async def test_trace_sinks_ship_events_alongside_the_canonical_store(tmp_path):
             "trace_sinks": [{"driver": "jsonl", "path": str(trace)}],
         }
     )
-    provider, registry, bus = assemble(cfg)
+    provider, registry, bus, _ = assemble(cfg)
     result = await run_task(load_task_spec(), provider, registry, bus)
 
     assert result.status is Status.SUCCESS

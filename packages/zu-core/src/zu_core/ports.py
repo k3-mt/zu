@@ -7,12 +7,36 @@ a concrete adapter — which is what makes every adapter replaceable.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum
 from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from .contracts import Result
+
+# --- interface versioning (MLR §6) ---------------------------------------
+#
+# Each plugin port carries an interface MAJOR version. A plugin declares the
+# major it was built against via a ``__zu_interface__`` class/instance attribute
+# (an int); absent ⇒ 1, the original contract. The registry refuses a plugin
+# whose declared major differs from the runtime's major for that port — the
+# structural Protocol changed incompatibly, so loading it would fail in
+# confusing ways. Bump a port's number here when its Protocol changes in a
+# backward-incompatible way (e.g. a renamed/removed required member); a plugin
+# built for the old contract is then refused with a clear error rather than
+# half-working. Minor/compatible additions do NOT bump the major.
+INTERFACE_VERSION: dict[str, int] = {
+    "providers": 1,
+    "tools": 1,
+    "detectors": 1,
+    "validators": 1,
+    "backends": 1,
+    "sinks": 1,
+}
+
+# The attribute a plugin sets to declare the interface major it targets.
+INTERFACE_ATTR = "__zu_interface__"
 
 # --- model provider (the any-model seam) ---------------------------------
 
@@ -61,6 +85,43 @@ class ModelProvider(Protocol):
     async def complete(self, req: ModelRequest) -> ModelResponse: ...
 
 
+# --- the capability envelope ---------------------------------------------
+#
+# The security thesis (see PHILOSOPHY.md §5–6): a plugin **declares** the
+# capabilities it needs and the hosts it reaches, so its blast radius is visible
+# in its own code and a runtime/sandbox can bound it mechanically. The
+# declaration is the *what*; a SandboxBackend is the *enforcement*. These tokens
+# are the machine-readable contract the gate's verdict observers compare actual
+# behaviour against — without them, "least privilege" is prose, not a contract.
+
+CAP_NET = "net"  # opens outbound network connections
+CAP_SANDBOX = "sandbox"  # provisions/runs a sandbox (e.g. a tier-2 container)
+CAP_FS_READ = "fs:read"  # reads the host filesystem
+CAP_FS_WRITE = "fs:write"  # writes the host filesystem
+CAP_SUBPROCESS = "subprocess"  # spawns a subprocess
+
+# The egress allowlist sentinel for a plugin that legitimately needs the open
+# internet (a general web-fetch tool, by definition). It is *not* a default:
+# declaring it is the high-trust request PHILOSOPHY.md §6 says earns review.
+# Any other egress entry is a specific host the plugin is allowed to reach;
+# an empty ``egress`` means the plugin reaches nothing.
+EGRESS_OPEN = "*"
+
+
+def declared_envelope(plugin: Any) -> dict[str, Any]:
+    """The capability envelope a plugin declares, read defensively.
+
+    A plugin that omits ``capabilities``/``egress`` is treated as least
+    privilege (no capabilities, no egress) — the safe default — so the
+    declaration is opt-in for plugins and never crashes the loop on an older
+    plugin that predates the fields. Returns plain sorted lists so the value is
+    JSON-serialisable straight into the event log.
+    """
+    caps = getattr(plugin, "capabilities", None) or ()
+    egress = getattr(plugin, "egress", None) or ()
+    return {"capabilities": sorted(caps), "egress": sorted(egress)}
+
+
 # --- in-loop ports -------------------------------------------------------
 
 
@@ -96,7 +157,11 @@ class RunContext(BaseModel):
     spec: Any
     # Populated by the loop (build step 4); kept Any so the core stays small.
     observation: Any = None
-    events: list = Field(default_factory=list)
+    # The run's event log as a *read-only* sequence: the loop hands plugins a
+    # window that reflects the log as it grows but cannot be mutated through this
+    # context (see ``loop._EventsView``). Typed ``Sequence`` to make that
+    # read-only contract explicit rather than convention.
+    events: Sequence = Field(default_factory=list)
 
 
 @runtime_checkable
@@ -110,6 +175,14 @@ class Tool(Protocol):
     # The loop reads it defensively (``getattr(tool, "tier", 1)``) so a tool
     # that omits it is treated as tier 1.
     tier: int
+
+    # The capability envelope (see CAP_* / EGRESS_OPEN above). ``capabilities``
+    # is the least-privilege set of capability tokens the tool needs; ``egress``
+    # is its host allowlist (``{EGRESS_OPEN}`` for the reviewed open-internet
+    # case, empty for none). Both are read defensively via ``declared_envelope``,
+    # so a tool that omits them is treated as needing nothing — the safe default.
+    capabilities: frozenset[str]
+    egress: frozenset[str]
 
     async def __call__(self, ctx: RunContext, **kwargs: Any) -> dict: ...
 
@@ -134,11 +207,69 @@ class Validator(Protocol):
 
 @runtime_checkable
 class SandboxBackend(Protocol):
+    """Provisions and execs inside an isolated environment (a container/microVM).
+
+    ``launch`` takes a free-form spec dict so an adapter can grow new isolation
+    knobs without changing this shape. The red-team container form
+    (RED_TEAM_CONTAINER.md) reads, in addition to the existing
+    ``image``/``network``/cap-drop keys:
+
+      * ``network: "isolated"`` — attach to a network with no default route, so
+        the egress proxy is the *only* path off-box (default-DROP is the real
+        enforcement; the proxy env below is only a convenience);
+      * ``proxy: {host, port}`` — the egress proxy to route through (sets
+        HTTP(S)_PROXY in the container);
+      * ``ca_cert`` — a per-run MITM CA to trust *inside the container only*
+        (P2, for HTTPS payload inspection);
+      * ``seccomp`` / ``audit`` — a syscall profile / fs-audit toggle for the
+        host-effect monitor (P3).
+
+    An adapter ignores keys it does not implement, so a spec is forward-compatible
+    across phases."""
+
     async def launch(self, spec: dict) -> Any: ...
 
     async def exec(self, sandbox: Any, call: ToolCall) -> dict: ...
 
     async def destroy(self, sandbox: Any) -> None: ...
+
+
+@runtime_checkable
+class EgressProxy(Protocol):
+    """The control-plane egress proxy: the target container's sole route off-box,
+    and the *authoritative* record of where it actually went (RED_TEAM_CONTAINER.md
+    §3.1). It is out of band — the target routes through it but cannot read its
+    log or config — so its connection record is a fact the judged cannot author.
+
+    ``launch`` starts the proxy for one run against a host allowlist (the union of
+    the target tools' declared ``egress``; ``EGRESS_OPEN`` permits any host) and
+    returns an opaque handle carrying its ``{host, port}``. ``connections``
+    returns the JSONL connection log as dicts — ``{client, host, ip, port,
+    scheme, bytes_out, allowed}`` — one per CONNECT/request, including refused
+    (``allowed: false``) attempts. ``close`` tears it down."""
+
+    async def launch(self, spec: dict) -> Any: ...
+
+    def connections(self, handle: Any) -> list[dict]: ...
+
+    async def close(self, handle: Any) -> None: ...
+
+
+@runtime_checkable
+class HostEffectMonitor(Protocol):
+    """The control-plane host-effect monitor: the out-of-band record of what the
+    target did to the filesystem / process table from *outside* its userland
+    (RED_TEAM_CONTAINER.md §3.3, P3). Like the egress proxy, it observes the
+    target rather than trusting it, so an undeclared fs-write or subprocess is a
+    fact the plugin cannot suppress.
+
+    ``collect`` is called after the run, before teardown (it needs the live
+    sandbox), and returns host-effect facts as ``{kind, path|argv, pid?}`` dicts —
+    e.g. ``{"kind": "fs:write", "path": "/etc/cron.d/x"}``. The default Docker
+    implementation reads the container's filesystem diff; a seccomp/audit source
+    can feed subprocess/syscall facts through the same shape later."""
+
+    async def collect(self, sandbox: Any, backend: Any) -> list[dict]: ...
 
 
 @runtime_checkable

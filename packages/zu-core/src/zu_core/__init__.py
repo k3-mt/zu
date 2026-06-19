@@ -8,12 +8,22 @@ from __future__ import annotations
 
 from . import events
 from .bus import EventBus, SubscriberFailure
-from .codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
+from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
 from .projections import SessionState, SessionStore
+from .security import SecurityBlock
 from .sinks import MemoryEventSink
+from .view import RENDER_KEYS, scope_event, scope_payload
 from .ports import (
+    CAP_FS_READ,
+    CAP_FS_WRITE,
+    CAP_NET,
+    CAP_SANDBOX,
+    CAP_SUBPROCESS,
+    EGRESS_OPEN,
+    INTERFACE_ATTR,
+    INTERFACE_VERSION,
     Capabilities,
     Detector,
     EventSink,
@@ -29,12 +39,15 @@ from .ports import (
     ToolCall,
     Validator,
     Verdict,
+    declared_envelope,
 )
 from .registry import (
     REGISTRY,
+    IncompatibleInterfaceError,
     LoadFailure,
     Registry,
     backend,
+    check_interface,
     detector,
     provider,
     sink,
@@ -61,9 +74,23 @@ __all__ = [
     "validate_filter",
     "IdentityCodec",
     "PayloadCodec",
+    "KeyProvider",
     "encode_payload",
     "decode_payload",
+    "SecurityBlock",
+    "scope_event",
+    "scope_payload",
+    "RENDER_KEYS",
     # ports
+    "CAP_NET",
+    "CAP_SANDBOX",
+    "CAP_FS_READ",
+    "CAP_FS_WRITE",
+    "CAP_SUBPROCESS",
+    "EGRESS_OPEN",
+    "INTERFACE_VERSION",
+    "INTERFACE_ATTR",
+    "declared_envelope",
     "Capabilities",
     "Detector",
     "EventSink",
@@ -82,6 +109,8 @@ __all__ = [
     # registry
     "REGISTRY",
     "LoadFailure",
+    "IncompatibleInterfaceError",
+    "check_interface",
     "Registry",
     "backend",
     "detector",

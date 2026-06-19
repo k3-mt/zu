@@ -148,11 +148,16 @@ async def test_capabilities_present(make) -> None:
     assert make("text", []).capabilities.native_tools is True
 
 
-async def test_openai_usage_includes_total_tokens() -> None:
-    # The neutral usage dict the cost projection reads carries total_tokens for
-    # the OpenAI shape (Anthropic omits it; the loop sums input+output either way).
-    r = await make_openai("text", []).complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
-    assert r.usage["total_tokens"] == 15
+@pytest.mark.parametrize("make", _PROVIDERS)
+async def test_usage_shape_is_normalised(make) -> None:
+    # The neutral usage dict the cost projection reads carries the SAME keys from
+    # both adapters: input/output/total. OpenAI returns a total on the wire;
+    # Anthropic doesn't, so the adapter computes it (input + output) — either way
+    # the cost projection sees one shape.
+    r = await make("text", []).complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert r.usage["input_tokens"] == 10
+    assert r.usage["output_tokens"] == 5
+    assert r.usage["total_tokens"] == 15  # 10 + 5, whether the API gave it or not
 
 
 def test_api_key_resolution_prefers_explicit_then_env(monkeypatch) -> None:
@@ -244,6 +249,29 @@ def test_to_openai_matches_synthesised_tool_ids() -> None:
     call_id = out[1]["tool_calls"][0]["id"]
     assert out[2]["role"] == "tool"
     assert out[2]["tool_call_id"] == call_id
+
+
+# An assistant turn that reasons *and* calls a tool: the text must survive into
+# both wire formats (regression: it used to be silently dropped on replay).
+_TOOL_HISTORY_WITH_TEXT: list[dict] = [
+    {"role": "user", "content": "q"},
+    {"role": "assistant", "content": "I'll fetch the page first.",
+     "tool_calls": [{"name": "http_fetch", "args": {"url": "u"}}]},
+    {"role": "tool", "name": "http_fetch", "content": "{\"html\": \"x\"}"},
+]
+
+
+def test_anthropic_preserves_assistant_text_with_tool_calls() -> None:
+    _, out = to_anthropic_messages(_TOOL_HISTORY_WITH_TEXT)
+    blocks = out[1]["content"]
+    assert blocks[0] == {"type": "text", "text": "I'll fetch the page first."}
+    assert blocks[1]["type"] == "tool_use"  # text leads, tool_use follows
+
+
+def test_openai_preserves_assistant_text_with_tool_calls() -> None:
+    out = to_openai_messages(_TOOL_HISTORY_WITH_TEXT)
+    assert out[1]["content"] == "I'll fetch the page first."
+    assert out[1]["tool_calls"][0]["function"]["name"] == "http_fetch"
 
 
 # --- the adapter drives the real loop (full assistant/tool history) -----------

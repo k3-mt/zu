@@ -25,10 +25,12 @@ inert when none are registered (the step-4 case).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import logging
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any, Iterable
 
 from . import events as ev
@@ -42,8 +44,10 @@ from .ports import (
     Scope,
     Severity,
     Verdict,
+    declared_envelope,
 )
 from .registry import REGISTRY, Registry
+from .security import SecurityBlock
 
 log = logging.getLogger("zu.loop")
 
@@ -53,6 +57,30 @@ _RANK = {Severity.WARN: 0, Severity.RETRY: 1, Severity.ESCALATE: 2, Severity.TER
 # Observation keys that carry retrieved page content — stored once (in a
 # data.source.fetched event), summarised in the harness.tool.returned event.
 _CONTENT_KEYS = ("html", "text", "content")
+
+# Hard cap on a single tool observation's serialized size. A hostile tool can
+# return an enormous, deeply-nested, or shared-reference ("schema bomb")
+# structure that explodes when serialized (to the model message and to the event
+# log) and OOMs the harness. We reject it gracefully instead — the secure-by-
+# default claim that "parsing and size limits reject it" made real.
+_MAX_OBSERVATION_BYTES = 1_000_000
+
+
+def _within_size(obj: Any, max_bytes: int = _MAX_OBSERVATION_BYTES) -> bool:
+    """True iff ``obj`` serializes to <= max_bytes of JSON — checked WITHOUT
+    materializing a pathological structure. ``iterencode`` yields lazily, so an
+    exponential/shared-reference bomb is caught after the first max_bytes of
+    output rather than after full (2^depth) expansion; a circular reference
+    raises ValueError and is likewise rejected."""
+    total = 0
+    try:
+        for chunk in json.JSONEncoder(default=str).iterencode(obj):
+            total += len(chunk)
+            if total > max_bytes:
+                return False
+    except ValueError:
+        return False
+    return True
 
 
 def _materialize(obj: Any) -> Any:
@@ -65,12 +93,24 @@ def _materialize(obj: Any) -> Any:
     return obj() if isinstance(obj, type) else obj
 
 
+def _as_int(value: Any) -> int:
+    """Coerce a usage field to int, tolerating a missing or malformed value.
+
+    A provider's usage dict is semi-trusted adapter output; a non-numeric or
+    ``None`` token count must not crash the loop mid-run (the budget simply sees
+    zero for that field rather than raising ``TypeError``/``ValueError``)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _usage_tokens(usage: dict) -> int:
     if not usage:
         return 0
     if "total_tokens" in usage:
-        return int(usage["total_tokens"])
-    return int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+        return _as_int(usage["total_tokens"])
+    return _as_int(usage.get("input_tokens")) + _as_int(usage.get("output_tokens"))
 
 
 _FENCE = re.compile(r"^```[a-zA-Z0-9]*\s*\n?(.*?)\n?```$", re.DOTALL)
@@ -110,6 +150,66 @@ def _summarize_observation(obs: dict) -> dict:
 
 def _worst(verdicts: list[Verdict]) -> Verdict | None:
     return max(verdicts, key=lambda v: _RANK[v.severity], default=None)
+
+
+def _budget_reason(elapsed: float, tokens: int, budget: Any) -> str | None:
+    """The terminal reason if a budget bound is exceeded, else None.
+
+    Wall-time and tokens are checked together so the two control-plane bounds
+    have one definition: this is called before spending a model call and again
+    after, so a turn that itself overshoots is caught, not only a later one."""
+    if elapsed > budget.wall_time_s:
+        return "budget:wall_time_s"
+    if tokens >= budget.max_tokens:
+        return "budget:max_tokens"
+    return None
+
+
+class _EventsView(Sequence):
+    """A read-only window onto the live event log handed to plugins.
+
+    It wraps the loop's event list *by reference*, so it reflects the log as it
+    grows with no per-checkpoint copy, but a detector/validator/tool cannot
+    append, replace, or delete records through it — the canonical log stays the
+    loop's alone. ``RunContext.events`` holds this view, not the raw list."""
+
+    __slots__ = ("_events",)
+
+    def __init__(self, events: list) -> None:
+        self._events = events
+
+    def __getitem__(self, index):
+        return self._events[index]
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+
+def _safe_inspect(detector: Any, ctx: RunContext) -> Verdict | None:
+    """Run a detector in isolation: a raising third-party detector is logged and
+    skipped, never allowed to crash the run — the same isolation the bus gives
+    its subscribers and the loop gives its tools."""
+    try:
+        return detector.inspect(ctx)
+    except Exception as exc:  # noqa: BLE001 - a broken detector must not halt the run
+        log.warning(
+            "detector %r raised %s: %s — skipping it",
+            getattr(detector, "name", detector), type(exc).__name__, exc,
+        )
+        return None
+
+
+def _safe_check(validator: Any, result: Result, ctx: RunContext) -> Verdict | None:
+    """Run a validator in isolation: a raising validator is logged and skipped,
+    so a buggy third-party validator cannot take down every run."""
+    try:
+        return validator.check(result, ctx)
+    except Exception as exc:  # noqa: BLE001 - a broken validator must not halt the run
+        log.warning(
+            "validator %r raised %s: %s — skipping it",
+            getattr(validator, "name", validator), type(exc).__name__, exc,
+        )
+        return None
 
 
 def _tier_of(tool: Any) -> int:
@@ -158,11 +258,15 @@ class _Run:
         self.bus = bus
         self.trace_id = spec.task_id  # one trace per task in the v1 runtime
         self.task_id = spec.task_id
-        # One RunContext reused for the whole run: its ``events`` list is the
-        # live log (appended in place by emit) and ``observation`` is updated
+        # One RunContext reused for the whole run: ``observation`` is updated
         # per checkpoint — so a checkpoint is O(1), not an O(n) copy of the log.
+        # Plugins (tools/detectors/validators) receive ``ctx.events`` as a
+        # *read-only window* onto the live log: it reflects the log as it grows
+        # (no copy) but a misbehaving plugin cannot mutate or corrupt the
+        # canonical record through it. The loop appends to ``self.events``.
+        self.events: list[Event] = []
         self._ctx = RunContext(spec=spec, observation=None, events=[])
-        self.events: list[Event] = self._ctx.events
+        self._ctx.events = _EventsView(self.events)
         self.root = None  # event_id of TASK_STARTED; parent of terminal events
 
     async def emit(self, type_: str, payload: dict | None = None, *, parent=None, source="loop"):
@@ -203,15 +307,28 @@ async def run_task(
     provider: ModelProvider,
     registry: Registry | None = None,
     bus: EventBus | None = None,
+    *,
+    providers: Mapping[int, ModelProvider] | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
+    ``provider`` is the run's **global** model provider, used on every tier unless
+    a tier is overridden. ``providers`` is an optional per-tier override map
+    (``{tier: ModelProvider}``): when the ladder climbs to a tier present in the
+    map, the loop switches to that provider mid-run — the neutral message format
+    lets a different adapter pick up the same conversation, so a cheap/fast model
+    can do the tier-1 work and a frontier/vision model take over on escalation.
+    A tier with no override falls back to the global ``provider``.
+
     ``registry`` defaults to the process-wide ``REGISTRY`` (so decorator- and
     entry-point-registered plugins are both visible); pass an explicit one to
-    isolate. Budgets are *soft* — token and wall-time limits are enforced
-    between turns, so a single turn may overshoot before the run is ended; a
-    hard per-call token cap arrives with the real providers (build step 7).
+    isolate. Wall-time is enforced *both* between turns and as a hard timeout on
+    each model call (``asyncio.wait_for``), so a hung or runaway provider cannot
+    overrun the deadline. The token budget remains soft — a single turn may
+    overshoot ``max_tokens`` before the run is ended — until the real providers
+    pass a remaining-token limit into the call (build step 7).
     """
+    by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
     run = _Run(spec, bus)
@@ -226,6 +343,20 @@ async def run_task(
 
     run.root = await run.emit(ev.TASK_STARTED, {"query": spec.query, "target": spec.target})
 
+    # Record each tool's declared capability envelope onto the log at run start,
+    # so the out-of-band verdict observers (the gate, and the always-on runtime
+    # checks) can judge observed behaviour against what each plugin declared.
+    await run.emit(
+        ev.ENVELOPE_DECLARED,
+        {
+            "tools": {
+                name: {"tier": _tier_of(t), **declared_envelope(t)}
+                for name, t in tools.items()
+            }
+        },
+        parent=run.root,
+    )
+
     messages = _initial_messages(spec, ladder.active().values())
 
     start = time.monotonic()
@@ -233,18 +364,32 @@ async def run_task(
 
     for step in range(budget.max_steps):
         # --- budget checkpoints (time / tokens) before spending a model call ---
-        if time.monotonic() - start > budget.wall_time_s:
-            return await run.terminal("budget:wall_time_s")
-        if tokens >= budget.max_tokens:
-            return await run.terminal("budget:max_tokens")
+        reason = _budget_reason(time.monotonic() - start, tokens, budget)
+        if reason is not None:
+            return await run.terminal(reason)
 
         # Recompute per turn so a tier climbed last turn takes effect now: the
-        # model is offered exactly the tools unlocked at the current tier.
+        # model is offered exactly the tools unlocked at the current tier, and
+        # the provider bound to that tier takes over (global provider otherwise).
         active = ladder.active()
         tool_schemas = ladder.schemas()
+        turn_provider = by_tier.get(ladder.current, provider)
 
         turn = await run.emit(ev.TURN_STARTED, {"step": step + 1}, parent=run.root)
-        resp = await provider.complete(ModelRequest(messages=messages, tools=tool_schemas))
+        # Bound the single model call by the wall-time the run has left: budgets
+        # are otherwise only checked *between* turns, so a hung or runaway
+        # provider could block forever and defeat ``wall_time_s`` entirely. A
+        # timeout ends the run the same as any other wall-time exhaustion.
+        remaining = budget.wall_time_s - (time.monotonic() - start)
+        if remaining <= 0:
+            return await run.terminal("budget:wall_time_s")
+        try:
+            resp = await asyncio.wait_for(
+                turn_provider.complete(ModelRequest(messages=messages, tools=tool_schemas)),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            return await run.terminal("budget:wall_time_s")
         tokens += _usage_tokens(resp.usage)
         # Record this call's usage, tier, and model into the log so cost is
         # reconstructable after the fact (a read-side projection sums these);
@@ -254,7 +399,7 @@ async def run_task(
             {
                 "step": step + 1,
                 "tier": ladder.current,
-                "model": getattr(provider, "model", None),
+                "model": getattr(turn_provider, "model", None),
                 "usage": dict(resp.usage),
                 # The model's natural-language output this turn — its "train of
                 # thought" (a plan/explanation before a tool call, or the final
@@ -265,10 +410,9 @@ async def run_task(
         )
         # Re-check after the call so a turn that itself overshoots is caught,
         # not just a subsequent one.
-        if tokens >= budget.max_tokens:
-            return await run.terminal("budget:max_tokens")
-        if time.monotonic() - start > budget.wall_time_s:
-            return await run.terminal("budget:wall_time_s")
+        reason = _budget_reason(time.monotonic() - start, tokens, budget)
+        if reason is not None:
+            return await run.terminal(reason)
 
         # A truncated response is unusable whether it finalised OR called tools:
         # tool-call arguments cut off mid-generation are exactly the malformed
@@ -280,12 +424,17 @@ async def run_task(
         if resp.tool_calls:
             if len(resp.tool_calls) > budget.max_tool_calls:
                 return await run.terminal("budget:max_tool_calls")
-            messages.append(
-                {
-                    "role": "assistant",
-                    "tool_calls": [{"name": c.name, "args": c.args} for c in resp.tool_calls],
-                }
-            )
+            assistant_msg: dict = {
+                "role": "assistant",
+                "tool_calls": [{"name": c.name, "args": c.args} for c in resp.tool_calls],
+            }
+            # Preserve any reasoning text the model emitted alongside its tool
+            # calls, so the resent history keeps its train of thought (a model
+            # often explains a plan before calling a tool). Omitted when empty so
+            # the neutral tool-call shape is unchanged for the text-free case.
+            if resp.text:
+                assistant_msg["content"] = resp.text
+            messages.append(assistant_msg)
             halting: Verdict | None = None
             for call in resp.tool_calls:
                 obs = await _invoke(run, turn, active, call.name, call.args)
@@ -380,9 +529,34 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
     else:
         try:
             obs = await tool(run.ctx(), **args)
+        except SecurityBlock as block:
+            # A guard contained the action (e.g. an SSRF/egress refusal). Record
+            # it as a defense so the blocked attempt is on the log, then surface
+            # it to the model as an error observation like any other failure.
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": block.kind, "tool": name, "target": block.target, "detail": str(block)},
+                parent=turn,
+                source=name,
+            )
+            log.warning("tool %r blocked (%s): %s", name, block.kind, block)
+            obs = {"error": f"{type(block).__name__}: {block}", "blocked": block.kind}
         except Exception as exc:  # noqa: BLE001 - tool failure is an observation
             log.warning("tool %r raised %s: %s", name, type(exc).__name__, exc)
             obs = {"error": f"{type(exc).__name__}: {exc}"}
+        # Reject an oversized/unserialisable observation before it is stored or
+        # forwarded — a schema bomb is contained here, not after it has OOMed.
+        if not _within_size(obs):
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": "oversized_observation", "tool": name,
+                 "detail": "tool observation exceeds the size limit and was rejected"},
+                parent=turn,
+                source=name,
+            )
+            log.warning("tool %r returned an oversized observation; rejecting it", name)
+            obs = {"error": "tool observation exceeds the size limit and was rejected",
+                   "blocked": "oversized_observation"}
     # When the observation carried retrieved content, store it once in a data
     # event (the provenance grounding reads in step 6) and summarise it in the
     # tool.returned event, so a fetched page isn't duplicated in the log. The
@@ -415,7 +589,7 @@ async def _detector_checkpoint(
     for d in detectors:
         if getattr(d, "scope", None) not in scopes:
             continue
-        verdict = d.inspect(ctx)
+        verdict = _safe_inspect(d, ctx)
         if verdict is None:
             continue
         await run.emit(
@@ -477,11 +651,11 @@ def _finalise_verdict(
     verdicts: list[Verdict] = []
     for d in detectors:
         if getattr(d, "scope", None) == Scope.ON_FINAL:
-            v = d.inspect(ctx)
+            v = _safe_inspect(d, ctx)
             if v is not None:
                 verdicts.append(v)
     for val in validators:
-        v = val.check(candidate, ctx)
+        v = _safe_check(val, candidate, ctx)
         if v is not None:
             verdicts.append(v)
     return _worst(verdicts)

@@ -90,3 +90,18 @@ def test_bad_config_type_is_a_clean_error():
 def test_bad_task_is_a_clean_error():
     with pytest.raises(ConfigError):
         zu.run({"no_query": True}, config=_cfg({"x": "y"}))
+
+
+def test_registration_decorators_are_exported():
+    """The documented ``@zu.tool`` / ``@zu.detector`` / … surface resolves on the
+    facade and registers onto the process-wide registry the loop reads."""
+    from zu_core.registry import REGISTRY
+
+    for name in ("tool", "detector", "validator", "provider", "backend", "sink"):
+        assert callable(getattr(zu, name)), f"zu.{name} is not exported"
+
+    @zu.tool
+    class _FacadeProbeTool:
+        name = "facade_probe_tool"
+
+    assert "facade_probe_tool" in REGISTRY.names("tools")

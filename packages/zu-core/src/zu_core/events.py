@@ -13,6 +13,12 @@ from __future__ import annotations
 
 # --- harness.* — the runtime's own lifecycle ---------------------------------
 TASK_STARTED = "harness.task.started"
+# Emitted once at run start with the capability envelope every active tool
+# declared: {"tools": {name: {tier, capabilities, egress}}}. This is the
+# machine-readable record the gate's out-of-band verdict observers compare
+# observed behaviour against — "did a plugin reach a host outside its declared
+# egress?" is answerable only because the declaration is on the log.
+ENVELOPE_DECLARED = "harness.envelope.declared"
 TASK_COMPLETED = "harness.task.completed"
 # Emitted in two shapes, distinguished by payload (the documented contract):
 #   climb  -> {"reason", "detail", "from_tier", "to_tier"}  the escalation step
@@ -31,6 +37,29 @@ TOOL_INVOKED = "harness.tool.invoked"
 TOOL_RETURNED = "harness.tool.returned"
 DETECTOR_FIRED = "harness.detector.fired"
 VALIDATION_FAILED = "harness.validation.failed"
+# A contained adversarial/unsafe attempt: a guard refused an action (SSRF/egress
+# block, an oversized "schema bomb" observation, a denied capability). Emitted at
+# the point of containment so a blocked attempt is on the record, never silent —
+# the raw material for the defense review queue and the live dashboard.
+DEFENSE_BLOCKED = "harness.defense.blocked"
+
+# Out-of-band facts emitted by the red-team control plane, NOT by a tool
+# (RED_TEAM_CONTAINER.md §3.3). They are produced OUTSIDE the target container —
+# by the egress proxy and the host-effect monitor — so a deceptive plugin can
+# neither author nor forge them. The verdict observers prefer them when present.
+#
+#   egress.observed     -> the proxy's authoritative record of a connection the
+#                          target actually made: {client, host, ip, port, scheme,
+#                          bytes_out, allowed}. Unlike data.source.fetched (the
+#                          tool's SELF-REPORT of where it went), this is ground
+#                          truth — what closes the "reaches evil, reports allowed"
+#                          gap the in-process gate cannot (RED_TEAM.md §1).
+#   host_effect.observed-> an observed filesystem write / subprocess spawn from
+#                          outside the target's userland: {kind, path|argv, pid}.
+#                          Lets HostEffect fire on an OBSERVED, undeclared effect,
+#                          not only a declared capability.
+EGRESS_OBSERVED = "harness.egress.observed"
+HOST_EFFECT_OBSERVED = "harness.host_effect.observed"
 
 # --- data.* — what the agent read and produced -------------------------------
 SOURCE_FETCHED = "data.source.fetched"
@@ -39,6 +68,7 @@ RECORD_EXTRACTED = "data.record.extracted"
 HARNESS_TYPES: frozenset[str] = frozenset(
     {
         TASK_STARTED,
+        ENVELOPE_DECLARED,
         TASK_COMPLETED,
         TASK_ESCALATED,
         TASK_TERMINAL,
@@ -48,6 +78,9 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         TOOL_RETURNED,
         DETECTOR_FIRED,
         VALIDATION_FAILED,
+        DEFENSE_BLOCKED,
+        EGRESS_OBSERVED,
+        HOST_EFFECT_OBSERVED,
     }
 )
 DATA_TYPES: frozenset[str] = frozenset({SOURCE_FETCHED, RECORD_EXTRACTED})

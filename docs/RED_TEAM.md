@@ -4,6 +4,31 @@
 
 ---
 
+## Implementation status
+
+This document is both the design and a description of what ships. The gate lives
+in `packages/zu-redteam` and runs via `zu test-plugin <pkg>`.
+
+| Component | Status |
+|-----------|--------|
+| Out-of-band verdict observers — egress · exfil · provenance · resources · neighbour-health | **Implemented**, deterministic (`zu_redteam.verdict`) |
+| Out-of-band verdict observer — host/filesystem effect (`HostEffect`, §3) | **Implemented** — fires (deterministically, off the declared envelope on the log) when a reviewed plugin declares a host/filesystem/subprocess capability, surfacing the high-trust combination for human review. In `default_observers()`. |
+| The frozen regression corpus (the §4 attacks) | **Implemented** (`zu_redteam.corpus`) — runs on every gated plugin, with the target's real plugins present |
+| The attacker agent — deterministic replay | **Implemented** (`zu_redteam.attacker.ScriptedAttacker`): replays the frozen corpus against the target. This is what the gate runs. |
+| The multi-specialist **fleet** (§4) | **Implemented** — `ScriptedAttacker.run_fleet()` runs each `FLEET` specialist over its objectives' cases, and the adversarial gate reports per-specialist coverage (a suppressed objective shows as an empty specialist). |
+| Capability-envelope declaration on the `Tool` port | **Implemented** — recorded as `harness.envelope.declared`; observers judge against it |
+| Directed per-tool envelope probes | **Implemented** (`gate._directed_probes`) — every target tool is invoked once, with benign in-type arguments synthesised for **all** its required parameters (not just a `url`), and judged against its own declaration. A required parameter whose type can't be inferred is filled best-effort and surfaced in the gate report, so a weak probe is visible rather than a silent pass. This, plus the observers, is what catches a real under-declaring tool. |
+| Gates: unit · contract · interop · adversarial | **Implemented**, run in-process, deterministic, in CI |
+| The container gate (real Docker, out-of-band enforcement) | **Implemented, opt-in** — `ZU_REDTEAM_CONTAINER=1` runs a scenario *inside* a real hardened container (caps dropped, no-new-privileges, isolated network, pids capped) behind a `LocalEgressProxy` and judges it on the **proxy's** connection log, not the tool's self-report (`RED_TEAM_CONTAINER.md`, P1). Without the flag (or Docker) it SKIPs honestly; an infra error SKIPs rather than failing a plugin. The out-of-band pipeline it rides on (P0) is deterministic and CI-tested with no Docker; the remaining live-Docker checks (default-DROP, real-egress capture) and the runtime host-effect monitor (P3) are tracked in `RED_TEAM_CONTAINER.md`. |
+| Live frontier-model discovery (`LiveAttacker`) | **Implemented, opt-in** — a provider-driven multi-round discovery loop: the model generates attacks, they run against the target, the out-of-band observers judge. The loop runs under the caged `AttackerBudget` (§2.2) and stops at the first of its round, token, or wall-time bound, so a frontier (or hijacked) attacker cannot run up unbounded cost. `LiveAttacker.from_env()` is gated behind `ZU_REDTEAM_LIVE=1` (real model); the machinery is provider-agnostic and unit-tested with a scripted policy, so CI never depends on a live model. |
+| Dormant-pivot probe (§6.1) | **Implemented** — `gate._dormant_pivot_probe` stands the target up against a two-phase `ControlledHandler` (benign, then a trigger payload) at the off-allowlist host `handler.test.invalid`; a plugin that pivots only after the trigger is caught by the egress/exfil/host observers. Proven both ways: it FAILs a pivoting plugin and PASSes a benign one. |
+| Continuous runtime monitoring (§6.2) | **Ready, deployment-level** — the verdict observers are deterministic detectors over the event log, so the same checks run live; wiring them to a production stream is a deployment step, not new gate code. |
+
+The deterministic gates are the always-on floor; the live discovery and the
+Docker container form are escalations on top of the same observers and corpus.
+
+---
+
 ## 1. Shape and trust boundaries
 
 The gate is three things in three trust boundaries. The single most important property is that **the boundary that decides pass/fail is one neither the target nor the attacker can reach.**
@@ -45,6 +70,8 @@ The mechanical envelope (see `PHILOSOPHY.md` §5) changes the red team's job, an
 The mechanism does not stop the red team from *attempting* any of this — it ensures the attempts hit walls. The red team's entire value is finding the one attempt that does **not** hit a wall. That is the empirical proof the enforcement is airtight, rather than taking the declared envelope's word for it: success is defined as escaping a box that is supposed to be sealed, with the plugin presumed hostile from the start.
 
 The one thing the red team cannot manufacture around: when a plugin's *legitimately declared* capabilities are themselves enough for harm — open egress plus sensitive data — there is no containment failure to find, only confirmation that the plugin does what it was permitted to. That case is for human trust review, not the red team.
+
+> **Implementation status — read this before trusting the word "enforcement" above.** The vision above (enforcement *beneath* the plugin: an egress proxy, namespaces, syscall filters) is the **out-of-band container form**, and it is *not yet* what the shipping in-process gate exercises. Today the deterministic gate is **observe-after-the-fact, and cooperative**: the loop records each tool's declared envelope and its observations on the event log, and the out-of-band observers (`verdict.py`) judge that log. This has genuine teeth against an *honest-but-buggy* plugin — `EgressBreach`, `ExfilBreach`, `ProvenanceBreach`, the directed probes, and the dormant-pivot probe all fire on their unsafe fixtures, and the attacker still cannot certify itself (the verdict boundary is real). But *in-process*, `EgressBreach` judges egress by the URL **the tool reports in its own observation**, so a *deliberately deceptive* tool that reaches one host and logs another (or exfiltrates by a side channel the log never sees) is **not** caught by the in-process gate. Closing that gap is the **container form** (`RED_TEAM_CONTAINER.md`): the target runs inside a container whose sole route off-box is an egress proxy, and the observers judge the *proxy's* connection log — a reached-host record the tool cannot author. This now ships in two layers: the **out-of-band pipeline** (P0) is deterministic and runs in CI with no Docker — `ContainerGate`/`merge_evidence` fold the proxy + audit facts into the run as harness-attributed events, and the observers prefer them; the proof that this catches a deceptive tool the in-process gate misses is `test_container.py`. The **real-enforcement layer** (P1) — `LocalEgressProxy` (the sole egress path, allowlist-refusing, connection-logging), the isolated-network/proxy-env container, the `zu-redteam-run` in-container runner, and `DockerContainerRunner` — is wired and unit-tested with fakes; the `container` gate now runs a scenario *inside* the box behind the proxy (opt-in, `ZU_REDTEAM_CONTAINER=1`; honest SKIP without Docker). HTTPS payloads are visible too (P2): with a per-run MITM CA trusted only inside the container, the proxy decrypts the request and records its URL/body, so a secret smuggled into an HTTPS query string or POST body lands in the log `ExfilBreach` judges. And host effects are observed (P3): a `DockerFsDiffMonitor` reads the container's filesystem diff out of band and `HostEffect` fires on an undeclared write. **The enforcement is proven against a real Docker daemon** (`examples/redteam_live/live_gate.sh`, codified as `test_live_docker.py`): the sidecar egress-proxy topology demonstrates capture of an allowlisted host, refusal of an off-allowlist host, **default-DROP** (a target that ignores the proxy has no route off the internal network), and **MITM exfil** (a real HTTPS query-string secret decrypted and logged). The **programmatic gate** runs the same topology: `SidecarContainerGate` (`zu_redteam.sidecar`), which `_container_gate` uses, **catches a real deceptive tool** — one that actually reaches an off-allowlist host while reporting an allowed one — from the proxy's log, the very case the in-process gate misses. Host effects are observed by a panel of portable monitors folded into the verdict: `docker diff` (filesystem writes), `docker top` (an undeclared **persistent process** — live-proven by catching a `BackdoorTool` that spawns a lingering `sleep`), and a mount inspection (a writable host bind-mount escape). A shipped seccomp `SCMP_ACT_LOG` profile + `SeccompAuditMonitor` adds *transient*-exec capture. What remains is one genuinely host-dependent case and an operator action: reading the seccomp audit records to catch a process too short-lived for `docker top` needs a Linux **auditd** host (the realistic persistent-backdoor threat is already covered everywhere), and publishing the image runs from a release tag — both tracked in `RED_TEAM_CONTAINER.md`. Until the live layer is exercised in your environment, read a passing *in-process* gate as "the envelope held against a non-deceptive plugin," and the container gate as the enforcement that removes that caveat.
 
 ---
 
@@ -188,9 +215,13 @@ FAIL  iff  any verdict.* fired
 
 `coverage_met` is what defends against a *suppressed* attacker (PHILOSOPHY.md §3): a run that fired few attacks, or skipped whole objectives, fails regardless of whether a breach was seen.
 
+> **Status / honest scope.** The anti-suppression role above is the design for the **`LiveAttacker`** run, whose non-deterministic policy *could* skip objectives. In the **deterministic gate**, coverage is structural and cannot be suppressed: the frozen corpus and a directed probe of **every** target tool always run, and the fleet reports per-specialist coverage. So the implemented check (`gate._adversarial_gate`) enforces two concrete things — (1) every declared target tool was directed-probed against its own envelope, and (2) the full corpus battery ran. `HostEffect` now ships in `default_observers()` (it fires on a declared host/fs/subprocess capability), and the container gate runs a real hardened container under `ZU_REDTEAM_CONTAINER=1`.
+
 ---
 
 ## 4. The fleet
+
+> **Status / honest scope.** The fleet is **implemented**: `ScriptedAttacker.run_fleet()` runs each `FLEET` specialist over its objectives' corpus cases, and the adversarial gate reports per-specialist coverage (a suppressed objective shows as an empty specialist). The `LiveAttacker` (opt-in, real model) drives the same specialists with generated attacks. The paragraphs below describe the design these implement; the YAML is illustrative config, not a literal file the gate reads.
 
 One generalist works, but the gate runs a **fleet** of specialists, orchestrated by Zu — each a copy of the attacker agent with a focused brief and a subset of objectives. Specialists dig deeper than a generalist, and a fleet is far harder to injection-suppress all at once.
 
@@ -261,6 +292,8 @@ if the target has OPEN egress (reviewed, high-trust):
 
 The probe resolves the attack two ways: for the common case (a declared allowlist) the pivot is impossible because the handler is unreachable; for the open-egress case the pivot is contained because the plugin can do nothing with the payload.
 
+> **Status / implemented.** The dormant-pivot probe ships: `gate._dormant_pivot_probe` builds a scenario with a two-phase `ControlledHandler` (`zu_redteam.fixtures`) at the off-allowlist host `handler.test.invalid` — benign on the first fetch, then a trigger payload once it arms — and gives every target tool a turn afterward. A plugin that pivots only after the trigger (reaching the C2 / leaking the secret) is caught by the same `EgressBreach`/`ExfilBreach`/`HostEffect` observers; the probe runs as part of the adversarial gate and is proven both ways (FAILs a pivoting fixture, PASSes a benign plugin). For a **declared-allowlist** tool, reaching the handler at all is an egress breach; for an **open-egress** tool, `ExfilBreach` plus the static no-code-execution posture is the containment backstop (`EgressBreach` deliberately does not judge containment for an open-egress tool).
+
 ### 6.2 The observers never stop — they run in production too
 
 The verdict observers in §3 are not gate-only. They are **deterministic detectors over the event log**, and the event log exists in production exactly as it does in CI. So the same checks run continuously, live:
@@ -280,7 +313,7 @@ The one combination the envelope cannot fully neutralise is a plugin that **legi
 ## 7. What this guarantees, and what it does not
 
 - **It cannot be gamed into a false PASS.** Certification is made out of band by deterministic observers the target cannot reach. Hijacking the attacker model changes *which attacks are tried*, never the verdict.
-- **The residual risk is a weaker attacker, not a false pass.** A compromised attacker policy can fail to *find* a real hole. That false negative is contained by the always-on deterministic corpus, the diverse fleet, the `coverage_met` requirement, and the meta-red-team.
+- **The residual risk is a weaker attacker, not a false pass.** A compromised attacker policy can fail to *find* a real hole. That false negative is contained by the always-on deterministic corpus, the directed per-tool envelope probes, the multi-specialist fleet, and the dormant-pivot probe (all implemented). The opt-in `LiveAttacker` and the `coverage_met` anti-suppression requirement harden it further. The whole §1–§6 design now ships; what remains is deployment-level (wiring the observers to a live production stream, §6.2).
 - **The attacker is itself contained.** It runs caged, so attacking it cannot become an escape.
 
 This is the same principle the whole runtime rests on, applied to its own test gate: **the model proposes, the harness disposes — and the judge sits where the judged can never reach it.**

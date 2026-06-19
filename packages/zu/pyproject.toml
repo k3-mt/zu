@@ -35,13 +35,18 @@ serve = ["zu-cli[serve]==0.1.0"]
 docker = ["zu-backends[docker]==0.1.0"]
 # The MCP server (`zu mcp`) — integrate with coding agents (Claude Code, Cursor).
 mcp = ["zu-cli[mcp]==0.1.0"]
-# Everything: web tools, both model SDKs, the server, the Docker sandbox, and MCP.
+# The plugin-test gate + adversarial red team (`zu test-plugin`) — a contributor
+# / CI tool for proving a plugin cooperates and withstands attack.
+test = ["zu-cli[test]==0.1.0"]
+# Everything: web tools, both model SDKs, the server, the Docker sandbox, MCP,
+# and the test gate.
 all = [
     "zu-tools==0.1.0",
     "zu-providers[anthropic]==0.1.0",
     "zu-providers[openai]==0.1.0",
     "zu-cli[serve]==0.1.0",
     "zu-cli[mcp]==0.1.0",
+    "zu-cli[test]==0.1.0",
     "zu-backends[docker]==0.1.0",
 ]
 

@@ -35,19 +35,31 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from zu_core.bus import EventBus
 from zu_core.contracts import Budget, Event, Result, Status, TaskSpec
 from zu_core.loop import run_task
+from zu_core.registry import (
+    backend,
+    detector,
+    provider,
+    sink,
+    tool,
+    validator,
+)
 from zu_cli.config import (
     ConfigError,
     RunConfig,
     assemble,
-    load_config,
-    load_task,
+    coerce_config,
+    coerce_task,
 )
 
 __version__ = "0.1.0"
 
+# In-process plugin registration decorators, re-exported from the core registry
+# so the documented ``@zu.tool`` / ``@zu.detector`` / … surface (see
+# docs/ARCHITECTURE.md and AGENTS.md) actually resolves on ``import zu``. They
+# register onto the process-wide REGISTRY the loop reads, so a decorator-
+# registered plugin is visible to ``zu.run`` and ``zu plugins`` alike.
 __all__ = [
     "Zu",
     "run",
@@ -61,40 +73,20 @@ __all__ = [
     "Budget",
     "Event",
     "create_app",
+    "tool",
+    "detector",
+    "validator",
+    "provider",
+    "backend",
+    "sink",
     "__version__",
 ]
 
 
-def _coerce_config(source: Any) -> RunConfig:
-    """A RunConfig from a path (str), a dict, an existing RunConfig, or None
-    (meaning ``./zu.yaml`` in the working directory)."""
-    if source is None:
-        return load_config("zu.yaml")
-    if isinstance(source, RunConfig):
-        return source
-    if isinstance(source, str):
-        return load_config(source)
-    if isinstance(source, dict):
-        return RunConfig.model_validate(source)
-    raise ConfigError(f"unsupported config type: {type(source).__name__}")
-
-
-def _coerce_task(source: Any, default_budget: Budget) -> TaskSpec:
-    """A TaskSpec from a path (str), a dict, or an existing TaskSpec. A task that
-    omits a budget inherits the config default."""
-    if isinstance(source, TaskSpec):
-        return source
-    if isinstance(source, str):
-        return load_task(source, default_budget=default_budget)
-    if isinstance(source, dict):
-        doc = dict(source)
-        if "budget" not in doc:
-            doc["budget"] = default_budget.model_dump()
-        try:
-            return TaskSpec.model_validate(doc)
-        except Exception as exc:  # noqa: BLE001 - surface as a ConfigError, not a raw pydantic error
-            raise ConfigError(f"invalid task: {exc}") from exc
-    raise ConfigError(f"unsupported task type: {type(source).__name__}")
+# Config/task coercion is shared with the CLI surfaces (see zu_cli.config). The
+# embed facade accepts a str task as a *path* (``allow_paths=True``): you're
+# running in-process on your own host, so reading a task file you point at — the
+# same affordance as ``zu run task.yaml`` — is intended.
 
 
 class Zu:
@@ -105,13 +97,18 @@ class Zu:
     """
 
     def __init__(self, config: Any = None) -> None:
-        self.config: RunConfig = _coerce_config(config)
+        self.config: RunConfig = coerce_config(config)
 
     async def arun_with_events(self, task: Any) -> tuple[Result, list[Event]]:
         """Async: run one task, returning the Result and the run's event log."""
-        spec = _coerce_task(task, self.config.budget)
-        provider, registry, bus = assemble(self.config)
-        result = await run_task(spec, provider, registry, bus)
+        spec = coerce_task(task, self.config.budget, allow_paths=True)
+        provider, registry, bus, providers = assemble(self.config)
+        # The same observability hook the CLI uses: an embedded agent queues a
+        # blocked attempt to the review queue too (no console trace by default).
+        from zu_cli.observe import attach_observability
+
+        attach_observability(bus, self.config.observability)
+        result = await run_task(spec, provider, registry, bus, providers=providers)
         events = await bus.query()
         return result, events
 

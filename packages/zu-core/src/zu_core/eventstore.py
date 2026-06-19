@@ -27,7 +27,16 @@ def validate_filter(flt: dict[str, Any]) -> None:
 
 
 def event_matches(event: Any, flt: dict[str, Any]) -> bool:
-    """Python-side predicate (used by the in-memory sink). ``None`` -> is-null."""
+    """Python-side predicate (used by the in-memory sink). ``None`` -> is-null.
+
+    Comparison is on ``str(...)`` of both sides *on purpose*, so this stays
+    bit-for-bit equivalent to the SQLite sink: there, the indexed columns are
+    TEXT (a UUID is stored as ``str(uuid)``) and the query binds ``str(value)``.
+    Every field in ``ALLOWED_EVENT_FILTERS`` is a str or a UUID — never an int —
+    so there is no ``1 == "1"`` ambiguity, and the two sinks cannot drift on
+    match semantics. If a numeric field is ever added to the allowlist, revisit
+    this: it would need type-aware comparison on both sides.
+    """
     for key, value in flt.items():
         actual = getattr(event, key, None)
         if value is None:

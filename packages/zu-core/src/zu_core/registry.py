@@ -19,6 +19,8 @@ import logging
 from importlib.metadata import entry_points
 from typing import Any, NamedTuple
 
+from .ports import INTERFACE_ATTR, INTERFACE_VERSION
+
 log = logging.getLogger("zu.registry")
 
 GROUPS = {
@@ -32,11 +34,50 @@ GROUPS = {
 
 
 class LoadFailure(NamedTuple):
-    """A plugin whose entry point failed to import/load during discovery."""
+    """A plugin that failed to enter the registry during discovery — either its
+    entry point raised on import, or it was built against an incompatible
+    interface major version (see ``IncompatibleInterfaceError``)."""
 
     kind: str
     name: str
     error: Exception
+
+
+class IncompatibleInterfaceError(RuntimeError):
+    """A plugin built against an interface major version this runtime does not
+    provide for its port. Raised by ``register`` (decorator / config doors) and
+    isolated-and-recorded by ``discover`` (the entry-point door)."""
+
+
+def _declared_major(kind: str, obj: Any) -> int:
+    """The interface major a plugin targets: its ``__zu_interface__`` attribute,
+    or 1 (the original contract) when absent. Raises if it is present but not a
+    usable integer — a malformed declaration is a refusal, not a silent pass."""
+    raw = getattr(obj, INTERFACE_ATTR, 1)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise IncompatibleInterfaceError(
+            f"plugin {getattr(obj, 'name', obj)!r} declares a non-integer "
+            f"{INTERFACE_ATTR}={raw!r}; it must be an interface major version (int)."
+        ) from None
+
+
+def check_interface(kind: str, obj: Any) -> int:
+    """Verify ``obj`` targets the runtime's interface major for ``kind`` and
+    return that major. Raises ``IncompatibleInterfaceError`` on a mismatch with a
+    message that names both versions and what to do."""
+    host = INTERFACE_VERSION.get(kind)
+    if host is None:
+        raise KeyError(f"unknown plugin kind: {kind!r}")
+    major = _declared_major(kind, obj)
+    if major != host:
+        raise IncompatibleInterfaceError(
+            f"{kind[:-1]} {getattr(obj, 'name', obj)!r} targets Zu {kind} interface "
+            f"v{major}, but this runtime provides v{host}. Refusing to load it — "
+            f"install a build of it for interface v{host} (or upgrade/downgrade Zu)."
+        )
+    return major
 
 
 class Registry:
@@ -58,15 +99,23 @@ class Registry:
             for ep in entry_points(group=group):
                 try:
                     obj = ep.load()
-                except Exception as exc:  # noqa: BLE001 - isolate any broken plugin
+                    # The version gate runs here too: a plugin built against an
+                    # incompatible interface major is isolated and recorded, the
+                    # same as one that fails to import — discovery of everything
+                    # else is unaffected.
+                    self.register(kind, ep.name, obj)
+                except Exception as exc:  # noqa: BLE001 - isolate any broken/incompatible plugin
                     self.failures.append(LoadFailure(kind=kind, name=ep.name, error=exc))
                     continue
-                self.register(kind, ep.name, obj)
         return self.failures
 
     def register(self, kind: str, name: str, obj: Any) -> None:
         if kind not in self._items:
             raise KeyError(f"unknown plugin kind: {kind!r}")
+        # The interface-version gate (MLR §6): refuse a plugin built against an
+        # incompatible major for this port, with a clear error, before it can
+        # enter the registry and fail in confusing ways at call time.
+        check_interface(kind, obj)
         existing = self._items[kind].get(name)
         if existing is not None and existing is not obj:
             # A name collision means one plugin is shadowing another (e.g. a

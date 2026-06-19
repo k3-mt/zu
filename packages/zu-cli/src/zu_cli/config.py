@@ -69,30 +69,74 @@ class PluginsConfig(BaseModel):
     """Which plugins are active, by name (or ``module:Attr`` reference). Listing
     a plugin here is what activates it — the run registry contains exactly these,
     never everything installed, so a config controls (and orders) plugins per run
-    without touching code."""
+    without touching code.
+
+    ``validators`` defaults to ``[schema, grounding]`` — **correct by default**: a
+    run is held to its output schema *and* every reported value must appear in the
+    content it actually fetched, so a fabricated answer is refused rather than
+    returned as success. Dropping ``grounding`` is opting out of the
+    anti-hallucination check; a legitimately non-fetching agent (pure Q&A from the
+    model's own knowledge — e.g. the ``minimal`` template) must set
+    ``validators: [schema]`` explicitly, because grounding has no retrieved content
+    to check against."""
 
     tools: list[str] = Field(default_factory=list)
     detectors: list[str] = Field(default_factory=list)
-    validators: list[str] = Field(default_factory=list)
+    validators: list[str] = Field(default_factory=lambda: ["schema", "grounding"])
 
 
 class EventSinkConfig(BaseModel):
     """Where the canonical event log is written. ``driver`` is a sink name
-    (built-in: ``sqlite``); omit the whole block to keep the in-memory default."""
+    (built-in: ``sqlite``); omit the whole block to keep the in-memory default.
+
+    ``encryption`` opts the payload into encryption-at-rest (needs
+    ``zu-backends[encryption]`` and a key in the environment):
+      * ``none`` (default) — plaintext, fully queryable on disk.
+      * ``aesgcm`` — AES-256-GCM with a single key (``ZU_EVENT_KEY``).
+      * ``managed`` — AES-256-GCM with a rotatable, KMS-pluggable ``KeyProvider``
+        (``EnvKeyProvider`` by default; the KMS is the deployment's choice).
+    """
 
     driver: str
     path: str | None = None
+    encryption: str = "none"
     options: dict[str, Any] = Field(default_factory=dict)
+
+
+class ObservabilityConfig(BaseModel):
+    """How a run is made watchable — the same hook for every harness.
+
+    ``review_queue`` is the JSONL path contained attacks (``harness.defense.blocked``)
+    are appended to for triage; set it to null to disable. ``scope`` is the default
+    view scope for *networked* surfaces (the SSE feed and dashboard): ``render``
+    (allowlist-render, safe to leave on in production) or ``full`` (show content —
+    for local/authorized viewing). The local console trace is always full."""
+
+    review_queue: str | None = "zu_review.jsonl"
+    scope: str = "render"
 
 
 class RunConfig(BaseModel):
     """A whole `zu.yaml`, parsed and validated."""
 
+    # The agent's GLOBAL provider — required. An agent with no provider cannot
+    # operate, so there is deliberately no default: a config that omits it fails
+    # to validate rather than silently assuming one.
     provider: ProviderConfig
+    # Optional PER-TIER provider overrides, keyed by tier number. The global
+    # ``provider`` runs every tier unless overridden here; when the loop escalates
+    # to a tier listed below, that provider takes over mid-run (the neutral
+    # message format lets a different adapter continue the same conversation). The
+    # canonical use: a cheap/fast model at tier 1, a frontier/vision model unlocked
+    # on escalation to tier 2 — e.g. ``providers: {2: {name: anthropic, model: ...}}``.
+    providers: dict[int, ProviderConfig] = Field(default_factory=dict)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     backend: str | None = None
     # The canonical store (the single source of truth for the run).
     event_sink: EventSinkConfig | None = None
+    # How the run is surfaced (live trace + defense review queue), the same hook
+    # for every harness — see zu_cli.observe.attach_observability.
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     # Secondary trace destinations — events are shipped to each *in addition* to
     # the canonical store, isolated (a failing sink never breaks the run). This is
     # how a run emits to local files or cloud storage for observability.
@@ -147,6 +191,62 @@ def load_task(path: str, *, default_budget: Budget | None = None) -> TaskSpec:
         raise ConfigError(f"{path}: {exc}") from exc
 
 
+# --- coercion (a config/task may arrive as a path, a dict, or a typed object) -
+#
+# The CLI surfaces — `zu serve`, `zu mcp`, and the `zu` embed facade — all accept
+# a config/task that may be a file path, a plain dict, an already-built typed
+# object, or None. The coercion is identical except for one axis: whether a task
+# given as a *str path* is allowed. The HTTP server says no (a path would resolve
+# server-side, which a client can't set); the MCP tools and the embed facade say
+# yes. So these live here once, parameterised by ``allow_paths``, rather than
+# being re-implemented (and drifting) in each caller.
+
+
+def coerce_config(source: Any) -> RunConfig:
+    """A RunConfig from a path (str), a dict, an existing RunConfig, or None
+    (meaning ``./zu.yaml``). A malformed *dict* raises ``ConfigError`` like a
+    malformed *file* does — so callers that ``except ConfigError`` get a clean
+    message for either, never a raw pydantic ``ValidationError`` escaping."""
+    if source is None:
+        return load_config("zu.yaml")
+    if isinstance(source, RunConfig):
+        return source
+    if isinstance(source, str):
+        return load_config(source)
+    if isinstance(source, dict):
+        from pydantic import ValidationError
+
+        try:
+            return RunConfig.model_validate(source)
+        except ValidationError as exc:
+            raise ConfigError(f"invalid config: {exc}") from exc
+    raise ConfigError(f"unsupported config type: {type(source).__name__}")
+
+
+def coerce_task(source: Any, default_budget: Budget, *, allow_paths: bool) -> TaskSpec:
+    """A TaskSpec from a dict, an existing TaskSpec, or (when ``allow_paths``) a
+    file path. A task that omits a budget inherits ``default_budget``. A malformed
+    dict (or, where permitted, a bad file) surfaces as ``ConfigError``.
+
+    ``allow_paths=False`` is the server's stance: a str task is a *path*, which a
+    remote client cannot meaningfully set, so it is rejected rather than read off
+    the server's filesystem."""
+    if isinstance(source, TaskSpec):
+        return source
+    if isinstance(source, str):
+        if not allow_paths:
+            raise ConfigError("task must be a JSON object (the task spec)")
+        return load_task(source, default_budget=default_budget)
+    if isinstance(source, dict):
+        doc = dict(source)
+        doc.setdefault("budget", default_budget.model_dump())
+        try:
+            return TaskSpec.model_validate(doc)
+        except Exception as exc:  # noqa: BLE001 - surface as a ConfigError, not a raw pydantic error
+            raise ConfigError(f"invalid task: {exc}") from exc
+    raise ConfigError(f"unsupported task type: {type(source).__name__}")
+
+
 # --- building the run --------------------------------------------------------
 
 
@@ -192,19 +292,36 @@ def _construct(factory: Any, candidate: dict[str, Any]) -> Any:
     return factory(**kwargs)
 
 
-def build_provider(cfg: ProviderConfig, catalog: Registry | None = None) -> ModelProvider:
+def _refuse_import(ref: str, what: str) -> None:
+    """Raise when an arbitrary ``module:Attr`` ref is named on a surface that may
+    not import code. Importing a module executes its top-level code, so a config
+    that can name any ``module:Attr`` is a code-execution door — fine for the
+    operator-trusted CLI, never for a config that arrived over the network."""
+    raise ConfigError(
+        f"refusing to import {what} {ref!r}: this surface does not permit arbitrary "
+        "'module:Attr' imports (a per-request config may only use installed, named "
+        "plugins). Configure it on the trusted server default instead."
+    )
+
+
+def build_provider(
+    cfg: ProviderConfig, catalog: Registry | None = None, *, allow_imports: bool = True
+) -> ModelProvider:
     """Construct the configured model provider — the one-line model swap.
 
     ``scripted`` is special only in that it has no env/model to construct from:
     it replays a fixed list of moves (for offline runs and tests). Every other
     provider — built-in or a user's ``module:Attr`` — is looked up by name and
-    constructed from the neutral config knobs it accepts."""
+    constructed from the neutral config knobs it accepts. ``allow_imports=False``
+    forbids the ``module:Attr`` door (the networked surface)."""
     if cfg.name == "scripted":
         from zu_providers.scripted import ScriptedProvider
 
         return ScriptedProvider.from_moves(cfg.script or [])
 
     if ":" in cfg.name:
+        if not allow_imports:
+            _refuse_import(cfg.name, "provider")
         factory = _import_ref(cfg.name)
     else:
         catalog = catalog or _catalog()
@@ -229,13 +346,18 @@ def build_provider(cfg: ProviderConfig, catalog: Registry | None = None) -> Mode
     return _construct(factory, candidate)
 
 
-def _resolve_plugin(kind: str, name: str, catalog: Registry, extra: dict[str, Any]) -> Any:
+def _resolve_plugin(
+    kind: str, name: str, catalog: Registry, extra: dict[str, Any], *, allow_imports: bool = True
+) -> Any:
     """A single named plugin → an object for the run registry. An ``module:Attr``
-    name is imported; a short name is taken from the catalog. ``extra`` carries
-    optional injected dependencies (e.g. a configured ``backend`` for a tool that
-    accepts one); a class that wants one is instantiated here, otherwise it is
-    handed to the registry as-is and the loop materialises it."""
+    name is imported (only if ``allow_imports``); a short name is taken from the
+    catalog. ``extra`` carries optional injected dependencies (e.g. a configured
+    ``backend`` for a tool that accepts one); a class that wants one is
+    instantiated here, otherwise it is handed to the registry as-is and the loop
+    materialises it."""
     if ":" in name:
+        if not allow_imports:
+            _refuse_import(name, kind[:-1])
         return _import_ref(name)
     try:
         obj = catalog.get(kind, name)
@@ -254,21 +376,25 @@ def _resolve_plugin(kind: str, name: str, catalog: Registry, extra: dict[str, An
     return obj
 
 
-def build_registry(cfg: RunConfig, catalog: Registry | None = None) -> Registry:
+def build_registry(
+    cfg: RunConfig, catalog: Registry | None = None, *, allow_imports: bool = True
+) -> Registry:
     """A registry containing exactly the configured plugins — no more. This is
-    how config activates and orders plugins per run without code changes."""
+    how config activates and orders plugins per run without code changes.
+    ``allow_imports=False`` forbids ``module:Attr`` plugin refs (networked
+    surface): a per-request config may only activate installed, named plugins."""
     catalog = catalog or _catalog()
     reg = Registry()
 
     backend_obj = None
     if cfg.backend is not None:
-        backend_obj = _resolve_plugin("backends", cfg.backend, catalog, {})
+        backend_obj = _resolve_plugin("backends", cfg.backend, catalog, {}, allow_imports=allow_imports)
         backend_obj = backend_obj() if isinstance(backend_obj, type) else backend_obj
 
     extra = {"backend": backend_obj} if backend_obj is not None else {}
     for kind in ("tools", "detectors", "validators"):
         for name in getattr(cfg.plugins, kind):
-            obj = _resolve_plugin(kind, name, catalog, extra)
+            obj = _resolve_plugin(kind, name, catalog, extra, allow_imports=allow_imports)
             reg.register(kind, getattr(obj, "name", name), obj)
     return reg
 
@@ -283,7 +409,36 @@ def _build_one_sink(spec: EventSinkConfig, catalog: Registry) -> Any:
             f"{', '.join(catalog.names('sinks')) or 'none'} (is its package installed?)"
         ) from None
     candidate = {"path": spec.path, **spec.options}
+    codec = _build_codec(spec.encryption)
+    if codec is not None:
+        candidate["codec"] = codec
     return _construct(factory, candidate)
+
+
+def _build_codec(encryption: str) -> Any:
+    """Map the ``encryption`` config value to a payload codec instance (or None
+    for plaintext). The codec lives in ``zu-backends[encryption]`` and is imported
+    lazily, with a clear error if the extra isn't installed."""
+    mode = (encryption or "none").lower()
+    if mode in ("none", ""):
+        return None
+    try:
+        from zu_backends.encryption import AesGcmCodec, ManagedAesGcmCodec
+    except ModuleNotFoundError as exc:
+        raise ConfigError(
+            "encryption-at-rest needs the optional dependency: "
+            "pip install 'zu-backends[encryption]'"
+        ) from exc
+    try:
+        if mode == "aesgcm":
+            return AesGcmCodec.from_env()
+        if mode == "managed":
+            return ManagedAesGcmCodec.from_env()
+    except RuntimeError as exc:  # a missing/invalid key in the environment
+        raise ConfigError(str(exc)) from exc
+    raise ConfigError(
+        f"unknown encryption mode {encryption!r}; use 'none', 'aesgcm', or 'managed'."
+    )
 
 
 def build_sink(cfg: RunConfig, catalog: Registry | None = None) -> Any:
@@ -302,17 +457,41 @@ def build_trace_sinks(cfg: RunConfig, catalog: Registry | None = None) -> list[A
     return [_build_one_sink(s, catalog) for s in cfg.trace_sinks]
 
 
-def assemble(cfg: RunConfig) -> tuple[ModelProvider, Registry, EventBus]:
-    """Turn a parsed config into the three things ``run_task`` needs: the
-    provider, the run registry, and a bus whose canonical sink is configured.
-    Any ``trace_sinks`` are attached as isolated secondary destinations."""
+def build_providers_by_tier(
+    cfg: RunConfig, catalog: Registry | None = None, *, allow_imports: bool = True
+) -> dict[int, ModelProvider]:
+    """The per-tier provider overrides (``cfg.providers``) as built ModelProviders,
+    keyed by tier. Empty when no overrides are configured — the loop then runs the
+    global provider on every tier."""
+    if not cfg.providers:
+        return {}
+    catalog = catalog or _catalog()
+    return {
+        tier: build_provider(pc, catalog, allow_imports=allow_imports)
+        for tier, pc in cfg.providers.items()
+    }
+
+
+def assemble(
+    cfg: RunConfig, *, allow_imports: bool = True
+) -> tuple[ModelProvider, Registry, EventBus, dict[int, ModelProvider]]:
+    """Turn a parsed config into what ``run_task`` needs: the global provider, the
+    run registry, a bus whose canonical sink is configured, and the per-tier
+    provider override map. Any ``trace_sinks`` are attached as isolated secondary
+    destinations.
+
+    ``allow_imports`` defaults True for the operator-trusted CLI; pass False when
+    the config arrived over the network (``zu serve`` per-request override) so an
+    arbitrary ``module:Attr`` provider/plugin cannot be imported (and its
+    top-level code executed) by a remote caller."""
     catalog = _catalog()
-    provider = build_provider(cfg.provider, catalog)
-    registry = build_registry(cfg, catalog)
+    provider = build_provider(cfg.provider, catalog, allow_imports=allow_imports)
+    providers_by_tier = build_providers_by_tier(cfg, catalog, allow_imports=allow_imports)
+    registry = build_registry(cfg, catalog, allow_imports=allow_imports)
     bus = EventBus(sink=build_sink(cfg, catalog))
     for trace_sink in build_trace_sinks(cfg, catalog):
         bus.add_destination(trace_sink)
-    return provider, registry, bus
+    return provider, registry, bus, providers_by_tier
 
 
 # Re-exported so callers can introspect the plugin kinds without importing the
@@ -322,10 +501,14 @@ __all__ = [
     "ProviderConfig",
     "PluginsConfig",
     "EventSinkConfig",
+    "ObservabilityConfig",
     "ConfigError",
     "load_config",
     "load_task",
+    "coerce_config",
+    "coerce_task",
     "build_provider",
+    "build_providers_by_tier",
     "build_registry",
     "build_sink",
     "assemble",

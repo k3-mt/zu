@@ -3,7 +3,7 @@
 Proves the service runs a task end to end offline and returns the Result plus
 the event log, honours a per-request config override, and turns bad input into
 clean 4xx/5xx responses rather than tracebacks. FastAPI is a dev dependency so
-these run in CI; it is an optional extra for users (`zu-cli[serve]`).
+these run in CI; it is an optional extra for users (`zu-runtime[serve]`).
 """
 
 from __future__ import annotations
@@ -41,6 +41,33 @@ def _client(cfg: dict) -> TestClient:
 
 def test_healthz():
     assert _client(_cfg({"name": "A", "price": "$1"})).get("/healthz").json() == {"status": "ok"}
+
+
+def _auth_client(cfg: dict, token: str) -> TestClient:
+    return TestClient(create_app(cfg, auth_token=token))
+
+
+def test_auth_token_required_when_configured():
+    c = _auth_client(_cfg({"name": "A", "price": "$1"}), "s3cret")
+    # No credential -> 401 on every protected route.
+    assert c.post("/run", json={"task": _TASK}).status_code == 401
+    assert c.get("/review").status_code == 401
+    assert c.get("/").status_code == 401
+    # Wrong token -> 401.
+    assert c.post("/run", json={"task": _TASK},
+                  headers={"Authorization": "Bearer nope"}).status_code == 401
+    # Liveness stays open regardless.
+    assert c.get("/healthz").json() == {"status": "ok"}
+
+
+def test_auth_token_accepted_via_header_and_query():
+    c = _auth_client(_cfg({"name": "A", "price": "$1"}), "s3cret")
+    # Bearer header on the JSON API.
+    r = c.post("/run", json={"task": _TASK}, headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200, r.text
+    # ?token= query for the dashboard/SSE GETs that can't set a header.
+    assert c.get("/review", params={"token": "s3cret"}).status_code == 200
+    assert c.get("/", params={"token": "s3cret"}).status_code == 200
 
 
 def test_run_returns_result_and_events():
@@ -90,6 +117,34 @@ def test_run_stream_emits_live_sse_frames():
     assert "event: result" in text
     assert '"value": {"name": "Acme", "price": "$9"}' in text
     assert "event: done" in text
+
+
+def test_dashboard_and_review_endpoints():
+    c = _client(_cfg({"name": "A", "price": "$1"}))
+    html = c.get("/")
+    assert html.status_code == 200
+    assert "Zu" in html.text and "/events" in html.text  # the live dashboard page
+    assert c.get("/review").json() == {"pending": 0, "items": []}  # empty until something is blocked
+
+
+def test_blocked_attempt_is_queued_for_review(tmp_path):
+    # The scripted model is steered at the cloud-metadata endpoint; http_fetch's
+    # SSRF guard blocks it, the loop records a defense, and the server queues it.
+    cfg = {
+        "provider": {"name": "scripted", "script": [
+            {"tool": "http_fetch", "args": {"url": "http://169.254.169.254/latest/meta-data/"}},
+            {"text": "{}", "finish": "stop"}]},
+        "plugins": {"tools": ["http_fetch"]},
+    }
+    c = TestClient(create_app(cfg, review_queue=str(tmp_path / "rev.jsonl")))
+    assert c.post("/run", json={"task": {"query": "read metadata"}}).status_code == 200
+
+    review = c.get("/review").json()
+    assert review["pending"] >= 1
+    assert review["items"][0]["kind"] == "ssrf"
+    assert review["items"][0]["status"] == "pending"
+    # …and it was persisted to the JSONL review queue for triage.
+    assert (tmp_path / "rev.jsonl").read_text().strip()
 
 
 def test_model_failure_is_502():

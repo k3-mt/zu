@@ -7,6 +7,266 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — dormant-pivot probe: the last red-team gap is closed (RED_TEAM.md §6.1)
+
+The supply-chain logic bomb — a plugin benign in CI that pivots on a production
+trigger — is now caught by a real two-phase probe:
+
+- **`ControlledHandler`** (`zu_redteam.fixtures`): a controlled command-server
+  stand-in at the off-allowlist host `handler.test.invalid`. It serves benign
+  content first, then arms itself and serves a trigger payload — the two phases
+  ("behaved in testing" → "a trigger appeared") within a single run, so the
+  canonical log keeps one task (which the provenance observer requires).
+- **`gate._dormant_pivot_probe`**: stands the target up against the handler and
+  gives every target tool a turn after the trigger, with neutral args — so a
+  pivot has to come from the plugin's *own* reaction, not from the probe feeding
+  it the C2 address. The same `EgressBreach`/`ExfilBreach`/`HostEffect` observers
+  judge it; it runs as part of the adversarial gate.
+- Proven both ways: the full gate **FAILs** a pivoting fixture
+  (`verdict.egress: notes reached 'handler.test.invalid'`) and **PASSes** a benign
+  plugin. With this, the entire RED_TEAM.md §1–§6 design ships; only deployment-
+  level live monitoring (§6.2 — wiring the observers to a production stream)
+  remains, which is a deployment step, not gate code.
+
+### Added — red-team implementation: fleet, live discovery, container gate, host observer (Level C)
+
+The pieces RED_TEAM.md previously marked "designed, not implemented" are now real:
+
+- **`HostEffect` observer** — ships in `default_observers()`; fires deterministically
+  (off the declared envelope on the log) when a reviewed plugin declares a
+  host/filesystem/subprocess capability, surfacing that high-trust combination for
+  human review instead of an automated pass.
+- **The multi-specialist fleet** — `ScriptedAttacker.run_fleet()` runs each `FLEET`
+  specialist over its objectives' cases; the adversarial gate reports per-specialist
+  coverage (a suppressed objective shows as an empty specialist).
+- **`LiveAttacker`** — a real, provider-driven multi-round discovery loop (the model
+  generates attacks, they run against the target, the out-of-band observers judge).
+  `from_env()` is gated behind `ZU_REDTEAM_LIVE=1` for the real-model path; the
+  machinery is provider-agnostic and unit-tested with a scripted policy, so CI never
+  depends on a live model. (It no longer raises `NotImplementedError`.)
+- **The container gate** — `ZU_REDTEAM_CONTAINER=1` stands the sandbox tier up in a
+  real hardened container (caps dropped, no-new-privileges, network off, pids capped)
+  via `local-docker` and PASS/FAILs it; without the flag (or Docker) it SKIPs
+  honestly, and an infra error SKIPs rather than failing a plugin. (No longer
+  always-SKIP.) Validated against a real Docker daemon.
+
+Only the dormant-pivot probe (§6.1) remains designed-not-implemented.
+
+### Added — managed-key encryption: KeyProvider seam, rotation, authenticated index columns (Level C)
+
+Encryption-at-rest grows from "one env key" to a managed, rotatable, KMS-pluggable
+story — without an on-disk format change:
+
+- **`KeyProvider` seam** (`zu_core.codec`) supplies data keys *by id*. The KMS is
+  the **deployment's choice** — implement it against AWS KMS / GCP KMS / Vault and
+  pass it in; `EnvKeyProvider` is the zero-infra default. Nothing is baked to a
+  vendor.
+- **`ManagedAesGcmCodec`** (version 2) embeds the key id in each blob, so keys
+  **rotate** without losing readability of old rows (each decrypts under its own
+  key). Rotation is also the answer to AES-GCM's nonce-scaling bound: rotating the
+  data key resets the per-key nonce budget.
+- **Authenticated index columns.** The AEAD associated data now binds the row's
+  indexed tuple (`event_id`, `trace_id`, `task_id`, `type`, `source`), so editing
+  any plaintext index column at rest — e.g. to hide a row from a `type` filter —
+  makes that row fail to decrypt. Tampering is loud, not silent.
+- **Config:** `event_sink.encryption: none | aesgcm | managed`.
+
+### Fixed — DNS-rebinding closed; tier-2 render DNS-pinned (Level C: scoped egress)
+
+- **`http_fetch` closes the DNS-rebinding TOCTOU.** A new `net.PinnedTransport`
+  does the single authoritative resolve+validate and pins the connection to a
+  validated IP, keeping the original hostname for the `Host` header and TLS SNI —
+  so a low-TTL record can no longer answer "public" to the check and "internal" to
+  the connect. `http_fetch` uses it by default; an injected transport (tests) is
+  used as-is. Validated against the real network (TLS to example.com still works).
+- **Tier-2 render is DNS-pinned too.** `render_dom` passes the validated
+  `host -> IP` to the container as `extra_hosts`, so the browser cannot be rebound
+  to an internal address. (Full egress *allowlisting* of a page's other
+  subresources remains a firewall-capable-sandbox job, documented as such.)
+- No flagship adapter: removed the last "defaults to anthropic" help string —
+  every provider is equal, and a run must name the one it uses.
+
+### Added — plugin interface-versioning (MLR §6)
+
+Each plugin port now carries a major interface version (`ports.INTERFACE_VERSION`),
+and the registry refuses a plugin built against an incompatible major — so the
+ecosystem can evolve without silent breakage:
+
+- A plugin declares the interface major it targets via a `__zu_interface__`
+  attribute (absent ⇒ 1, the original contract, so every existing built-in keeps
+  loading unchanged).
+- `Registry.register` raises `IncompatibleInterfaceError` — naming both the
+  plugin's version and the runtime's — when the majors differ, before the plugin
+  can enter the registry and fail confusingly at call time.
+- `Registry.discover` isolates and records an incompatible plugin exactly as it
+  does one that fails to import, so one bad plugin never breaks discovery of the
+  rest. Bump a port's number in `INTERFACE_VERSION` on a backward-incompatible
+  Protocol change.
+
+### Added — per-tier model selection + a required (no-default) provider
+
+A run now declares a **required global provider** and an **optional per-tier
+override map**, validated live end-to-end (real models via an OpenAI-compatible
+endpoint, with escalation):
+
+```yaml
+provider:                       # global — required; an agent must name what it runs on
+  name: openai-compatible
+  model: openai/gpt-4o-mini
+providers:                      # optional per-tier overrides
+  2: { name: openai-compatible, model: openai/gpt-4o }   # takes over on escalation to tier 2
+```
+
+- **No default provider.** There is no hard-coded fallback (it used to default to
+  `anthropic`). A run that names no provider fails fast with a clear message — a
+  provider the runtime cannot actually call is not a usable default. `zu demo`
+  likewise requires `--provider`.
+- **The loop switches providers per tier.** `run_task(..., providers={tier: p})`
+  selects the provider bound to the current tier each turn; on a climb, the bound
+  provider continues the same conversation (the neutral message format makes the
+  hand-off seamless). A cheap/fast model does tier-1 work; a frontier/vision model
+  takes over on escalation. `harness.turn.completed` records the tier→model that
+  produced each turn, so cost is attributable per tier.
+- `assemble()` now returns `(provider, registry, bus, providers_by_tier)`;
+  `build_providers_by_tier()` builds the map from config.
+
+### Fixed — review hardening pass (correctness, isolation, and honest red-team docs)
+
+A repo-wide review turned up a set of edge-case correctness and containment gaps;
+each is now fixed with a regression test (suite: 285 → 295 tests, all green; mypy
+and ruff clean):
+
+- **Hard wall-time bound on each model call.** `run_task` wraps `provider.complete()`
+  in `asyncio.wait_for` with the run's remaining wall-time, so a hung or runaway
+  provider can no longer overrun `wall_time_s` (it was previously checked only
+  *between* turns).
+- **Detector/validator isolation.** A raising third-party detector or validator is
+  now logged and skipped instead of crashing the whole run — the same isolation
+  the bus already gave subscribers and the loop gave tools.
+- **`RunContext.events` is genuinely read-only.** Plugins receive the live event
+  log through a read-only `Sequence` view (`loop._EventsView`) — no copy, but the
+  canonical record can no longer be mutated through the context.
+- **`render_dom` SSRF backstop + real bugs.** Tier-2 render now applies the same
+  `check_url` host-level SSRF guard as tier-1 fetch *before* leasing a browser, so
+  escalation can't reach an internal/metadata host with the guard bypassed. The
+  `local-docker` backend now reads `exec_run(demux=True)` (Chromium's noisy stderr
+  no longer corrupts the JSON observation on stdout), bounds the in-container
+  render with a timeout, and the entrypoint uses `wait_until="load"` (not
+  `networkidle`, which never settles on SPAs). The browser **viewport** is now
+  explicit (1280×720) and configurable via `render_dom(url, width, height)`.
+- **SQLite off the event loop.** Every `SqliteSink` DB call runs on an
+  `asyncio.to_thread` worker, so a commit's fsync never blocks the loop (and, under
+  `zu serve`, never stalls SSE streams or other requests).
+- **`zu serve` request hardening.** A per-request `config` override can select
+  installed, named plugins but may no longer name an arbitrary `module:Attr` to
+  import (`assemble(..., allow_imports=False)`); the operator's server default
+  keeps the full door. The `/run/stream` queue is bounded with drop-on-full, and a
+  client disconnect now cancels the run instead of leaking it.
+- **Grounding rejects compound-token fragments.** A short number is no longer
+  "grounded" by a fragment of a date/version/time/SKU joined by `-` `/` `:`
+  (`"12"` is not grounded by `"12-2024"`), matching the existing decimal guard.
+- **Provider parity + reasoning preserved.** The Anthropic adapter degrades to `{}`
+  on missing usage like the OpenAI one (no `AttributeError`); both translators now
+  preserve assistant reasoning text emitted alongside tool calls into replayed
+  history.
+- **Detector precision.** `bot-wall`'s weak phrases ("just a moment", "attention
+  required") now require a corroborating Cloudflare fingerprint (no more
+  false-positives on ordinary prose); `js-shell` also catches modulepreload-only
+  shells; the marker detectors read all content keys, consistent with `empty`.
+- **View leak bounded.** `view.scope_payload` caps allowlisted values, so content
+  accidentally placed under a control-plane key (`detail`, `usage`, …) can no
+  longer leak verbatim through a networked surface.
+- **Honest red-team docs + meaningful coverage.** `RED_TEAM.md` now marks the
+  attacker fleet, `LiveAttacker`, the container gate, the `HostEffect`/escape
+  observer, and the dormant-pivot probe as **designed, not implemented**, and
+  describes only what ships (deterministic corpus, out-of-band observers, directed
+  per-tool envelope probes). The adversarial gate's coverage check now enforces a
+  real invariant — every declared target tool was directed-probed — instead of
+  counting the corpus's own constant objective set.
+
+### Changed — grounding is on by default (correct by default)
+
+`PluginsConfig.validators` now defaults to `[schema, grounding]`. A run is held to
+its output schema *and* every reported value must appear in the content it
+actually fetched — so a fabricated answer is refused (RETRY → terminal), never
+returned as `success`. Dropping `grounding` is now an explicit opt-out; a
+legitimately non-fetching agent (pure Q&A, e.g. the `minimal` template) sets
+`validators: [schema]` on purpose, because grounding has no retrieved content to
+check against. (Templates already set this explicitly; only hand-written configs
+that omitted `validators` change — they get the safe default instead of none.)
+
+### Added — uniform observability: blocked-attempt logging, review queue, live dashboard
+
+Contained attacks are now visible by construction, end to end — and surfaced the
+**same way from every harness** (`zu run`, `import zu`, `zu serve`, `zu mcp`, and
+the `zu test-plugin` gate) via one hook, `attach_observability(bus, cfg)`:
+
+- **A live web dashboard** at `GET /` (`zu serve`) over a global `GET /events`
+  SSE feed: the live run feed for all runs with a highlighted Defenses panel —
+  watch a local process or a deployed container as data is piped in.
+- **Allowlist-render scope.** Networked surfaces (`/events`, `/run/stream`, the
+  dashboard) are **default-deny**: only structural control-plane fields render;
+  content (query, fetched text, extracted values, URL args) is summarized to
+  type/length/sha256 (`zu_core.view.scope_event`). It does not try to *detect*
+  PII — it contains by structure, so the window is safe to leave on in production.
+  The local console trace is `full`; `observability.scope: full` opts a feed in.
+- **`zu test-plugin --watch`** streams each attack live as it runs, so you can
+  see the gate's attacks and the defenses firing in real time.
+
+Contained attacks are now visible by construction:
+
+- **`harness.defense.blocked` events.** A guard that contains an action raises
+  `zu_core.security.SecurityBlock` (the SSRF/egress guard now does), and the loop
+  records it as a defense event — a blocked attempt is on the append-only log,
+  never a silent return. The oversized-observation rejection emits one too.
+- **A review queue.** `zu serve` tees every defense event to a JSONL review queue
+  (`zu_review.jsonl`, configurable), marked `pending`, and exposes `GET /review`.
+  `zu_redteam.DefenseMonitor` is the reusable subscriber for embedders.
+- **A live web dashboard.** `zu serve` now serves an observability dashboard at
+  `GET /` (vanilla JS over a new global `GET /events` SSE feed): the live run feed
+  for all runs, with a highlighted Defenses panel fed by the same stream — watch a
+  local process or a deployed container as data is piped in.
+- **Red-team findings.** `zu test-plugin` now reports per-attack findings — what
+  each attack attempted, the outcome (contained/breached), and **what defended it**
+  (the defenses that fired) — rendered as a table and available as `--json`.
+
+### Added — the plugin-test gate and the adversarial red team (`zu-redteam`)
+
+The adversarial gate from `PHILOSOPHY.md` §3 and `RED_TEAM.md` is now runnable as
+a new `zu-redteam` package and the `zu test-plugin <pkg>` command:
+
+- **Out-of-band, deterministic verdict observers** (the judge): egress, exfil,
+  provenance, resources, neighbour-health. They read the run's event log from
+  outside the target's trust boundary — the attacker only *generates* attacks, it
+  never certifies.
+- **A frozen regression corpus** of the concrete attacks from the threat surface
+  (indirect injection, metadata SSRF, output smuggle, schema bomb, forged event,
+  injected judge), each a deterministic Zu run proving the envelope holds.
+- **The attacker agent + fleet** (`ScriptedAttacker` for the deterministic gate;
+  `LiveAttacker` for opt-in frontier-model discovery behind `ZU_REDTEAM_LIVE=1`).
+- **Graded gates**: unit · contract · interop · adversarial run deterministically;
+  the container gate is the production form, reported when Docker is present.
+
+### Added — the capability envelope is now a declared contract
+
+The `Tool` port carries `capabilities` and `egress` (with `CAP_*` / `EGRESS_OPEN`
+tokens), the loop records each tool's declared envelope to the log at run start
+(`harness.envelope.declared`), and the gate's observers judge behaviour against
+it. The secure-by-default thesis is now a machine-readable contract, not prose.
+
+### Fixed — schema-bomb size guard (found by the new gate)
+
+The loop serialized tool observations with no size cap, so a hostile tool
+returning a shared-reference/exponential structure could OOM the harness. The
+loop now rejects an oversized observation (`_within_size`, lazy `iterencode`)
+as an error observation — "parsing and size limits reject it" made real. Plus a
+batch of audit fixes: detectors now read `text`/`content` observations (not just
+`html`); the local-docker backend no longer mislabels non-JSON render output as a
+200; the openai adapter logs (no longer silently swallows) malformed tool args;
+the jsonl sink and adapter usage shapes were normalized; coercion/message logic
+was de-duplicated; dead code removed. OSS-readiness: `AGENTS.md`, per-package
+READMEs, public `ARCHITECTURE.md`, and ruff in CI.
+
 ### Fixed — robustness found by running the real developer flow
 
 Running a real agent end to end (clean install → `zu init` → a live `gpt-4o-mini`

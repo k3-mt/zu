@@ -1,0 +1,63 @@
+name: redteam-image
+
+# Build and publish the red-team container image (RED_TEAM_CONTAINER.md). The
+# image carries the workspace + the `zu-redteam-run` and `zu-egress-proxy`
+# entrypoints, so the live container form (sidecar topology) can pull a
+# known-good image instead of building per run.
+#
+# Publishes to ghcr.io/<owner>/zu-redteam on a version tag (v*) or manual run.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/zu-redteam
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # Optional: on a self-hosted runner with Docker, run the live enforcement
+  # proofs against the freshly built image. Disabled by default (the GitHub-hosted
+  # ubuntu runner cannot create --internal networks with external bridging the way
+  # the proofs need); enable on a runner labelled `docker-live`.
+  live-gate:
+    if: false
+    runs-on: [self-hosted, docker-live]
+    needs: build-and-push
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t zu-redteam:live .
+      - run: examples/redteam_live/live_gate.sh zu-redteam:live
+      - uses: astral-sh/setup-uv@v4
+      - run: ZU_REDTEAM_LIVE_DOCKER=1 uv run pytest packages/zu-redteam/tests/test_live_docker.py

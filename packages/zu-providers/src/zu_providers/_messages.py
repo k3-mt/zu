@@ -3,8 +3,13 @@
 The loop speaks one neutral shape (pinned by ``test_message_format_is_stable``):
 
     {"role": "system" | "user", "content": "<text>"}
-    {"role": "assistant", "tool_calls": [{"name": ..., "args": {...}}, ...]}
+    {"role": "assistant", "tool_calls": [{"name": ..., "args": {...}}, ...],
+                          "content": "<optional reasoning text>"}
     {"role": "tool", "name": ..., "content": "<json string>"}
+
+An assistant tool-call turn MAY carry ``content`` (the model's reasoning emitted
+alongside the calls); it is preserved into each wire format (a leading Anthropic
+text block / an OpenAI ``content`` field) and omitted when empty.
 
 Crucially the neutral form carries **no tool-call ids** — an assistant turn's
 tool calls and the ``tool`` results that follow are matched by *order*. Both
@@ -20,6 +25,55 @@ from __future__ import annotations
 import json
 
 
+class _ToolIds:
+    """The shared id bookkeeping both translators need: synthesize a fresh id per
+    tool call on an assistant turn, then match the following ``tool`` results to
+    those ids FIFO. Both wire formats require ids on a matched pair; the neutral
+    form carries none, so order is the contract (see the module docstring).
+
+    Failing loudly here — rather than fabricating or dropping an id — turns a
+    malformed history into a clear local ValueError instead of an opaque provider
+    400 (``tool_result references unknown tool_use_id`` / a tool message with no
+    matching call). The mismatch is *symmetric*: too many results (a result with
+    no pending call) and too few (calls left unmatched at the end) both raise."""
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix
+        self._counter = 0
+        self._pending: list[str] = []
+
+    def open_calls(self, n: int) -> list[str]:
+        """Begin an assistant tool-call turn: mint ``n`` fresh ids, replacing any
+        still-pending ones (the loop emits a turn's results before the next turn,
+        so anything left here is the too-few case, caught by ``finish``)."""
+        self._pending = []
+        for _ in range(n):
+            self._counter += 1
+            self._pending.append(f"{self._prefix}{self._counter}")
+        return list(self._pending)
+
+    def match_result(self) -> str:
+        """Claim the next pending id for a ``tool`` result. Raises if there is no
+        preceding tool call to match — more results than calls (out of order, or
+        a stray result)."""
+        if not self._pending:
+            raise ValueError(
+                "tool result has no matching tool call in the message history "
+                "(an assistant tool-call turn must immediately precede its results)"
+            )
+        return self._pending.pop(0)
+
+    def finish(self) -> None:
+        """End of history: every opened tool call must have been matched. Leftover
+        pending ids mean fewer results than calls — the mirror of ``match_result``,
+        and just as much a malformed history, so it fails just as loudly."""
+        if self._pending:
+            raise ValueError(
+                f"{len(self._pending)} tool call(s) have no matching tool result in "
+                "the message history (each tool call must be followed by its result)"
+            )
+
+
 def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
     """Return ``(system, messages)`` for the Anthropic Messages API.
 
@@ -28,9 +82,8 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
     a single ``user`` turn of ``tool_result`` blocks, as the API expects."""
     system_parts: list[str] = []
     out: list[dict] = []
-    pending_ids: list[str] = []  # tool_use ids awaiting their results
+    ids = _ToolIds("toolu_")
     pending_results: list[dict] = []  # tool_result blocks to flush as one user turn
-    counter = 0
 
     def flush() -> None:
         nonlocal pending_results
@@ -49,33 +102,25 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
             flush()
             calls = m.get("tool_calls")
             if calls:
-                pending_ids = []
+                tids = ids.open_calls(len(calls))
                 blocks: list[dict] = []
-                for c in calls:
-                    counter += 1
-                    tid = f"toolu_{counter}"
-                    pending_ids.append(tid)
-                    blocks.append(
-                        {"type": "tool_use", "id": tid, "name": c["name"], "input": c.get("args", {})}
-                    )
+                # A leading text block preserves the model's reasoning emitted
+                # with the tool calls; Anthropic accepts text before tool_use.
+                text = m.get("content")
+                if text:
+                    blocks.append({"type": "text", "text": str(text)})
+                blocks += [
+                    {"type": "tool_use", "id": tid, "name": c["name"], "input": c.get("args", {})}
+                    for tid, c in zip(tids, calls)
+                ]
                 out.append({"role": "assistant", "content": blocks})
             else:
                 out.append({"role": "assistant", "content": m.get("content", "")})
         elif role == "tool":
-            if not pending_ids:
-                # A tool result with no preceding tool call to match it: the
-                # neutral history is malformed (results out of order, or more
-                # results than calls). Fabricating an id here would only surface
-                # as an opaque provider 400 ("tool_result references unknown
-                # tool_use_id"); fail loudly and locally instead.
-                raise ValueError(
-                    "tool result has no matching tool call in the message history "
-                    "(an assistant tool-call turn must immediately precede its results)"
-                )
-            tid = pending_ids.pop(0)
             pending_results.append(
-                {"type": "tool_result", "tool_use_id": tid, "content": m.get("content", "")}
+                {"type": "tool_result", "tool_use_id": ids.match_result(), "content": m.get("content", "")}
             )
+    ids.finish()
     flush()
     system = "\n\n".join(p for p in system_parts if p) or None
     return system, out
@@ -84,8 +129,7 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
 def to_openai_messages(messages: list[dict]) -> list[dict]:
     """Return messages for the OpenAI Chat Completions API (system stays inline)."""
     out: list[dict] = []
-    pending_ids: list[str] = []
-    counter = 0
+    ids = _ToolIds("call_")
 
     for m in messages:
         role = m.get("role")
@@ -94,32 +138,23 @@ def to_openai_messages(messages: list[dict]) -> list[dict]:
         elif role == "assistant":
             calls = m.get("tool_calls")
             if calls:
-                pending_ids = []
-                tcs: list[dict] = []
-                for c in calls:
-                    counter += 1
-                    tid = f"call_{counter}"
-                    pending_ids.append(tid)
-                    tcs.append(
-                        {
-                            "id": tid,
-                            "type": "function",
-                            "function": {"name": c["name"], "arguments": json.dumps(c.get("args", {}))},
-                        }
-                    )
-                out.append({"role": "assistant", "content": None, "tool_calls": tcs})
+                tids = ids.open_calls(len(calls))
+                tcs = [
+                    {
+                        "id": tid,
+                        "type": "function",
+                        "function": {"name": c["name"], "arguments": json.dumps(c.get("args", {}))},
+                    }
+                    for tid, c in zip(tids, calls)
+                ]
+                # Keep the model's reasoning text alongside the calls when
+                # present (OpenAI allows content + tool_calls on one message).
+                out.append({"role": "assistant", "content": m.get("content") or None, "tool_calls": tcs})
             else:
                 out.append({"role": "assistant", "content": m.get("content", "")})
         elif role == "tool":
-            if not pending_ids:
-                # See to_anthropic_messages: a tool result with no matching call
-                # is a malformed history; fail locally, not as a provider 400.
-                raise ValueError(
-                    "tool result has no matching tool call in the message history "
-                    "(an assistant tool-call turn must immediately precede its results)"
-                )
-            tid = pending_ids.pop(0)
-            out.append({"role": "tool", "tool_call_id": tid, "content": m.get("content", "")})
+            out.append({"role": "tool", "tool_call_id": ids.match_result(), "content": m.get("content", "")})
+    ids.finish()
     return out
 
 

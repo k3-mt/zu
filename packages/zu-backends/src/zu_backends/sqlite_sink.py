@@ -19,13 +19,14 @@ Large reads never materialise the whole log: ``stream`` pages by keyset
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 from typing import AsyncIterator
 
 from zu_core.codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from zu_core.contracts import Event
-from zu_core.eventstore import ALLOWED_EVENT_FILTERS, validate_filter
+from zu_core.eventstore import validate_filter
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -44,9 +45,13 @@ CREATE INDEX IF NOT EXISTS idx_events_type  ON events(type);
 """
 
 
-def _aad(event_id: str) -> bytes:
-    # Bind the ciphertext to its row so it can't be moved to another event.
-    return event_id.encode("utf-8")
+def _aad(event_id: str, trace_id: str, task_id: str, type_: str, source: str) -> bytes:
+    # Bind the row's indexed/plaintext columns into the AEAD associated data, so
+    # the ciphertext can't be moved to another row AND none of the index columns
+    # can be silently edited at rest (e.g. to hide a row from a `type` filter):
+    # any change makes the payload fail to decrypt. \x1f (unit separator) is a
+    # delimiter that cannot appear in a UUID or our type/source spellings.
+    return "\x1f".join((event_id, trace_id, task_id, type_, source)).encode("utf-8")
 
 
 class SqliteSink:
@@ -61,12 +66,11 @@ class SqliteSink:
     ) -> None:
         self.path = path
         # Single writer connection (WAL single-writer model). check_same_thread
-        # off so an async runtime's worker threads may use it. A sqlite3
-        # connection is not safe for concurrent use, so every DB access is
-        # serialised by self._lock — this makes the off-event-loop case (e.g.
-        # the planned move of these sync calls onto an executor thread) correct
-        # by construction, not by the convention "no await between execute and
-        # commit". The lock is uncontended on a single event loop.
+        # off because every DB call runs on an ``asyncio.to_thread`` worker (so a
+        # commit's fsync never blocks the event loop). A sqlite3 connection is not
+        # safe for concurrent use, so every DB access is serialised by self._lock
+        # — correct by construction across whatever worker thread runs the call,
+        # not by the fragile convention "no await between execute and commit".
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -84,7 +88,17 @@ class SqliteSink:
 
     async def append(self, event: Event) -> None:
         event_id = str(event.event_id)
-        blob = encode_payload(self._codec, event.model_dump_json(), _aad(event_id))
+        aad = _aad(event_id, str(event.trace_id), str(event.task_id), event.type, event.source)
+        blob = encode_payload(self._codec, event.model_dump_json(), aad)
+        # The sqlite3 calls are synchronous and ``synchronous=FULL`` makes each
+        # commit an fsync — seconds under load. Run off the event loop so a write
+        # never blocks the loop (and every other coroutine: the bus awaits this
+        # append before fan-out, so a blocking write would stall SSE streams and
+        # all in-flight requests under ``zu serve``). The lock still serialises
+        # the single connection across whatever worker thread runs the call.
+        await asyncio.to_thread(self._sync_append, event, event_id, blob)
+
+    def _sync_append(self, event: Event, event_id: str, blob: bytes) -> None:
         # Idempotent: a duplicate event_id is a no-op (scoped to that constraint).
         with self._lock:
             self._conn.execute(
@@ -118,21 +132,28 @@ class SqliteSink:
         return where, params
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
-        plaintext = decode_payload(row["data"], _aad(row["event_id"]), self._registry)
+        aad = _aad(row["event_id"], row["trace_id"], row["task_id"], row["type"], row["source"])
+        plaintext = decode_payload(row["data"], aad, self._registry)
         return Event.model_validate_json(plaintext)
 
     async def query(
         self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0
     ) -> list[Event]:
         where, params = self._where(flt or {})
-        sql = f"SELECT event_id, data FROM events WHERE seq > ?{where} ORDER BY seq ASC"
+        sql = (
+            "SELECT event_id, trace_id, task_id, type, source, data "
+            f"FROM events WHERE seq > ?{where} ORDER BY seq ASC"
+        )
         args: list = [after_seq, *params]
         if limit is not None:
             sql += " LIMIT ?"
             args.append(limit)
-        with self._lock:
-            rows = self._conn.execute(sql, args).fetchall()
+        rows = await asyncio.to_thread(self._sync_fetchall, sql, args)
         return [self._row_to_event(r) for r in rows]
+
+    def _sync_fetchall(self, sql: str, args: list) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(sql, args).fetchall()
 
     async def stream(
         self, flt: dict | None = None, *, batch_size: int = 500
@@ -140,14 +161,15 @@ class SqliteSink:
         # Keyset pagination on seq — O(log n) per page, never OFFSET, never
         # fetchall. Memory is bounded by batch_size regardless of log size.
         where, base_params = self._where(flt or {})
+        sql = (
+            "SELECT seq, event_id, trace_id, task_id, type, source, data FROM events "
+            f"WHERE seq > ?{where} ORDER BY seq ASC LIMIT ?"
+        )
         after = 0
         while True:
-            with self._lock:
-                rows = self._conn.execute(
-                    f"SELECT seq, event_id, data FROM events "
-                    f"WHERE seq > ?{where} ORDER BY seq ASC LIMIT ?",
-                    [after, *base_params, batch_size],
-                ).fetchall()
+            rows = await asyncio.to_thread(
+                self._sync_fetchall, sql, [after, *base_params, batch_size]
+            )
             if not rows:
                 return
             for r in rows:
@@ -158,10 +180,8 @@ class SqliteSink:
 
     async def count(self, flt: dict | None = None) -> int:
         where, params = self._where(flt or {})
-        with self._lock:
-            row = self._conn.execute(
-                f"SELECT COUNT(*) AS n FROM events WHERE 1=1{where}", params
-            ).fetchone()
+        sql = f"SELECT COUNT(*) AS n FROM events WHERE 1=1{where}"
+        row = (await asyncio.to_thread(self._sync_fetchall, sql, params))[0]
         return int(row["n"])
 
     def close(self) -> None:
@@ -169,4 +189,4 @@ class SqliteSink:
             self._conn.close()
 
 
-__all__ = ["SqliteSink", "ALLOWED_EVENT_FILTERS"]
+__all__ = ["SqliteSink"]

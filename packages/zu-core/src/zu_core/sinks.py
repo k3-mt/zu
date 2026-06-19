@@ -49,7 +49,12 @@ class MemoryEventSink:
     ) -> AsyncIterator[Event]:
         flt = flt or {}
         validate_filter(flt)
-        # A generator already yields one at a time — never builds the full list.
+        # ``batch_size`` is part of the port (it bounds memory for a *paginating*
+        # sink that reads pages off disk — see SqliteSink). For this in-memory
+        # sink the log already lives wholly in RAM and this generator yields one
+        # event at a time without ever building a second list, so iteration is
+        # already O(1) extra memory: there is no page to size. Accepted for
+        # protocol parity; intentionally not consulted.
         for event in self._events:
             if event_matches(event, flt):
                 yield event

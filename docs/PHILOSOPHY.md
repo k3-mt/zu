@@ -36,7 +36,11 @@ Zu is a runtime for agents; its own repository should be navigable by one. That 
 
 An `AGENTS.md` at the root points an agent at these conventions directly.
 
-Every plugin package has the same layout, and the test tiers map onto files you can find by name:
+Every plugin package has the same layout. The in-repo unit and contract tests
+live as one file per module; the graded runtime gates (container, interop,
+adversarial) are not committed per-plugin files — they are *run* by the gate
+harness (`zu test-plugin`, in `zu-redteam`), which stands the plugin up in a real
+Zu container against neighbours and an adversary (see §3 and `RED_TEAM.md`):
 
 ```
 packages/zu-tools/
@@ -45,10 +49,10 @@ packages/zu-tools/
   src/zu_tools/
     fetch.py                  # the plugin: implements the Tool port
   tests/
-    test_fetch_unit.py        # 1. unit — the plugin alone
-    test_fetch_contract.py    # 2. port conformance
-    test_fetch_container.py   # 3. real Zu, in Docker
-    test_fetch_interop.py     # 4. with >= 3 other plugins, in Docker
+    test_fetch.py             # unit + contract — the plugin alone and against its port
+
+# the higher gates are run, not stored as files:
+  zu test-plugin zu-tools     # 3. container · 4. interop · 5. adversarial
 ```
 
 ### Contributors can extend it without fear
@@ -336,6 +340,14 @@ A plugin is ready to merge when:
 - [ ] It survives the **adversarial gate** — a frontier-model red team cannot breach the envelope, exfiltrate data, escape the sandbox, corrupt the log, or subvert a neighbour; and any breach ever found is now a regression test it passes.
 - [ ] It ships a `README` and docstrings, and follows the repo's layout and naming conventions (so it stays navigable).
 - [ ] It passes all standard CI: lint, type-check, security scan.
+
+The container, interop, and adversarial gates are runnable today with
+`zu test-plugin <pkg>` (the `zu-redteam` package): the unit, contract, interop,
+and adversarial gates run deterministically in CI (the frozen corpus + directed
+probes, judged by out-of-band observers); the **container** gate is the
+production form of the same run and is reported when Docker is present; **live
+frontier-model discovery** is the opt-in escalation behind `ZU_REDTEAM_LIVE=1`.
+See [`RED_TEAM.md`](RED_TEAM.md) for the per-component status.
 
 ---
 

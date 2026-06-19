@@ -267,6 +267,32 @@ curl -N localhost:8000/run/stream \
 Each frame carries both a human-readable `line` and the full structured `event`,
 so a browser `EventSource` or a dashboard can render the train of thought live.
 
+**The live dashboard.** `zu serve` also serves an observability dashboard at
+`GET /` — open `http://localhost:8000/` in a browser and watch every run as data
+is piped in: the live feed (train of thought, tools, detectors, escalations) plus
+a highlighted **Defenses** panel. Whenever a guard contains an attack (an SSRF/
+egress refusal, an oversized "schema bomb", a denied capability) the loop records
+a `harness.defense.blocked` event; the server queues it to a JSONL **review
+queue** (`zu_review.jsonl`, configurable) marked `pending` and exposes it at
+`GET /review`, so a blocked attempt is never invisible and can be triaged. The
+dashboard consumes a global `GET /events` SSE feed of all runs.
+
+The networked feed is **allowlist-render by default**: it shows the *actions and
+decisions* (tools, detectors, escalations, defenses) but summarizes content the
+agent read or produced (page text, extracted values, URL args) to type/length/
+hash — so the window is safe to leave on in production. It doesn't try to detect
+PII; it contains by structure. Flip it with an `observability` block (the same
+hook every harness uses — `zu run`, embed, `zu serve`, `zu mcp`, and the gate):
+
+```yaml
+observability:
+  review_queue: zu_review.jsonl   # blocked attempts → triage (null to disable)
+  scope: render                   # render (default, redacted) | full (show content)
+```
+
+And to watch the red team itself: `zu test-plugin <pkg> --watch` streams each
+attack live as it runs.
+
 Mounting in your own ASGI app instead of running `zu serve`:
 
 ```python
@@ -383,6 +409,21 @@ class MyTool:
 The other ports — `Detector`, `Validator`, `ModelProvider`, `SandboxBackend`,
 `EventSink` — work the same way (`@detector`, `@validator`, …), or ship them as a
 pip package that declares a `zu.*` entry point and Zu discovers it on install.
+
+A tool also declares its **capability envelope** — `capabilities` (least
+privilege, e.g. `{CAP_NET}`) and `egress` (its host allowlist; `{EGRESS_OPEN}`
+only for a general web fetcher) — so its blast radius is visible in its own code.
+
+**Prove it before you ship it.** Run your plugin through the gate (the adversarial
+red team + interop check) with `pip install 'zu-runtime[test]'` then:
+
+```bash
+zu test-plugin my-plugin-package      # unit · contract · interop · adversarial
+```
+
+It stands your plugin up in a real Zu runtime with neighbours, attacks it with a
+frozen corpus, and judges the result with out-of-band observers — passing only if
+the capability envelope held. See [`docs/RED_TEAM.md`](RED_TEAM.md).
 
 ---
 
