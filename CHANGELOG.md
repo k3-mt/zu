@@ -7,6 +7,25 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Changed — lean base install, plugins opt-in (dbt-style)
+
+`pip install zu-runtime` is now the *runnable base*, not batteries-included:
+`import zu`, the `zu` command, the model-provider adapters, detectors,
+validators, and the sqlite event sink. Domain-specific and heavy plugins are
+opt-in extras — `[web]` (the http_fetch/html_parse/render_dom tools), `[serve]`
+(HTTP server), `[anthropic]`/`[openai]` (model SDKs), `[docker]` (sandbox
+client), and `[all]`. Every plugin remains a standalone package
+(`pip install zu-tools`, …), the way dbt ships adapters.
+
+- `zu-cli` slimmed to the engine (core + typer + pyyaml); it no longer forces
+  any plugin (or its deps) on a user. `zu-runtime` is the curated base bundle.
+- The base no longer pulls `httpx`/`selectolax`/jsonschema-only-via-web; a
+  bare install stays small and can run no-tool tasks (e.g. a scripted provider).
+- `zu demo` uses the web tools, so it needs `[web]`; on the bare base it prints a
+  one-line install hint (`pip install 'zu-runtime[web]'`) instead of failing
+  mid-run. `zu_cli.demo` imports its plugins lazily so the module still loads on
+  the lean base.
+
 ### Added — `zu demo`, and providers accept a direct API key
 
 Make the demo runnable straight from a `pip install`, and let the package take a

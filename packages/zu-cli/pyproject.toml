@@ -4,16 +4,12 @@ version = "0.1.0"
 description = "The `zu` command — Agent Production Runtime CLI"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-# The CLI is the batteries-included entry point: it depends on every built-in
-# plugin package so `zu run` discovers them out of the box. Config still selects
-# which are active per run; a user's own plugins are discovered the same way.
+# The lean engine: the `zu` command + config, and nothing but the core. Plugins
+# are opt-in — installed as separate packages (zu-tools, zu-providers, …) or
+# pulled by the `zu-runtime` bundle and its extras. The CLI discovers whatever
+# is installed at runtime, so it never forces a plugin (or its deps) on a user.
 dependencies = [
     "zu-core==0.1.0",
-    "zu-providers==0.1.0",
-    "zu-tools==0.1.0",
-    "zu-detectors==0.1.0",
-    "zu-validators==0.1.0",
-    "zu-backends==0.1.0",
     "typer",
     "pyyaml",
 ]

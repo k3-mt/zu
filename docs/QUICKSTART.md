@@ -14,13 +14,28 @@ and in a container — plus how to schedule it. Every step works offline first
 
 ## 1. Install
 
+A lean base, plugins opt-in (the same shape as dbt: a small core, adapters you
+add). The base gives you `import zu`, the `zu` command, the model-provider
+adapters, detectors, validators, and the sqlite event sink:
+
 ```bash
-pip install zu-runtime            # the library + the `zu` CLI + all built-in plugins
-pip install 'zu-runtime[all]'     # + HTTP server, Anthropic & OpenAI SDKs, Docker sandbox
+pip install zu-runtime            # the runnable base (above)
 ```
 
-Extras, if you want only some: `zu-runtime[serve]` (HTTP server),
-`zu-runtime[anthropic]`, `zu-runtime[openai]`, `zu-runtime[docker]`.
+Add what your agent needs:
+
+| Install | Adds |
+|---|---|
+| `pip install 'zu-runtime[web]'` | web tools — `http_fetch`, `html_parse`, `render_dom` (the browser tier) |
+| `pip install 'zu-runtime[anthropic]'` | the Anthropic SDK (the adapter ships in the base) |
+| `pip install 'zu-runtime[openai]'` | the OpenAI SDK (covers OpenAI / OpenRouter / Ollama / vLLM) |
+| `pip install 'zu-runtime[serve]'` | the HTTP server (`zu serve`) |
+| `pip install 'zu-runtime[docker]'` | the Docker sandbox client (tier-2 browser) |
+| `pip install 'zu-runtime[all]'` | everything above |
+
+Every plugin is also a standalone package — `pip install zu-tools`,
+`zu-providers`, `zu-detectors`, `zu-validators`, `zu-backends` — exactly the way
+dbt ships adapters. Mix and match; `zu plugins` lists whatever is installed.
 
 Verify and see every plugin the runtime discovered:
 
@@ -31,13 +46,15 @@ zu plugins
 ### Try it instantly
 
 ```bash
+pip install 'zu-runtime[web]'     # the demo uses the web tools
 zu demo
 ```
 
 Runs the whole arc — fetch → fail on JavaScript → escalate to a browser →
 validate — with the fake model and saved fixtures: no key, no network, no
-Docker. To watch a **real model** make the same escalation decision (the page
-stays fixtured, so still no Docker), pass a provider, a model, and your key:
+Docker. (On the bare base, `zu demo` prints the one-line `[web]` install hint.)
+To watch a **real model** make the same escalation decision (the page stays
+fixtured, so still no Docker), pass a provider, a model, and your key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...

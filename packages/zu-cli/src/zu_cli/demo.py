@@ -19,23 +19,26 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
 from zu_core.bus import EventBus
 from zu_core.contracts import Result, Status, TaskSpec
 from zu_core.loop import run_task
 from zu_core.ports import ModelProvider, ToolCall
 from zu_core.registry import Registry
-from zu_detectors.bot_wall import BotWallDetector
-from zu_detectors.empty import EmptyDetector
-from zu_detectors.error import ErrorDetector
-from zu_detectors.js_shell import JsShellDetector
-from zu_providers.scripted import ScriptedProvider
-from zu_tools.fetch import HttpFetch
-from zu_tools.parse import HtmlParse
-from zu_tools.render import RenderDom
-from zu_validators.grounding import GroundingValidator
-from zu_validators.schema import SchemaValidator
+
+# Plugin packages are imported lazily inside the functions below: the demo needs
+# the web tools (zu-tools), which are an opt-in extra, so this module must still
+# import on the lean base. ``ensure_web_tools`` turns a missing-tools install
+# into a clear, actionable message rather than an ImportError mid-run.
+
+_WEB_HINT = "the demo needs the web tools — install them with: pip install 'zu-runtime[web]'"
+
+
+def ensure_web_tools() -> None:
+    """Raise a clear, actionable error if the web tools aren't installed."""
+    try:
+        import zu_tools  # noqa: F401
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(_WEB_HINT) from exc
 
 # The product page, two ways. Over plain HTTP it's an empty JS shell (a mount
 # point and a script, no content). A real browser runs the JS and the product
@@ -82,7 +85,10 @@ class _FixtureBrowser:
         self.destroyed += 1
 
 
-def _shell_fetch() -> HttpFetch:
+def _shell_fetch() -> Any:
+    import httpx
+    from zu_tools.fetch import HttpFetch
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_SHELL)
 
@@ -92,6 +98,16 @@ def _shell_fetch() -> HttpFetch:
 def build_demo_registry(backend: _FixtureBrowser) -> Registry:
     """The real built-ins (only the network and browser are fixtured): tier-1
     http_fetch, tier-2 render_dom, all four detectors, both validators."""
+    ensure_web_tools()
+    from zu_detectors.bot_wall import BotWallDetector
+    from zu_detectors.empty import EmptyDetector
+    from zu_detectors.error import ErrorDetector
+    from zu_detectors.js_shell import JsShellDetector
+    from zu_tools.parse import HtmlParse
+    from zu_tools.render import RenderDom
+    from zu_validators.grounding import GroundingValidator
+    from zu_validators.schema import SchemaValidator
+
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())
     reg.register("tools", "html_parse", HtmlParse())
@@ -108,10 +124,12 @@ def build_demo_registry(backend: _FixtureBrowser) -> Registry:
     return reg
 
 
-def scripted_arc() -> ScriptedProvider:
+def scripted_arc() -> Any:
     """The deterministic fake model: http_fetch (a shell -> escalate), render_dom
     on the new tier, then finalise the product. The answer is grounded in the
     rendered DOM, so validation passes."""
+    from zu_providers.scripted import ScriptedProvider
+
     return ScriptedProvider.from_moves(
         [
             {"tool": "http_fetch", "args": {"url": _URL}},

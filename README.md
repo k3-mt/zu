@@ -51,17 +51,29 @@ with zero setup. What remains is breadth behind the existing ports, not new core
 
 ## Quickstart
 
+A lean base, plugins opt-in (dbt-style):
+
 ```bash
-pip install zu-runtime            # the library + the `zu` CLI + every built-in plugin
-pip install 'zu-runtime[all]'     # + HTTP server, Anthropic/OpenAI SDKs, Docker sandbox
-zu plugins                        # list every discovered plugin across all six ports
-zu demo                           # run the full arc instantly — no key, no network, no Docker
+pip install zu-runtime            # base: core + CLI + import zu + provider adapters,
+                                  #       detectors, validators, sqlite event sink
+pip install 'zu-runtime[web]'     # + web tools (http_fetch, html_parse, render_dom)
+pip install 'zu-runtime[anthropic]'   # + Anthropic SDK     (also: [openai])
+pip install 'zu-runtime[serve]'       # + HTTP server (zu serve)
+pip install 'zu-runtime[all]'         # everything (web + both SDKs + server + Docker)
 ```
 
-See the whole thing work the moment it's installed: `zu demo` fetches a JS page,
-**fails on JavaScript, escalates to a browser**, and returns validated data —
-offline and deterministic. Add `--provider anthropic --model claude-sonnet-4-6`
-(with `ANTHROPIC_API_KEY` set, or `--api-key`) to watch a real model do it.
+Each plugin is also a standalone package (`pip install zu-tools`, `zu-providers`, …),
+the way dbt ships adapters. `zu plugins` lists whatever you've installed.
+
+See the whole arc — fetch a JS page, **fail on JavaScript, escalate to a
+browser**, return validated data — offline and deterministic (no key, no
+network, no Docker):
+
+```bash
+pip install 'zu-runtime[web]'     # the demo uses the web tools
+zu demo                           # run it
+zu demo --provider anthropic --model claude-sonnet-4-6   # with ANTHROPIC_API_KEY or --api-key
+```
 
 ```
 providers   anthropic, openai-compatible, scripted

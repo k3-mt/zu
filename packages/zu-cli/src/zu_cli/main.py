@@ -173,6 +173,14 @@ def demo(
 
     from . import demo as _demo
 
+    # The demo exercises the web tools (an opt-in extra); fail fast with the
+    # install hint rather than partway through the run.
+    try:
+        _demo.ensure_web_tools()
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2)
+
     try:
         prov, label = _demo.build_provider(provider, model, api_key, api_key_env, base_url_env)
     except ConfigError as exc:

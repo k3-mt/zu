@@ -3,14 +3,20 @@
 **An opinionated, backend-agnostic runtime for agents that work in production** —
 deterministic, auditable, and injection-resistant by construction.
 
-`pip install zu-runtime` gives you `import zu`, the `zu` command, and every
-built-in plugin (model providers, tools, detectors, validators, a sandbox
-backend, and a SQLite event sink) discovered out of the box.
+A lean base, plugins opt-in (dbt-style). `pip install zu-runtime` gives you
+`import zu`, the `zu` command, the model-provider adapters, detectors,
+validators, and a SQLite event sink. Add what you need:
 
 ```bash
-pip install zu-runtime          # the library + CLI + built-ins
-pip install 'zu-runtime[all]'   # + HTTP server, Anthropic/OpenAI SDKs, Docker sandbox
+pip install zu-runtime              # runnable base
+pip install 'zu-runtime[web]'       # + web tools (http_fetch, html_parse, render_dom)
+pip install 'zu-runtime[anthropic]' # + Anthropic SDK     (also: [openai])
+pip install 'zu-runtime[serve]'     # + HTTP server (zu serve)
+pip install 'zu-runtime[all]'       # everything (web + both SDKs + server + Docker)
 ```
+
+Each plugin is also a standalone package (`pip install zu-tools`, …), the way
+dbt ships adapters.
 
 ## Embed it
 

@@ -1388,12 +1388,7 @@ source = { editable = "packages/zu-cli" }
 dependencies = [
     { name = "pyyaml" },
     { name = "typer" },
-    { name = "zu-backends" },
     { name = "zu-core" },
-    { name = "zu-detectors" },
-    { name = "zu-providers" },
-    { name = "zu-tools" },
-    { name = "zu-validators" },
 ]
 
 [package.optional-dependencies]
@@ -1408,12 +1403,7 @@ requires-dist = [
     { name = "pyyaml" },
     { name = "typer" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.27" },
-    { name = "zu-backends", editable = "packages/zu-backends" },
     { name = "zu-core", editable = "packages/zu-core" },
-    { name = "zu-detectors", editable = "packages/zu-detectors" },
-    { name = "zu-providers", editable = "packages/zu-providers" },
-    { name = "zu-tools", editable = "packages/zu-tools" },
-    { name = "zu-validators", editable = "packages/zu-validators" },
 ]
 provides-extras = ["serve"]
 
@@ -1468,7 +1458,11 @@ name = "zu-runtime"
 version = "0.1.0"
 source = { editable = "packages/zu" }
 dependencies = [
+    { name = "zu-backends" },
     { name = "zu-cli" },
+    { name = "zu-detectors" },
+    { name = "zu-providers" },
+    { name = "zu-validators" },
 ]
 
 [package.optional-dependencies]
@@ -1476,6 +1470,7 @@ all = [
     { name = "zu-backends", extra = ["docker"] },
     { name = "zu-cli", extra = ["serve"] },
     { name = "zu-providers", extra = ["anthropic", "openai"] },
+    { name = "zu-tools" },
 ]
 anthropic = [
     { name = "zu-providers", extra = ["anthropic"] },
@@ -1489,20 +1484,29 @@ openai = [
 serve = [
     { name = "zu-cli", extra = ["serve"] },
 ]
+web = [
+    { name = "zu-tools" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "zu-backends", editable = "packages/zu-backends" },
     { name = "zu-backends", extras = ["docker"], marker = "extra == 'all'", editable = "packages/zu-backends" },
     { name = "zu-backends", extras = ["docker"], marker = "extra == 'docker'", editable = "packages/zu-backends" },
     { name = "zu-cli", editable = "packages/zu-cli" },
     { name = "zu-cli", extras = ["serve"], marker = "extra == 'all'", editable = "packages/zu-cli" },
     { name = "zu-cli", extras = ["serve"], marker = "extra == 'serve'", editable = "packages/zu-cli" },
+    { name = "zu-detectors", editable = "packages/zu-detectors" },
+    { name = "zu-providers", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'all'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'anthropic'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["openai"], marker = "extra == 'all'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["openai"], marker = "extra == 'openai'", editable = "packages/zu-providers" },
+    { name = "zu-tools", marker = "extra == 'all'", editable = "packages/zu-tools" },
+    { name = "zu-tools", marker = "extra == 'web'", editable = "packages/zu-tools" },
+    { name = "zu-validators", editable = "packages/zu-validators" },
 ]
-provides-extras = ["serve", "anthropic", "openai", "docker", "all"]
+provides-extras = ["web", "anthropic", "openai", "serve", "docker", "all"]
 
 [[package]]
 name = "zu-tools"

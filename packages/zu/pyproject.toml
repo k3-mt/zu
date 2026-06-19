@@ -6,22 +6,36 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", "event-sourcing"]
-# The one-line install: this pulls in the CLI and every built-in plugin, so
-# `pip install zu-runtime` gives you `import zu`, the `zu` command, and all six
-# ports populated out of the box.
-dependencies = ["zu-cli==0.1.0"]
+# The minimal-runnable base (dbt-core style): `import zu`, the `zu` command, and
+# the lightweight plugins — model-provider adapters, detectors, validators, and
+# the sqlite event sink. Everything domain-specific or heavy is opt-in below.
+# The web tools, the real model SDKs, the HTTP server, and the Docker sandbox
+# are each an extra; every plugin is also installable standalone (pip install
+# zu-tools, …) for the ecosystem.
+dependencies = [
+    "zu-cli==0.1.0",
+    "zu-providers==0.1.0",
+    "zu-detectors==0.1.0",
+    "zu-validators==0.1.0",
+    "zu-backends==0.1.0",
+]
 
 [project.optional-dependencies]
-# Convenience extras that flow through to the underlying packages.
-serve = ["zu-cli[serve]==0.1.0"]
+# Web tools: http_fetch, html_parse, render_dom (the browser tier). Needed for
+# the killer demo and any web-extraction task.
+web = ["zu-tools==0.1.0"]
+# Real model SDKs (the adapters ship in the base; these add the vendor client).
 anthropic = ["zu-providers[anthropic]==0.1.0"]
 openai = ["zu-providers[openai]==0.1.0"]
+# The HTTP server (`zu serve`) and the Docker sandbox client (tier-2 browser).
+serve = ["zu-cli[serve]==0.1.0"]
 docker = ["zu-backends[docker]==0.1.0"]
-# Everything: the server, both real model SDKs, and the Docker sandbox client.
+# Everything: web tools, both model SDKs, the server, and the Docker sandbox.
 all = [
-    "zu-cli[serve]==0.1.0",
+    "zu-tools==0.1.0",
     "zu-providers[anthropic]==0.1.0",
     "zu-providers[openai]==0.1.0",
+    "zu-cli[serve]==0.1.0",
     "zu-backends[docker]==0.1.0",
 ]
 
