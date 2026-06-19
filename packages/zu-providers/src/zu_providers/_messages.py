@@ -3,8 +3,13 @@
 The loop speaks one neutral shape (pinned by ``test_message_format_is_stable``):
 
     {"role": "system" | "user", "content": "<text>"}
-    {"role": "assistant", "tool_calls": [{"name": ..., "args": {...}}, ...]}
+    {"role": "assistant", "tool_calls": [{"name": ..., "args": {...}}, ...],
+                          "content": "<optional reasoning text>"}
     {"role": "tool", "name": ..., "content": "<json string>"}
+
+An assistant tool-call turn MAY carry ``content`` (the model's reasoning emitted
+alongside the calls); it is preserved into each wire format (a leading Anthropic
+text block / an OpenAI ``content`` field) and omitted when empty.
 
 Crucially the neutral form carries **no tool-call ids** — an assistant turn's
 tool calls and the ``tool`` results that follow are matched by *order*. Both
@@ -98,7 +103,13 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
             calls = m.get("tool_calls")
             if calls:
                 tids = ids.open_calls(len(calls))
-                blocks = [
+                blocks: list[dict] = []
+                # A leading text block preserves the model's reasoning emitted
+                # with the tool calls; Anthropic accepts text before tool_use.
+                text = m.get("content")
+                if text:
+                    blocks.append({"type": "text", "text": str(text)})
+                blocks += [
                     {"type": "tool_use", "id": tid, "name": c["name"], "input": c.get("args", {})}
                     for tid, c in zip(tids, calls)
                 ]
@@ -136,7 +147,9 @@ def to_openai_messages(messages: list[dict]) -> list[dict]:
                     }
                     for tid, c in zip(tids, calls)
                 ]
-                out.append({"role": "assistant", "content": None, "tool_calls": tcs})
+                # Keep the model's reasoning text alongside the calls when
+                # present (OpenAI allows content + tool_calls on one message).
+                out.append({"role": "assistant", "content": m.get("content") or None, "tool_calls": tcs})
             else:
                 out.append({"role": "assistant", "content": m.get("content", "")})
         elif role == "tool":

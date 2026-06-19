@@ -7,6 +7,60 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — review hardening pass (correctness, isolation, and honest red-team docs)
+
+A repo-wide review turned up a set of edge-case correctness and containment gaps;
+each is now fixed with a regression test (suite: 285 → 295 tests, all green; mypy
+and ruff clean):
+
+- **Hard wall-time bound on each model call.** `run_task` wraps `provider.complete()`
+  in `asyncio.wait_for` with the run's remaining wall-time, so a hung or runaway
+  provider can no longer overrun `wall_time_s` (it was previously checked only
+  *between* turns).
+- **Detector/validator isolation.** A raising third-party detector or validator is
+  now logged and skipped instead of crashing the whole run — the same isolation
+  the bus already gave subscribers and the loop gave tools.
+- **`RunContext.events` is genuinely read-only.** Plugins receive the live event
+  log through a read-only `Sequence` view (`loop._EventsView`) — no copy, but the
+  canonical record can no longer be mutated through the context.
+- **`render_dom` SSRF backstop + real bugs.** Tier-2 render now applies the same
+  `check_url` host-level SSRF guard as tier-1 fetch *before* leasing a browser, so
+  escalation can't reach an internal/metadata host with the guard bypassed. The
+  `local-docker` backend now reads `exec_run(demux=True)` (Chromium's noisy stderr
+  no longer corrupts the JSON observation on stdout), bounds the in-container
+  render with a timeout, and the entrypoint uses `wait_until="load"` (not
+  `networkidle`, which never settles on SPAs). The browser **viewport** is now
+  explicit (1280×720) and configurable via `render_dom(url, width, height)`.
+- **SQLite off the event loop.** Every `SqliteSink` DB call runs on an
+  `asyncio.to_thread` worker, so a commit's fsync never blocks the loop (and, under
+  `zu serve`, never stalls SSE streams or other requests).
+- **`zu serve` request hardening.** A per-request `config` override can select
+  installed, named plugins but may no longer name an arbitrary `module:Attr` to
+  import (`assemble(..., allow_imports=False)`); the operator's server default
+  keeps the full door. The `/run/stream` queue is bounded with drop-on-full, and a
+  client disconnect now cancels the run instead of leaking it.
+- **Grounding rejects compound-token fragments.** A short number is no longer
+  "grounded" by a fragment of a date/version/time/SKU joined by `-` `/` `:`
+  (`"12"` is not grounded by `"12-2024"`), matching the existing decimal guard.
+- **Provider parity + reasoning preserved.** The Anthropic adapter degrades to `{}`
+  on missing usage like the OpenAI one (no `AttributeError`); both translators now
+  preserve assistant reasoning text emitted alongside tool calls into replayed
+  history.
+- **Detector precision.** `bot-wall`'s weak phrases ("just a moment", "attention
+  required") now require a corroborating Cloudflare fingerprint (no more
+  false-positives on ordinary prose); `js-shell` also catches modulepreload-only
+  shells; the marker detectors read all content keys, consistent with `empty`.
+- **View leak bounded.** `view.scope_payload` caps allowlisted values, so content
+  accidentally placed under a control-plane key (`detail`, `usage`, …) can no
+  longer leak verbatim through a networked surface.
+- **Honest red-team docs + meaningful coverage.** `RED_TEAM.md` now marks the
+  attacker fleet, `LiveAttacker`, the container gate, the `HostEffect`/escape
+  observer, and the dormant-pivot probe as **designed, not implemented**, and
+  describes only what ships (deterministic corpus, out-of-band observers, directed
+  per-tool envelope probes). The adversarial gate's coverage check now enforces a
+  real invariant — every declared target tool was directed-probed — instead of
+  counting the corpus's own constant objective set.
+
 ### Changed — grounding is on by default (correct by default)
 
 `PluginsConfig.validators` now defaults to `[schema, grounding]`. A run is held to

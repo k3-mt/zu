@@ -7,6 +7,7 @@ a concrete adapter — which is what makes every adapter replaceable.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum
 from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
@@ -133,7 +134,11 @@ class RunContext(BaseModel):
     spec: Any
     # Populated by the loop (build step 4); kept Any so the core stays small.
     observation: Any = None
-    events: list = Field(default_factory=list)
+    # The run's event log as a *read-only* sequence: the loop hands plugins a
+    # window that reflects the log as it grows but cannot be mutated through this
+    # context (see ``loop._EventsView``). Typed ``Sequence`` to make that
+    # read-only contract explicit rather than convention.
+    events: Sequence = Field(default_factory=list)
 
 
 @runtime_checkable

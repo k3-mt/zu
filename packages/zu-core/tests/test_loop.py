@@ -396,7 +396,9 @@ def _registry_with_tiers(backend: _FakeBackend):
 
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())          # tier 1
-    reg.register("tools", "render_dom", RenderDom(backend=backend))  # tier 2
+    # allow_private skips the SSRF DNS check so the fake backend can render a
+    # non-resolvable test host (the real guard is covered in zu-tools tests).
+    reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))  # tier 2
     reg.register("detectors", "js-shell", JsShellDetector())
     return reg
 
@@ -456,7 +458,7 @@ async def test_escalation_via_real_builtin_detectors() -> None:
     backend = _FakeBackend(_RENDERED)
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())
-    reg.register("tools", "render_dom", RenderDom(backend=backend))
+    reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))
     for name, det in [
         ("empty", EmptyDetector()),
         ("error", ErrorDetector()),

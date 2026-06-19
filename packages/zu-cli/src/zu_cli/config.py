@@ -273,19 +273,36 @@ def _construct(factory: Any, candidate: dict[str, Any]) -> Any:
     return factory(**kwargs)
 
 
-def build_provider(cfg: ProviderConfig, catalog: Registry | None = None) -> ModelProvider:
+def _refuse_import(ref: str, what: str) -> None:
+    """Raise when an arbitrary ``module:Attr`` ref is named on a surface that may
+    not import code. Importing a module executes its top-level code, so a config
+    that can name any ``module:Attr`` is a code-execution door — fine for the
+    operator-trusted CLI, never for a config that arrived over the network."""
+    raise ConfigError(
+        f"refusing to import {what} {ref!r}: this surface does not permit arbitrary "
+        "'module:Attr' imports (a per-request config may only use installed, named "
+        "plugins). Configure it on the trusted server default instead."
+    )
+
+
+def build_provider(
+    cfg: ProviderConfig, catalog: Registry | None = None, *, allow_imports: bool = True
+) -> ModelProvider:
     """Construct the configured model provider — the one-line model swap.
 
     ``scripted`` is special only in that it has no env/model to construct from:
     it replays a fixed list of moves (for offline runs and tests). Every other
     provider — built-in or a user's ``module:Attr`` — is looked up by name and
-    constructed from the neutral config knobs it accepts."""
+    constructed from the neutral config knobs it accepts. ``allow_imports=False``
+    forbids the ``module:Attr`` door (the networked surface)."""
     if cfg.name == "scripted":
         from zu_providers.scripted import ScriptedProvider
 
         return ScriptedProvider.from_moves(cfg.script or [])
 
     if ":" in cfg.name:
+        if not allow_imports:
+            _refuse_import(cfg.name, "provider")
         factory = _import_ref(cfg.name)
     else:
         catalog = catalog or _catalog()
@@ -310,13 +327,18 @@ def build_provider(cfg: ProviderConfig, catalog: Registry | None = None) -> Mode
     return _construct(factory, candidate)
 
 
-def _resolve_plugin(kind: str, name: str, catalog: Registry, extra: dict[str, Any]) -> Any:
+def _resolve_plugin(
+    kind: str, name: str, catalog: Registry, extra: dict[str, Any], *, allow_imports: bool = True
+) -> Any:
     """A single named plugin → an object for the run registry. An ``module:Attr``
-    name is imported; a short name is taken from the catalog. ``extra`` carries
-    optional injected dependencies (e.g. a configured ``backend`` for a tool that
-    accepts one); a class that wants one is instantiated here, otherwise it is
-    handed to the registry as-is and the loop materialises it."""
+    name is imported (only if ``allow_imports``); a short name is taken from the
+    catalog. ``extra`` carries optional injected dependencies (e.g. a configured
+    ``backend`` for a tool that accepts one); a class that wants one is
+    instantiated here, otherwise it is handed to the registry as-is and the loop
+    materialises it."""
     if ":" in name:
+        if not allow_imports:
+            _refuse_import(name, kind[:-1])
         return _import_ref(name)
     try:
         obj = catalog.get(kind, name)
@@ -335,21 +357,25 @@ def _resolve_plugin(kind: str, name: str, catalog: Registry, extra: dict[str, An
     return obj
 
 
-def build_registry(cfg: RunConfig, catalog: Registry | None = None) -> Registry:
+def build_registry(
+    cfg: RunConfig, catalog: Registry | None = None, *, allow_imports: bool = True
+) -> Registry:
     """A registry containing exactly the configured plugins — no more. This is
-    how config activates and orders plugins per run without code changes."""
+    how config activates and orders plugins per run without code changes.
+    ``allow_imports=False`` forbids ``module:Attr`` plugin refs (networked
+    surface): a per-request config may only activate installed, named plugins."""
     catalog = catalog or _catalog()
     reg = Registry()
 
     backend_obj = None
     if cfg.backend is not None:
-        backend_obj = _resolve_plugin("backends", cfg.backend, catalog, {})
+        backend_obj = _resolve_plugin("backends", cfg.backend, catalog, {}, allow_imports=allow_imports)
         backend_obj = backend_obj() if isinstance(backend_obj, type) else backend_obj
 
     extra = {"backend": backend_obj} if backend_obj is not None else {}
     for kind in ("tools", "detectors", "validators"):
         for name in getattr(cfg.plugins, kind):
-            obj = _resolve_plugin(kind, name, catalog, extra)
+            obj = _resolve_plugin(kind, name, catalog, extra, allow_imports=allow_imports)
             reg.register(kind, getattr(obj, "name", name), obj)
     return reg
 
@@ -383,13 +409,20 @@ def build_trace_sinks(cfg: RunConfig, catalog: Registry | None = None) -> list[A
     return [_build_one_sink(s, catalog) for s in cfg.trace_sinks]
 
 
-def assemble(cfg: RunConfig) -> tuple[ModelProvider, Registry, EventBus]:
+def assemble(
+    cfg: RunConfig, *, allow_imports: bool = True
+) -> tuple[ModelProvider, Registry, EventBus]:
     """Turn a parsed config into the three things ``run_task`` needs: the
     provider, the run registry, and a bus whose canonical sink is configured.
-    Any ``trace_sinks`` are attached as isolated secondary destinations."""
+    Any ``trace_sinks`` are attached as isolated secondary destinations.
+
+    ``allow_imports`` defaults True for the operator-trusted CLI; pass False when
+    the config arrived over the network (``zu serve`` per-request override) so an
+    arbitrary ``module:Attr`` provider/plugin cannot be imported (and its
+    top-level code executed) by a remote caller."""
     catalog = _catalog()
-    provider = build_provider(cfg.provider, catalog)
-    registry = build_registry(cfg, catalog)
+    provider = build_provider(cfg.provider, catalog, allow_imports=allow_imports)
+    registry = build_registry(cfg, catalog, allow_imports=allow_imports)
     bus = EventBus(sink=build_sink(cfg, catalog))
     for trace_sink in build_trace_sinks(cfg, catalog):
         bus.add_destination(trace_sink)

@@ -53,18 +53,28 @@ def _grounded(leaf_norm: str, corpus: str) -> bool:
         start = i + 1
 
 
+# Separators that join a number to more digits to form a single larger value or
+# a compound numeric token: decimal/thousands (``.`` ``,``) AND the connectors in
+# dates, versions, times, ranges, SKUs and phone numbers (``-`` ``/`` ``:``). A
+# match flanked by one of these with a digit on its *outer* side is a fragment of
+# a longer token, not a standalone value — so "12" is not grounded by "12-2024",
+# nor "30" by "12:30", just as "14" is not grounded by "3.14".
+_NUM_SEPARATORS = frozenset(".,-/:")
+
+
 def _standalone(corpus: str, lo: int, hi: int) -> bool:
     """Are the chars flanking ``corpus[lo:hi]`` token boundaries, not part of a
-    longer alphanumeric token or a larger number?"""
+    longer alphanumeric token or a larger/compound number?"""
     before = corpus[lo - 1] if lo > 0 else ""
     after = corpus[hi] if hi < len(corpus) else ""
     if before.isalnum() or after.isalnum():
         return False
-    # A decimal/thousands separator adjacent to a digit on its outer side means
-    # this match is a slice of a larger number (e.g. "14" inside "3.14").
-    if before in ".," and corpus[lo - 2 : lo - 1].isdigit():
+    # A numeric separator adjacent to a digit on its outer side means this match
+    # is a slice of a larger number or compound token (e.g. "14" inside "3.14",
+    # "12" inside "12-2024", "30" inside "12:30").
+    if before in _NUM_SEPARATORS and corpus[lo - 2 : lo - 1].isdigit():
         return False
-    if after in ".," and corpus[hi + 1 : hi + 2].isdigit():
+    if after in _NUM_SEPARATORS and corpus[hi + 1 : hi + 2].isdigit():
         return False
     return True
 

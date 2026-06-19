@@ -11,14 +11,17 @@ in `packages/zu-redteam` and runs via `zu test-plugin <pkg>`.
 
 | Component | Status |
 |-----------|--------|
-| Out-of-band verdict observers (egress · exfil · provenance · resources · neighbour-health) | **Implemented**, deterministic (`zu_redteam.verdict`) |
-| The frozen regression corpus (the §4 attacks) | **Implemented** (`zu_redteam.corpus`) — runs on every gated plugin |
-| The attacker agent + tools + fleet | **Implemented** (`zu_redteam.attacker`): `ScriptedAttacker` (deterministic) |
+| Out-of-band verdict observers — egress · exfil · provenance · resources · neighbour-health | **Implemented**, deterministic (`zu_redteam.verdict`) |
+| Out-of-band verdict observer — host/filesystem effect (`HostEffect`, §3) | **Designed, not implemented**: the in-process gate has no host to act on, so escape/host-effect detection lands with the container gate below. `default_observers()` ships the five above, not this one. |
+| The frozen regression corpus (the §4 attacks) | **Implemented** (`zu_redteam.corpus`) — runs on every gated plugin, with the target's real plugins present |
+| The attacker agent — deterministic replay | **Implemented** (`zu_redteam.attacker.ScriptedAttacker`): replays the frozen corpus against the target. This is what the gate runs. |
+| The attacker tools + multi-specialist **fleet** (§2.3, §4) | **Designed, not wired into the deterministic gate**: `OBJECTIVES`, `FLEET`, `SendInput`/`ReadResponse`/`CraftPayload` are the spec for the live discovery path below; `ScriptedAttacker` does not iterate the fleet. |
 | Capability-envelope declaration on the `Tool` port | **Implemented** — recorded as `harness.envelope.declared`; observers judge against it |
+| Directed per-tool envelope probes | **Implemented** (`gate._directed_probes`) — every target tool is invoked once and judged against its own declaration. This, plus the observers, is what catches a real under-declaring tool. |
 | Gates: unit · contract · interop · adversarial | **Implemented**, run in-process, deterministic, in CI |
-| The container gate (real Docker, in production) | **Designed**; reported `SKIP` until an image is wired — same run, same observers |
-| Live frontier-model discovery (`LiveAttacker`) | **Opt-in** behind `ZU_REDTEAM_LIVE=1`; CI never depends on a live model |
-| Dormant-pivot probe · continuous runtime monitoring (§6) | **Designed**; the verdict observers are already deterministic detectors over the log, ready to run live |
+| The container gate (real Docker, in production) | **Designed, not implemented**; always reported `SKIP` (whether or not Docker is present) until an image is wired — the same run, same observers, in a container |
+| Live frontier-model discovery (`LiveAttacker`) | **Not implemented** — `LiveAttacker.run()` raises; it is gated behind `ZU_REDTEAM_LIVE=1` and wired per deployment. CI never depends on a live model. |
+| Dormant-pivot probe · continuous runtime monitoring (§6) | **Designed, not implemented**; the verdict observers are already deterministic detectors over the log, ready to run live |
 
 The deterministic gates are the always-on floor; the live discovery and the
 Docker container form are escalations on top of the same observers and corpus.
@@ -209,9 +212,13 @@ FAIL  iff  any verdict.* fired
 
 `coverage_met` is what defends against a *suppressed* attacker (PHILOSOPHY.md §3): a run that fired few attacks, or skipped whole objectives, fails regardless of whether a breach was seen.
 
+> **Status / honest scope.** The anti-suppression role above is the design for the **`LiveAttacker`** (not yet implemented), whose non-deterministic run *could* skip objectives. In the **deterministic gate that ships today**, coverage is structural and cannot be suppressed: the frozen corpus and a directed probe of **every** target tool always run. So the implemented check (`gate._adversarial_gate`) enforces two concrete things — (1) every declared target tool was directed-probed against its own envelope, and (2) the full corpus battery ran — and is *not* the live-attacker anti-suppression guard. `HostEffect`/escape is not among the shipped observers (see the status table), so "escape" is exercised in name only until the container gate exists.
+
 ---
 
 ## 4. The fleet
+
+> **Status / honest scope.** The fleet below is the **design for the live discovery path** (`LiveAttacker`, not yet implemented). The deterministic gate that ships today does **not** run a fleet of specialists: `ScriptedAttacker` replays the frozen corpus (with the target's real plugins present) and the gate directed-probes each target tool. `FLEET`/`Specialist`/`OBJECTIVES` are exported as the spec for that future path, not wired into the gate. The paragraphs below describe the intended live design.
 
 One generalist works, but the gate runs a **fleet** of specialists, orchestrated by Zu — each a copy of the attacker agent with a focused brief and a subset of objectives. Specialists dig deeper than a generalist, and a fleet is far harder to injection-suppress all at once.
 
@@ -282,6 +289,8 @@ if the target has OPEN egress (reviewed, high-trust):
 
 The probe resolves the attack two ways: for the common case (a declared allowlist) the pivot is impossible because the handler is unreachable; for the open-egress case the pivot is contained because the plugin can do nothing with the payload.
 
+> **Status / honest scope.** The dormant-pivot probe is **designed, not implemented** — there is no `controlled_handler`/`handler.test.invalid` two-phase handler in the codebase. For a tool with a **declared allowlist**, the implemented `EgressBreach` observer already fires on any reach to an undeclared host, so the "pivot is impossible" half holds today. For the **open-egress** case, the "checks CONTAINMENT instead" half is not separately implemented; the real backstop that ships is `ExfilBreach` (secret-in-URL / secret-in-result) plus the static no-code-execution posture — `EgressBreach` deliberately does not judge containment for an open-egress tool.
+
 ### 6.2 The observers never stop — they run in production too
 
 The verdict observers in §3 are not gate-only. They are **deterministic detectors over the event log**, and the event log exists in production exactly as it does in CI. So the same checks run continuously, live:
@@ -301,7 +310,7 @@ The one combination the envelope cannot fully neutralise is a plugin that **legi
 ## 7. What this guarantees, and what it does not
 
 - **It cannot be gamed into a false PASS.** Certification is made out of band by deterministic observers the target cannot reach. Hijacking the attacker model changes *which attacks are tried*, never the verdict.
-- **The residual risk is a weaker attacker, not a false pass.** A compromised attacker policy can fail to *find* a real hole. That false negative is contained by the always-on deterministic corpus, the diverse fleet, the `coverage_met` requirement, and the meta-red-team.
+- **The residual risk is a weaker attacker, not a false pass.** A compromised attacker policy can fail to *find* a real hole. Today that false negative is contained by the always-on deterministic corpus and the directed per-tool envelope probes (both implemented). The diverse fleet, the `coverage_met` anti-suppression requirement, and the meta-red-team are part of the **live-discovery design** (not yet implemented — see the status table) that hardens this further once `LiveAttacker` lands.
 - **The attacker is itself contained.** It runs caged, so attacking it cannot become an escape.
 
 This is the same principle the whole runtime rests on, applied to its own test gate: **the model proposes, the harness disposes — and the judge sits where the judged can never reach it.**

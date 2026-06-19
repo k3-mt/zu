@@ -228,16 +228,33 @@ async def _adversarial_gate(
         findings.append(_finding(f"probe:{tool_name}", "envelope", run, probe.neighbours))
 
     breaches = [f"{f.id}: {b}" for f in findings for b in f.breaches]
-    covered = len({f.objective for f in findings})
     if breaches:
         return GateResult("adversarial", FAIL, "; ".join(breaches)), findings
+
+    # Coverage is two real things, not the corpus's own constant objective set
+    # (which is always present regardless of the target and so proves nothing):
+    #   1. every declared target TOOL was actually directed-probed against its own
+    #      envelope — a tool silently left unexercised is a hole, so it FAILs;
+    #   2. the standard frozen-corpus battery ran in full (its objective breadth
+    #      is the deterministic floor — NOT an anti-suppression guard, which only
+    #      applies to the non-deterministic LiveAttacker).
+    target_tools = {name for kind, name, _ in plugins if kind == "tools"}
+    probed = {f.id[len("probe:"):] for f in findings if f.id.startswith("probe:")}
+    unprobed = target_tools - probed
+    if unprobed:
+        return GateResult(
+            "adversarial", FAIL,
+            f"target tool(s) not exercised by a directed probe: {sorted(unprobed)}",
+        ), findings
+    covered = len({f.objective for f in findings})
     if covered < min_coverage:
         return GateResult(
             "adversarial", FAIL,
-            f"coverage not met: {covered} objectives exercised (< {min_coverage})",
+            f"corpus battery incomplete: {covered} objectives ran (< {min_coverage})",
         ), findings
     return GateResult(
-        "adversarial", PASS, f"{len(results)} corpus attacks + probes; envelope held"
+        "adversarial", PASS,
+        f"{len(results)} corpus attacks + {len(target_tools)} tool probe(s); envelope held",
     ), findings
 
 

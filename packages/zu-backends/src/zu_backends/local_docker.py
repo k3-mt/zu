@@ -54,11 +54,17 @@ _RENDER_ENTRYPOINT = "zu-render"
 class LocalDockerBackend:
     name = "local-docker"
 
-    def __init__(self, client: Any = None, *, startup_timeout_s: int = 30) -> None:
+    def __init__(
+        self, client: Any = None, *, startup_timeout_s: int = 30, exec_timeout_s: int = 45
+    ) -> None:
         # client is a testability/config seam (an already-built docker client);
         # None -> connect to the local daemon from the environment on first use.
         self._client = client
         self.startup_timeout_s = startup_timeout_s
+        # Overall deadline for one in-container render; a hair above the
+        # entrypoint's own 30s page timeout so the inner timeout normally wins
+        # and we only trip on a truly wedged exec.
+        self.exec_timeout_s = exec_timeout_s
 
     def _docker(self) -> Any:
         if self._client is not None:
@@ -144,12 +150,32 @@ class LocalDockerBackend:
     async def exec(self, sandbox: _Sandbox, call: ToolCall) -> dict:
         """Run the tool call inside the container and return its observation."""
         url = call.args["url"]
-        exit_code, output = await asyncio.to_thread(
-            sandbox.container.exec_run, [_RENDER_ENTRYPOINT, url]
-        )
-        text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
+        argv = [_RENDER_ENTRYPOINT, url]
+        # Pass an explicit viewport through to the entrypoint when the tool asked
+        # for one, so a render is reproducible and responsive pages can be sized.
+        width, height = call.args.get("width"), call.args.get("height")
+        if width and height:
+            argv += ["--width", str(int(width)), "--height", str(int(height))]
+        # demux=True keeps stdout and stderr SEPARATE. Chromium under
+        # --no-sandbox is extremely noisy on stderr (GPU/font/dbus warnings); if
+        # that noise were merged into stdout it would corrupt the single JSON
+        # line the entrypoint prints and turn successful renders into "non-JSON
+        # output" errors. We parse stdout only; stderr is kept for diagnostics.
+        # Bounded by an overall deadline so a wedged in-container render can't
+        # hang the awaiting coroutine forever (the entrypoint also self-times-out).
+        try:
+            exit_code, streams = await asyncio.wait_for(
+                asyncio.to_thread(sandbox.container.exec_run, argv, demux=True),
+                timeout=self.exec_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            return {"status": 504, "html": "",
+                    "error": f"render timed out after {self.exec_timeout_s}s"}
+        stdout, stderr = streams if isinstance(streams, tuple) else (streams, None)
+        text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout or "")
         if exit_code != 0:
-            return {"status": 500, "html": "", "error": f"render failed (exit {exit_code}): {text[:500]}"}
+            err = (stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else "") or text
+            return {"status": 500, "html": "", "error": f"render failed (exit {exit_code}): {err[:500]}"}
         try:
             return json.loads(text)
         except ValueError:

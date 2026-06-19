@@ -103,6 +103,21 @@ def test_grounding_rejects_value_inside_a_decimal() -> None:
     assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"q": 5}), qty) is None
 
 
+def test_grounding_rejects_value_inside_a_compound_token() -> None:
+    # A short number must not be grounded by a fragment of a date/version/time/
+    # SKU/phone joined by - / : — "12" is not on a page that only says "12-2024".
+    date = _ctx({"html": "<p>Released 12-2024 worldwide.</p>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"m": 12}), date) is not None
+    ver = _ctx({"html": "<p>Build 4/19 shipped.</p>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"b": 19}), ver) is not None
+    time = _ctx({"html": "<p>Starts at 12:30 sharp.</p>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"t": 30}), time) is not None
+    # A genuinely standalone number flanked by a separator-with-no-adjacent-digit
+    # (e.g. a slash ending a path segment) still grounds.
+    path = _ctx({"html": "<a href='/items/42/'>item</a>"})
+    assert GroundingValidator().check(Result(status=Status.SUCCESS, value={"id": 42}), path) is None
+
+
 def test_grounding_is_unicode_token_aware() -> None:
     # The flank check is Unicode-aware (str.isalnum), so a value is not grounded
     # as a fragment of a non-ASCII word.

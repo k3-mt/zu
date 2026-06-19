@@ -109,8 +109,16 @@ def _to_model_response(resp: Any) -> ModelResponse:
     # Normalised usage shape shared with the openai-compatible adapter:
     # input/output/total. Anthropic's API doesn't return a total, so compute it
     # (input + output) — both adapters hand the cost projection the same shape.
-    in_tok, out_tok = resp.usage.input_tokens, resp.usage.output_tokens
-    usage = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok}
+    # Guard a missing/partial usage object the same way the openai adapter does,
+    # so a response without usage degrades to {} rather than raising AttributeError
+    # — the two adapters behave identically on this edge, not just the happy path.
+    raw_usage = getattr(resp, "usage", None)
+    if raw_usage is None:
+        usage: dict = {}
+    else:
+        in_tok = getattr(raw_usage, "input_tokens", 0) or 0
+        out_tok = getattr(raw_usage, "output_tokens", 0) or 0
+        usage = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok}
     return ModelResponse(
         text="".join(text_parts) or None,
         tool_calls=calls,

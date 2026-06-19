@@ -28,6 +28,34 @@ RENDER_KEYS: frozenset[str] = frozenset({
     "kind", "status", "model", "usage", "rendered", "count", "selector",
 })
 
+# An allowlisted key renders verbatim only up to this many characters. The
+# allowlist is a *key-name* judgement ("this field is control-plane"), but a
+# producer that puts free text — an error ``detail``, a model id, a ``selector``
+# — under one of those keys would otherwise leak it verbatim. Capping the value
+# keeps the control-plane signal (you still see the field and its head) while
+# refusing to become an unbounded passthrough for whatever lands under the key.
+_RENDER_STR_CAP = 200
+
+
+def _cap(v: Any) -> Any:
+    """Render an allowlisted value, but never as an unbounded verbatim blob.
+
+    Scalars render as-is; a short string renders verbatim; an over-long string
+    is truncated with a marker; a dict/list (e.g. ``usage``) renders only if it
+    is small and shallow, else it is summarized — so an allowlisted key whose
+    value shape changes (a plugin stuffing content into ``usage``) cannot leak."""
+    if _is_scalar(v):
+        return v
+    if isinstance(v, str):
+        return v if len(v) <= _RENDER_STR_CAP else v[:_RENDER_STR_CAP] + "…[+%d]" % (len(v) - _RENDER_STR_CAP)
+    if isinstance(v, dict):
+        # Small, all-scalar dicts (token-usage counters) render; anything richer
+        # is summarized rather than walked and trusted verbatim.
+        if len(v) <= 12 and all(_is_scalar(x) for x in v.values()):
+            return {str(k): x for k, x in v.items()}
+        return _summary(v)
+    return _summary(v)
+
 
 def _is_scalar(v: Any) -> bool:
     return v is None or isinstance(v, (int, float, bool))
@@ -53,8 +81,10 @@ def scope_payload(payload: dict, *, full: bool = False) -> dict:
         return payload
     out: dict[str, Any] = {}
     for k, v in payload.items():
-        if k in RENDER_KEYS or _is_scalar(v):
+        if _is_scalar(v):
             out[k] = v
+        elif k in RENDER_KEYS:
+            out[k] = _cap(v)
         elif k == "args" and isinstance(v, dict):
             out[k] = {ak: (av if _is_scalar(av) else _summary(av)) for ak, av in v.items()}
         else:

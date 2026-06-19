@@ -183,7 +183,9 @@ def _escalation_registry(offline: bool) -> tuple[Registry, Any]:
     reg = Registry()
     reg.register("tools", "http_fetch", HttpFetch(allow_private=True, transport=httpx.MockTransport(handler)))
     reg.register("tools", "html_parse", HtmlParse())
-    reg.register("tools", "render_dom", RenderDom(backend=backend))
+    # allow_private: the offline demo renders a non-resolvable fixture host
+    # through a fake browser backend (no real egress), so skip the SSRF DNS check.
+    reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))
     for name, det in [
         ("empty", EmptyDetector()),
         ("error", ErrorDetector()),

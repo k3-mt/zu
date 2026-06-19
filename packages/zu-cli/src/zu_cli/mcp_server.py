@@ -18,6 +18,7 @@ Optional dependency (the ``mcp`` extra): ``pip install 'zu-runtime[mcp]'``.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -27,6 +28,8 @@ from zu_core.registry import GROUPS, Registry
 
 from .config import ConfigError, RunConfig, assemble, coerce_config, coerce_task
 from .trace import format_event
+
+log = logging.getLogger("zu.mcp")
 
 # Config/task coercion (a tool arg may be a dict or a file path) is shared with
 # `zu serve` and the embed facade — see zu_cli.config. The MCP tools accept a str
@@ -112,8 +115,8 @@ def build_server() -> FastMCP:
             if line and ctx is not None:
                 try:
                     await ctx.info(line)  # live to the client; never break the run
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001 - a transport hiccup must not break the run
+                    log.debug("ctx.info failed (dropping a live trace line): %s", exc)
 
         bus.subscribe(_on_event)
         # The same observability hook: queue any blocked attempt for review.

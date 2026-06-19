@@ -98,6 +98,21 @@ def test_bot_wall_fires_on_captcha() -> None:
     assert v is not None and v.severity is Severity.ESCALATE
 
 
+def test_bot_wall_does_not_fire_on_innocent_phrase() -> None:
+    # A real article that happens to contain a weak phrase must NOT escalate
+    # without a corroborating Cloudflare fingerprint (regression: loose match).
+    page = _ctx({"html": "<article><h1>Just a moment in history</h1>"
+                          "<p>Attention required: read the safety notice first.</p></article>"})
+    assert BotWallDetector().inspect(page) is None
+
+
+def test_bot_wall_fires_on_weak_phrase_with_cloudflare_fingerprint() -> None:
+    page = _ctx({"html": "<title>Just a moment...</title>"
+                         "<div class='cf-browser-verification'></div><!-- cf-ray: abc -->"})
+    v = BotWallDetector().inspect(page)
+    assert v is not None and v.severity is Severity.ESCALATE
+
+
 def test_detectors_discoverable() -> None:
     reg = Registry()
     reg.discover()

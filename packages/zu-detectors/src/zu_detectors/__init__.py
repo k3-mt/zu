@@ -18,14 +18,15 @@ _CONTENT_KEYS = ("html", "text", "content")
 def _html_of(ctx) -> str:
     """Best-effort extraction of the page content from a RunContext observation.
 
-    Reads the first present content key (html, then text, then content) so the
-    html/text/content shapes all reach the markup-based detectors equally."""
+    Concatenates *every* present content key (html, text, content) rather than
+    returning only the first, so a marker detector is never blind to a tool that
+    splits content across keys — the same all-keys view the ``empty`` detector
+    uses, so the detectors agree on what "the content" is."""
     obs = getattr(ctx, "observation", None)
     if isinstance(obs, dict):
-        for key in _CONTENT_KEYS:
-            value = obs.get(key)
-            if value:
-                return value
+        parts = [v for k in _CONTENT_KEYS if isinstance(v := obs.get(k), str) and v]
+        if parts:
+            return "\n".join(parts)
     return ""
 
 

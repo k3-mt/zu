@@ -19,9 +19,11 @@ _RENDERED = "<html><body><h1>Rendered</h1></body></html>"
 
 
 class _FakeContainer:
-    def __init__(self, exit_code: int, output: bytes, status: str = "running") -> None:
+    def __init__(self, exit_code: int, output: bytes, status: str = "running",
+                 stderr: bytes = b"") -> None:
         self._exit_code = exit_code
         self._output = output
+        self._stderr = stderr
         self.removed = False
         self.exec_calls: list[list[str]] = []
         self.id = "fake-container-id"
@@ -31,8 +33,12 @@ class _FakeContainer:
     def reload(self) -> None:
         self.reloads += 1
 
-    def exec_run(self, cmd):
+    def exec_run(self, cmd, demux=False):
+        # Mirror the real Docker SDK: demux=True returns (stdout, stderr) so the
+        # backend can read stdout in isolation from Chromium's noisy stderr.
         self.exec_calls.append(cmd)
+        if demux:
+            return self._exit_code, (self._output, self._stderr)
         return self._exit_code, self._output
 
     def remove(self, force: bool = False) -> None:
@@ -139,6 +145,28 @@ async def test_non_json_stdout_becomes_error_observation() -> None:
     assert obs["raw"] == _RENDERED
     assert "html" not in obs  # never presented as page content
     assert container.removed is True
+
+
+async def test_noisy_stderr_does_not_corrupt_json_stdout() -> None:
+    # Regression: Chromium under --no-sandbox spams stderr (GPU/font/dbus
+    # warnings). With demux those must NOT bleed into the JSON line on stdout,
+    # or every real render would be misread as "non-JSON output". The backend
+    # parses stdout alone; stderr is ignored on success.
+    payload = json.dumps({"status": 200, "html": _RENDERED, "url": "http://spa.test/"}).encode()
+    noisy = b"[WARNING] dbus: failed\nlibGL error: MESA-LOADER\n"
+    container = _FakeContainer(exit_code=0, output=payload, stderr=noisy)
+    obs = await _render(container)
+    assert obs["html"] == _RENDERED and obs["status"] == 200
+
+
+async def test_viewport_args_are_passed_to_the_entrypoint() -> None:
+    # A width/height in the tool call reaches zu-render as argv flags.
+    container = _FakeContainer(exit_code=0, output=b'{"status":200,"html":"","url":"http://spa.test/"}')
+    backend = LocalDockerBackend(client=_FakeClient(container))
+    sandbox = await backend.launch({"image": "img", "tier": 2})
+    await backend.exec(sandbox, ToolCall(
+        name="render_dom", args={"url": "http://spa.test/", "width": 375, "height": 812}))
+    assert container.exec_calls == [["zu-render", "http://spa.test/", "--width", "375", "--height", "812"]]
 
 
 async def test_missing_docker_sdk_raises_clear_error() -> None:

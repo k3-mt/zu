@@ -164,6 +164,26 @@ def test_provider_by_import_reference():
     assert provider.model == "claude-x"
 
 
+def test_import_reference_refused_when_imports_disallowed():
+    # The networked surface (per-request config) forbids the module:Attr door,
+    # so a remote caller cannot make the server import & execute arbitrary code.
+    prov = ProviderConfig(name="zu_providers.anthropic:AnthropicProvider", model="claude-x")
+    with pytest.raises(ConfigError, match="does not permit arbitrary"):
+        build_provider(prov, allow_imports=False)
+
+    plug = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(validators=["zu_validators.schema:SchemaValidator"]),
+    )
+    with pytest.raises(ConfigError, match="does not permit arbitrary"):
+        build_registry(plug, allow_imports=False)
+
+    # A short, installed plugin name is still fine on the restricted surface.
+    named = RunConfig(provider=ProviderConfig(name="scripted"),
+                      plugins=PluginsConfig(validators=["schema"]))
+    assert build_registry(named, allow_imports=False).names("validators") == ["schema"]
+
+
 # --- the event sink is configured --------------------------------------------
 
 

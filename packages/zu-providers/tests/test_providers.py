@@ -251,6 +251,29 @@ def test_to_openai_matches_synthesised_tool_ids() -> None:
     assert out[2]["tool_call_id"] == call_id
 
 
+# An assistant turn that reasons *and* calls a tool: the text must survive into
+# both wire formats (regression: it used to be silently dropped on replay).
+_TOOL_HISTORY_WITH_TEXT: list[dict] = [
+    {"role": "user", "content": "q"},
+    {"role": "assistant", "content": "I'll fetch the page first.",
+     "tool_calls": [{"name": "http_fetch", "args": {"url": "u"}}]},
+    {"role": "tool", "name": "http_fetch", "content": "{\"html\": \"x\"}"},
+]
+
+
+def test_anthropic_preserves_assistant_text_with_tool_calls() -> None:
+    _, out = to_anthropic_messages(_TOOL_HISTORY_WITH_TEXT)
+    blocks = out[1]["content"]
+    assert blocks[0] == {"type": "text", "text": "I'll fetch the page first."}
+    assert blocks[1]["type"] == "tool_use"  # text leads, tool_use follows
+
+
+def test_openai_preserves_assistant_text_with_tool_calls() -> None:
+    out = to_openai_messages(_TOOL_HISTORY_WITH_TEXT)
+    assert out[1]["content"] == "I'll fetch the page first."
+    assert out[1]["tool_calls"][0]["function"]["name"] == "http_fetch"
+
+
 # --- the adapter drives the real loop (full assistant/tool history) -----------
 
 

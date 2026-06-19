@@ -53,8 +53,12 @@ class JsShellDetector:
         html = _html_of(ctx)
         if not html:
             return None
+        lowered = html.lower()
         looks_like_shell = _contains_any(html, _SHELL_MARKERS)
-        script_heavy = "<script" in html.lower()
+        # The page defers its content to JS: a literal <script>, OR a module
+        # graph pulled in via <link rel="modulepreload"> with no inline script
+        # (a modern bundler shape the bare "<script" check would miss).
+        script_heavy = "<script" in lowered or "modulepreload" in lowered
         thin = len(_visible_text(html)) < _MIN_VISIBLE_TEXT
         if looks_like_shell and script_heavy and thin:
             return Verdict(

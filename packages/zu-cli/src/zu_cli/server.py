@@ -136,9 +136,14 @@ def create_app(
     @app.post("/run")
     async def run_endpoint(req: RunRequest) -> dict:
         try:
+            # A per-request config arrived over the network: it may select
+            # installed, named plugins but NOT name an arbitrary 'module:Attr' to
+            # import (that executes code). The operator's server default is
+            # trusted and keeps the full import door.
+            allow_imports = req.config is None
             cfg = coerce_config(req.config) if req.config is not None else default_cfg
             spec = coerce_task(req.task, cfg.budget, allow_paths=False)
-            provider, registry, bus = assemble(cfg)
+            provider, registry, bus = assemble(cfg, allow_imports=allow_imports)
         except ConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         bus.subscribe(_tee)  # feed the dashboard + review queue
@@ -159,20 +164,34 @@ def create_app(
         """Run a task and stream the loop live as Server-Sent Events — one
         ``event`` frame per loop event, then a final ``result`` and ``done``."""
         try:
+            allow_imports = req.config is None  # see /run: networked config can't import code
             cfg = coerce_config(req.config) if req.config is not None else default_cfg
             spec = coerce_task(req.task, cfg.budget, allow_paths=False)
-            provider, registry, bus = assemble(cfg)
+            provider, registry, bus = assemble(cfg, allow_imports=allow_imports)
         except ConfigError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
-        queue: asyncio.Queue = asyncio.Queue()
-        bus.subscribe(lambda event: queue.put_nowait(("event", event)))
+        # Bounded queue with drop-on-full: a slow/disconnected SSE consumer must
+        # never let events accumulate without limit (the same backpressure
+        # posture the global hub takes). The producer is a sync bus subscriber,
+        # so it can only put_nowait — full means drop, never block the run.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+
+        def _enqueue(event: Any) -> None:
+            try:
+                queue.put_nowait(("event", event))
+            except asyncio.QueueFull:
+                pass  # slow consumer; the canonical log is unaffected
+
+        bus.subscribe(_enqueue)
         bus.subscribe(_tee)  # also feed the global dashboard + review queue
 
         async def runner() -> None:
             try:
                 result = await run_task(spec, provider, registry, bus)
                 await queue.put(("result", result))
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001 - report as a stream frame, not a 500
                 await queue.put(("error", exc))
             finally:
@@ -193,7 +212,15 @@ def create_app(
                         yield sse("done", {})
                         break
             finally:
-                await task
+                # If the client disconnected mid-run, the generator is closed
+                # before "done": cancel the run rather than spending model tokens
+                # for nobody and leaving the runner blocked on a full queue.
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown
+                    pass
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
