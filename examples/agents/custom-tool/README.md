@@ -13,7 +13,13 @@ custom-tool/
 ```bash
 zu run examples/agents/custom-tool/          # run the bundle, offline, no key
 zu run examples/agents/custom-tool/ --sandboxed   # ...inside a hardened container
+zu pack examples/agents/custom-tool/ -t my-agent:1   # ...bake it into a standalone image
 ```
+
+`--sandboxed` mounts the bundle, so it uses the base image's packages. If your
+tools need extra pip deps, add a `requirements.txt` and `zu pack` bakes them into
+a portable image (`docker run my-agent:1`, or point `--sandboxed` at it via
+`ZU_SANDBOX_IMAGE`).
 
 How it works:
 

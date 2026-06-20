@@ -51,6 +51,35 @@ def test_local_commands_pass_through_only_set_keys(monkeypatch):
     assert "x" not in run  # the value is passed through by name, never embedded
 
 
+def test_pack_dockerfile_bakes_bundle_and_requirements():
+    df = deploy.pack_dockerfile_text("zu:base")
+    assert "FROM zu:base" in df
+    assert "COPY . /agent" in df              # the whole bundle
+    assert "requirements.txt" in df           # its deps installed at build time
+    assert "PYTHONPATH=/agent" in df          # tools.x:Class resolves
+    assert "USER 10001" in df                 # runs non-root
+    assert '"/agent/agent.yaml"' in df        # default command runs the agent
+
+
+def test_zu_pack_dry_run_prints_dockerfile_and_command(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "agent.yaml").write_text(
+        "provider: { name: scripted }\nplugins: { validators: [] }\ntask: { query: q }\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["pack", ".", "-t", "my-agent:1", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "FROM zu:latest" in result.output
+    assert "docker build -t my-agent:1 -f -" in result.output
+
+
+def test_zu_pack_rejects_a_bad_bundle(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "agent.yaml").write_text("provider: { name: scripted }\n", encoding="utf-8")  # no task
+    result = runner.invoke(app, ["pack", ".", "-t", "x:1", "--dry-run"])
+    assert result.exit_code == 2 and "config error" in result.output
+
+
 def test_zu_deploy_compose_cli(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _seed_config(tmp_path)

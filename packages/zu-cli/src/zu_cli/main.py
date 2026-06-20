@@ -475,6 +475,56 @@ def deploy(
 
 
 @app.command()
+def pack(
+    bundle: str = typer.Argument(".", help="The bundle directory (agent.yaml + tools/)."),
+    tag: str = typer.Option(..., "--tag", "-t", help="Image tag to build, e.g. my-agent:1."),
+    base: str = typer.Option(
+        "zu:latest", "--base", help="Base image with the Zu runtime to build FROM."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the Dockerfile + build command instead of building."
+    ),
+) -> None:
+    """Bake a bundle into a standalone image — agent.yaml + tools/ + its
+    requirements.txt, installed at build time.
+
+    Use this when a bundle's tools have extra pip dependencies (the `--sandboxed`
+    mount only sees the base image's packages). The packed image runs the agent on
+    `docker run`; point `--sandboxed` at it (ZU_SANDBOX_IMAGE) to run it contained.
+    """
+    from . import deploy as _deploy
+
+    try:
+        load_agent(bundle)  # validate the bundle (agent.yaml present + resolves)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    df = _deploy.pack_dockerfile_text(base)
+    build = _deploy.pack_build_command(tag, bundle)
+    if dry_run:
+        typer.echo(df)
+        typer.echo("$ " + " ".join(build))
+        return
+
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is None:
+        typer.echo("docker not found — install Docker to build the image.", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"packing {bundle} → {tag} (base {base})…")
+    if subprocess.run(build, input=df.encode()).returncode != 0:
+        typer.echo("docker build failed", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(
+        f"\n✅ built {tag}\n"
+        f"  run:        docker run --rm -e ANTHROPIC_API_KEY {tag}\n"
+        f"  contained:  ZU_SANDBOX_IMAGE={tag} zu run --sandboxed {bundle}"
+    )
+
+
+@app.command()
 def mcp() -> None:
     """Run the MCP server (stdio) so a coding agent — Claude Code, Cursor, … —
     can design, validate, run, and inspect Zu agents for you in natural language.

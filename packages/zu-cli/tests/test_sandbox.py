@@ -106,6 +106,32 @@ async def test_launcher_runs_the_agent_inside_the_box() -> None:
 
 
 @pytest.mark.docker
+def test_zu_pack_builds_a_runnable_bundle_image() -> None:
+    # `zu pack` bakes the bundle (its tools/, and requirements if any) into a
+    # standalone image FROM the base; running it executes the agent with the
+    # bundle's tools baked in.
+    import subprocess
+    from pathlib import Path
+
+    from zu_cli import deploy
+
+    bundle = Path(__file__).resolve().parents[3] / "examples" / "agents" / "custom-tool"
+    base = os.environ.get("ZU_SANDBOX_IMAGE", "zu:test")
+    tag = "zu-custom-tool:packtest"
+    df = deploy.pack_dockerfile_text(base)
+    assert subprocess.run(deploy.pack_build_command(tag, str(bundle)),
+                          input=df.encode()).returncode == 0
+    try:
+        out = subprocess.run(["docker", "run", "--rm", tag],
+                             capture_output=True, text=True, timeout=120)
+        assert out.returncode == 0, out.stderr
+        assert "status : success" in out.stdout
+        assert "greeting" in out.stdout       # the baked custom tool ran
+    finally:
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+
+
+@pytest.mark.docker
 async def test_launcher_mounts_a_bundles_own_tools() -> None:
     # A bundle's custom tools/ are not in the image — mounting the bundle dir lets
     # its `tools.x:Class` import-refs resolve INSIDE the contained container.
