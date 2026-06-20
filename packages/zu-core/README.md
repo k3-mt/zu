@@ -22,8 +22,7 @@ browser, or any concrete adapter. It should be readable in an afternoon.
 
 `ModelProvider`, `Tool`, `Detector`, `Validator`, `SandboxBackend`, `EventSink`
 — each a runtime-checkable structural `Protocol`. A plugin implements the
-*shape*; it never subclasses a framework. See
-[`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md).
+*shape*; it never subclasses a framework.
 
 This package registers **no plugins** — it defines the contracts every other
 package plugs into.

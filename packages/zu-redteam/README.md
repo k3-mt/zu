@@ -1,9 +1,9 @@
 # zu-redteam
 
 The plugin-test **gate** and the **adversarial red team** — the machinery behind
-[`docs/PHILOSOPHY.md`](../../docs/PHILOSOPHY.md) §3 and
-[`docs/RED_TEAM.md`](../../docs/RED_TEAM.md). The red team is itself a Zu agent:
-Zu is the runtime on both sides of the gate.
+the capability-envelope philosophy and the red-team design (in the published
+docs). The red team is itself a Zu agent: Zu is the runtime on both sides of the
+gate.
 
 This is test/CI infrastructure — it is **not** loaded by a deployed agent. Run it
 with `zu test-plugin <pkg>` (install via `pip install 'zu-runtime[test]'`).

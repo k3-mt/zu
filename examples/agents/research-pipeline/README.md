@@ -21,4 +21,5 @@ What it shows — the robust way to run multiple phases:
 
 Pipelines are *code* (not a `task.yaml`), because that keeps each phase
 independently validated, budgeted, and auditable — staging without giving up the
-per-run provenance guarantee. See **`docs/BUILD_AN_AGENT.md` → Multi-phase agents**.
+per-run provenance guarantee. See the **Multi-phase agents** section of the
+build-an-agent guide (published docs).

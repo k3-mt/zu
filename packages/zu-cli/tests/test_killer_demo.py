@@ -6,9 +6,6 @@ and assert the real path requires a model and is wired to a real adapter.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 from typer.testing import CliRunner
 
@@ -110,14 +107,3 @@ def test_zu_demo_real_escalation_reports_missing_docker_path():
     )
     assert result.exit_code == 1
     assert "needs Docker" in result.output
-
-
-def test_example_wrapper_offline_subprocess():
-    demo_path = Path(__file__).resolve().parents[3] / "examples" / "killer_demo.py"
-    import subprocess
-
-    proc = subprocess.run(
-        [sys.executable, str(demo_path), "--offline"], capture_output=True, text=True, timeout=60
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "Example Domain" in proc.stdout

@@ -38,8 +38,7 @@ three disciplines no one else ships as a framework:
   filesystem/syscall limits) is the job of a sandbox backend: real, and enforced in the
   Docker/container path (`zu-backends`, the red-team container form), but **opt-in and
   off by default**. Run untrusted tools behind that backend — do not assume the base
-  runtime contains a tool just because it declares a narrow envelope. See
-  [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) and [`docs/RED_TEAM_CONTAINER.md`](docs/RED_TEAM_CONTAINER.md).
+  runtime contains a tool just because it declares a narrow envelope.
 
 ### Containing a run
 
@@ -119,8 +118,7 @@ zu demo --offline                     # scripted self-test (no key) — proves w
 **Prerequisites — the requirement ladder:** Python 3.11+ (always) · an **API key**
 for a real model · **+ network** for tier-1 web tools (`http_fetch`/`html_parse`) ·
 **+ Docker** only for the tier-2 browser (`render_dom`). So tier 1 needs *network,
-not Docker*; only the real browser tier needs Docker (and that image isn't
-published yet). See [`docs/QUICKSTART.md`](docs/QUICKSTART.md#prerequisites).
+not Docker*; only the real browser tier needs Docker.
 
 ```
 providers   anthropic, openai-compatible, scripted
@@ -159,32 +157,25 @@ agents for you in natural language — and stream the run back live. One stdio
 server, every MCP client; register it once. See
 [`examples/integrations/`](examples/integrations/).
 
-**→ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md)** — install, define
-a task + config, embed, serve, containerize, schedule, and write your own plugin.
+**→ Runnable examples:** [`examples/agents/`](examples/agents/) — from one-shot
+extraction to a multi-phase pipeline, each tested offline.
 
 Every built-in above is registered through the **same** plugin API you'd use for your
 own — which is how we prove the plugin system is real, not a second-class add-on.
 
-See the whole arc in one run — zero setup, no API key, no Docker (from a clone of
-this repo):
-
-```bash
-python examples/killer_demo.py
-```
-
-It fetches a JS-heavy page, **fails on JavaScript, escalates to a browser**, and
-returns **validated** structured data, then prints the queryable event log — all
-three pillars in one run. Add `--provider anthropic --model claude-sonnet-4-6`
-(with a key set) to watch a real model make the same escalation decision.
-
 ## The five-minute promise (real today)
 
-A developer runs one command and watches an agent fetch a page, **fail on a
-JavaScript site, escalate to a browser, and return validated structured data** —
-with the event log queryable afterward. That single arc demonstrates all three
-pillars in one run, and it ships as [`examples/killer_demo.py`](examples/killer_demo.py):
-deterministic with the fake model and saved fixtures, or pointed at any real
-model with one flag.
+See the whole arc in one command — zero setup, no API key, no Docker:
+
+```bash
+zu demo --offline --type escalation
+```
+
+It fetches a page, **fails on JavaScript, escalates to a browser**, and returns
+**validated** structured data, then prints the queryable event log — all three
+pillars in one run, deterministic with the fake model and saved fixtures. Drop
+`--offline` and add `--model claude-sonnet-4-6` (with a key) to watch a real model
+make the same escalation decision.
 
 ## Architecture in one breath
 
@@ -205,15 +196,17 @@ zu/
     zu-redteam/     # the plugin-test gate + adversarial red team (zu test-plugin)
     zu-cli/         # the `zu` command + `zu serve` (HTTP)
     zu/             # the `import zu` embed facade (published as zu-runtime)
-  examples/         # runnable demos (the killer demo lives here)
+    zu-testing/     # shared test kit (fakes, fixtures, pytest plugin)
+  examples/         # runnable example agents + integration configs
+  validation/       # end-to-end proof suites (containment, red-team)
 ```
 
 ## Documentation
 
-- **[`docs/BUILD_AN_AGENT.md`](docs/BUILD_AN_AGENT.md) — start here.** The guided path from `zu init` to a tested, red-teamed, deployed agent: design the escalation, pick the model(s), supply credentials, test, contain, ship.
-- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — reference for each surface: install, define a task + config, embed, serve, containerize, schedule, and write your own plugin
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the small core and the six ports, in depth
-- [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — the principles every decision (and every plugin) is held to
+Full documentation (quickstart, the build-an-agent guide, architecture,
+philosophy, red-team) is published separately. In this repo:
+
+- [`examples/agents/`](examples/agents/) — runnable example agents (start here): one-shot extraction and a multi-phase pipeline
 - [`AGENTS.md`](AGENTS.md) — how to navigate and extend this repo (for AI agents and new humans)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up from a clone (`uv sync`), test, and submit changes
 

@@ -533,7 +533,7 @@ def test_plugin(
     adversarial — the frozen red-team corpus + directed probes, judged by
     out-of-band verdict observers (the attacker never certifies). The container
     gate is the production form, reported when Docker is present. See
-    docs/RED_TEAM.md. Exits non-zero if the envelope did not hold.
+    the red-team docs. Exits non-zero if the envelope did not hold.
     """
     try:
         from zu_redteam import run_gate

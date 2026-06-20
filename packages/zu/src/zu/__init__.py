@@ -59,7 +59,7 @@ __version__ = "0.1.0"
 
 # In-process plugin registration decorators, re-exported from the core registry
 # so the documented ``@zu.tool`` / ``@zu.detector`` / … surface (see
-# docs/ARCHITECTURE.md and AGENTS.md) actually resolves on ``import zu``. They
+# the architecture docs and AGENTS.md) actually resolves on ``import zu``. They
 # register onto the process-wide REGISTRY the loop reads, so a decorator-
 # registered plugin is visible to ``zu.run`` and ``zu plugins`` alike.
 __all__ = [

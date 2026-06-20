@@ -1,9 +1,8 @@
 # AGENTS.md — how to work in this repository
 
 This file is the entry point for an AI agent (or a new human) working in Zu. It
-is the practical companion to [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) (the
-*why*) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the *shape*): this
-file is the *how*. Read this first, then those two when you need depth.
+is the *how*; the *why* (philosophy) and the *shape* (architecture) are in the
+documentation, published separately. Read this first.
 
 Zu is a runtime for agents, and its own repository is designed to be navigated
 by one. The promise is **one predictable shape, so "where does X live?" has
@@ -24,13 +23,8 @@ register through the *same* entry points your own package would use.
 zu/
   AGENTS.md                 # you are here
   CONTRIBUTING.md           # human-facing setup + submission flow (same rules)
-  docs/
-    PHILOSOPHY.md           # the principles every decision is held to
-    ARCHITECTURE.md         # the core + the six ports, in depth
-    QUICKSTART.md           # build / run / deploy an agent
-    RED_TEAM.md             # the adversarial test-gate design + status
   packages/
-    zu-core/                # contracts, ports, registry, loop, bus  <- stable, SDK-free
+    zu-core/                # contracts, ports, registry, loop, bus, pipeline <- stable, SDK-free
     zu-providers/           # model adapters: scripted, anthropic, openai-compatible
     zu-tools/               # http_fetch, html_parse, render_dom
     zu-checks/              # detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)
@@ -39,7 +33,8 @@ zu/
     zu-cli/                 # the `zu` command, HTTP server, MCP server
     zu/                     # the `import zu` embed facade (published as zu-runtime)
     zu-testing/             # shared test kit: fakes, fixtures, the pytest plugin
-  examples/                 # runnable demos (the killer demo lives here)
+  examples/                 # runnable example agents + integration configs
+  validation/               # end-to-end proof suites (containment, red-team)
 ```
 
 Every package has the **same internal shape** — rely on this:
@@ -138,12 +133,13 @@ shape it expects.
 A plugin is not "done" when its unit tests pass — it is done when it has been
 proven to cooperate with other plugins and to withstand an adversarial red team,
 inside a real Zu runtime. That gate lives in `packages/zu-redteam` and is run
-with `zu test-plugin <pkg>`. See [`docs/RED_TEAM.md`](docs/RED_TEAM.md) for the
-full design and the current implementation status of each gate.
+with `zu test-plugin <pkg>` (the red-team gate design + status is in the
+published docs).
 
 ## Pointers
 
-- Principles / tie-breakers → [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md)
-- The core and the six ports, in depth → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Build / run / deploy an agent → [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
+- Runnable example agents → [`examples/agents/`](examples/agents/)
+- End-to-end proof suites (containment, red-team) → [`validation/`](validation/)
+- The shared test kit for your own plugins → [`packages/zu-testing/`](packages/zu-testing/)
 - Human setup + PR flow → [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Architecture, philosophy, quickstart, red-team → the published documentation
