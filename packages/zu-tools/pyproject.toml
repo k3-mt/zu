@@ -1,7 +1,7 @@
 [project]
 name = "zu-tools"
 version = "0.1.0"
-description = "Zu built-in tools: web_search, http_fetch, html_parse, render_dom"
+description = "Zu built-in tools: web_search, http_fetch, html_parse, render_dom, browser"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 classifiers = [
@@ -22,6 +22,7 @@ dependencies = ["zu-core==0.1.0", "httpx", "selectolax", "zu-backends==0.1.0"]
 [project.entry-points."zu.tools"]      # <- how a tool is registered
 web_search = "zu_tools.search:WebSearch"
 http_fetch = "zu_tools.fetch:HttpFetch"
+browser = "zu_tools.browser:Browser"
 html_parse = "zu_tools.parse:HtmlParse"
 render_dom = "zu_tools.render:RenderDom"
 

@@ -56,6 +56,76 @@ class _Sandbox:
 # ``{"status", "html", "url"}`` to stdout — the same observation shape
 # http_fetch produces, so the loop and detectors stay tool-agnostic.
 _RENDER_ENTRYPOINT = "zu-render"
+# The persistent session server: a long-lived process holding ONE browser, fed
+# newline-delimited JSON commands on stdin, one JSON response per line on stdout.
+_SESSION_ENTRYPOINT = "zu-browser"
+
+
+@dataclass
+class _BrowserSession:
+    """A live browser session: a kept-alive container + an open exec stream to the
+    ``zu-browser`` server inside it. Commands (open/act/read/close) are written as
+    JSON lines and a JSON response is read back; the browser state persists between
+    them. Docker multiplexes the exec stream in 8-byte-framed chunks, so reads
+    demux the stdout stream and buffer to whole lines."""
+
+    backend: LocalDockerBackend
+    sandbox: _Sandbox
+    sock: Any
+    read_timeout_s: float = 120.0
+    _buf: bytes = field(default=b"", init=False)
+
+    def _raw(self) -> Any:
+        return getattr(self.sock, "_sock", self.sock)
+
+    @staticmethod
+    def _recvn(s: Any, n: int) -> bytes:
+        out = b""
+        while len(out) < n:
+            chunk = s.recv(n - len(out))
+            if not chunk:
+                break
+            out += chunk
+        return out
+
+    def _read_line_sync(self) -> str:
+        s = self._raw()
+        s.settimeout(self.read_timeout_s)
+        while b"\n" not in self._buf:
+            header = self._recvn(s, 8)  # [stream(1), 0,0,0, size(4 big-endian)]
+            if len(header) < 8:
+                break
+            size = int.from_bytes(header[4:8], "big")
+            payload = self._recvn(s, size)
+            if header[0] == 1:  # stdout (stderr=2 is Chromium noise; ignore)
+                self._buf += payload
+            if not payload:
+                break
+        line, _, self._buf = self._buf.partition(b"\n")
+        return line.decode("utf-8", "replace")
+
+    def _send_sync(self, cmd: dict) -> dict:
+        self._raw().sendall((json.dumps(cmd) + "\n").encode())
+        line = self._read_line_sync()
+        if not line.strip():
+            return {"error": "session closed or no response"}
+        return json.loads(line)
+
+    async def send(self, cmd: dict) -> dict:
+        """Write one command and read its JSON response (off the event loop)."""
+        return await asyncio.to_thread(self._send_sync, cmd)
+
+    async def close(self) -> None:
+        """Tell the server to close its browser, then remove the container."""
+        try:
+            await asyncio.wait_for(self.send({"op": "close"}), timeout=15)
+        except Exception:  # noqa: BLE001 - teardown is best-effort
+            pass
+        try:
+            self._raw().close()
+        except Exception:  # noqa: BLE001
+            pass
+        await self.backend.destroy(self.sandbox)
 
 
 def _render_argv(args: dict) -> list[str]:
@@ -401,6 +471,23 @@ class LocalDockerBackend:
         for d in raw or []:
             out.append({"path": d.get("Path"), "kind": self._DIFF_KINDS.get(d.get("Kind"), "changed")})
         return out
+
+    async def open_session(self, spec: dict) -> _BrowserSession:
+        """Launch a hardened, kept-alive container and exec the persistent
+        ``zu-browser`` session server into it, returning a handle whose stdin/stdout
+        stay open across many commands. This is what holds one headless browser
+        ALIVE across tool calls so a model can drive a reactive widget
+        incrementally (open→act→read→close) instead of replaying into a fresh
+        browser each time. Same launch hardening as a render (caps dropped, DNS pin,
+        seccomp); the container's default ``sleep infinity`` keeps it up."""
+        sandbox = await self.launch(spec)
+        api = sandbox.container.client.api
+        created = await asyncio.to_thread(
+            api.exec_create, sandbox.container.id, [_SESSION_ENTRYPOINT],
+            stdin=True, stdout=True, stderr=True, tty=False,
+        )
+        sock = await asyncio.to_thread(api.exec_start, created["Id"], socket=True, demux=False)
+        return _BrowserSession(backend=self, sandbox=sandbox, sock=sock)
 
     async def destroy(self, sandbox: _Sandbox) -> None:
         """Stop and remove the container. Best-effort: a teardown failure must

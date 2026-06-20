@@ -371,3 +371,20 @@ async def test_seccomp_json_and_unconfined_pass_through() -> None:
     kw = client.containers.run_kwargs
     assert kw is not None
     assert 'seccomp={"defaultAction": "SCMP_ACT_ALLOW"}' in kw["security_opt"]
+
+
+@pytest.mark.docker
+async def test_browser_session_holds_state_across_commands_live() -> None:
+    # The persistent session: open a page, then read it again — the SAME browser
+    # is held across commands (state persists), proven against the real image.
+    import os
+
+    image = os.environ.get("ZU_RENDER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
+    session = await LocalDockerBackend().open_session({"image": image, "network": True})
+    try:
+        opened = await session.send({"op": "open", "url": "https://example.com"})
+        assert opened["status"] == 200 and "Example Domain" in opened["text"]
+        again = await session.send({"op": "read"})            # no re-navigation
+        assert "Example Domain" in again["text"]              # the page is still held
+    finally:
+        await session.close()

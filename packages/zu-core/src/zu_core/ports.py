@@ -235,6 +235,27 @@ class SandboxBackend(Protocol):
 
 
 @runtime_checkable
+class BrowserSessionHandle(Protocol):
+    """A live, stateful session inside a sandbox: send a command, get a response,
+    and close it. The state persists between ``send`` calls — what lets a tool
+    drive a multi-step flow incrementally instead of one-shot."""
+
+    async def send(self, cmd: dict) -> dict: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackend(Protocol):
+    """A SandboxBackend that can also open a PERSISTENT session — a long-lived
+    process inside a kept-alive sandbox, holding state across many commands (e.g. a
+    browser the model drives open→act→read→close). Separate from
+    :class:`SandboxBackend` so a one-shot adapter need not implement it."""
+
+    async def open_session(self, spec: dict) -> BrowserSessionHandle: ...
+
+
+@runtime_checkable
 class EgressProxy(Protocol):
     """The control-plane egress proxy: the target container's sole route off-box,
     and the *authoritative* record of where it actually went (RED_TEAM_CONTAINER.md

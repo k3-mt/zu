@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""zu-browser — the persistent tier-2 session server, run inside the container.
+
+The backend execs this ONCE into the kept-alive container and keeps the exec's
+stdin/stdout open. It holds a single headless Chromium browser+page ALIVE across
+many commands, so a model can drive a reactive multi-step widget incrementally —
+``open`` a url, then ``act``/``read`` repeatedly, observing the real state after
+each step (and the network responses it triggered), then ``close``. This removes
+the timing-fragility of replaying a fixed action sequence into a fresh browser.
+
+Protocol: one JSON command per line on stdin, one JSON response per line on
+stdout. Commands: {"op":"open","url":...}, {"op":"act","actions":[...]},
+{"op":"read"}, {"op":"close"}. See ``_browser_session`` for the shared, generic
+primitives (no site-specific logic).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # import the sibling lib
+
+from _browser_session import serve  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(serve(sys.stdin, sys.stdout))

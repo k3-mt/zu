@@ -19,8 +19,13 @@ LABEL org.opencontainers.image.source="https://github.com/k3-mt/zu" \
 
 RUN pip install --no-cache-dir playwright==1.47.0
 
+# The one-shot render entrypoint, the persistent session server, and the shared
+# generic browser primitives they both import.
+COPY _browser_session.py /usr/local/bin/_browser_session.py
 COPY zu-render /usr/local/bin/zu-render
-RUN chmod +x /usr/local/bin/zu-render
+COPY zu-browser /usr/local/bin/zu-browser
+RUN chmod +x /usr/local/bin/zu-render /usr/local/bin/zu-browser
 
-# Keep the container alive so the backend can exec one render per tool call.
+# Keep the container alive so the backend can exec a render per call (zu-render)
+# OR a long-lived session it streams commands to (zu-browser).
 CMD ["sleep", "infinity"]

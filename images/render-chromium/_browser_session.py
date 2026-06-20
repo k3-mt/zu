@@ -1,0 +1,231 @@
+"""Shared browser primitives for the tier-2 image — used by both the one-shot
+``zu-render`` entrypoint and the persistent ``zu-browser`` session server.
+
+All of it is generic: wait for content, perform read-surfacing actions by
+selector, capture rendered visible text (shadow DOM + child frames), and capture
+the network responses a widget fetches its data from. No site-specific logic — a
+model reasons the steps and drives them with these primitives.
+
+The session server (:func:`serve`) keeps ONE headless browser alive and applies
+commands (open/act/read/close) against a held page, so a model can drive a
+reactive multi-step widget incrementally — observe → act → observe — instead of
+replaying a timing-fragile sequence into a fresh browser each call. Browser I/O
+(``sync_playwright``) and the command streams are injected, so the command
+handling is unit-tested with fakes and no real Chromium.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+# Bounds so a hostile/janky page can't wedge the browser. Per-action/wait timeouts
+# are short; the action list and captured-response volume are capped.
+_ACTION_TIMEOUT_MS = 10_000
+_MAX_ACTIONS = 10
+_WAIT_UNTIL = ("load", "domcontentloaded", "networkidle", "commit")
+_MAX_RESPONSES = 40
+_MAX_RESPONSE_BODY = 60_000
+_MAX_RESPONSE_TOTAL = 600_000
+_DEFAULT_WIDTH = 1280
+_DEFAULT_HEIGHT = 720
+# A session with no command for this long tears itself down — a backstop so an
+# abandoned session never leaves a browser (and its container) running forever.
+_IDLE_TIMEOUT_S = 300
+
+_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+
+
+def _attach_network_capture(page: Any, captured: list) -> None:
+    """Listen for XHR/fetch (and JSON) responses and collect their bodies — the
+    event-driven way to read a widget's data (it fetches availability/results over
+    the network). Keys on response TYPE, never on any site."""
+    total = {"n": 0}
+
+    def on_response(resp: Any) -> None:
+        if len(captured) >= _MAX_RESPONSES or total["n"] >= _MAX_RESPONSE_TOTAL:
+            return
+        try:
+            ct = resp.headers.get("content-type", "")
+            if resp.request.resource_type not in ("xhr", "fetch") and "json" not in ct:
+                return
+            body = resp.text()[:_MAX_RESPONSE_BODY]
+        except Exception:  # noqa: BLE001 - an unreadable/streamed body is just skipped
+            return
+        total["n"] += len(body)
+        captured.append({"url": resp.url, "status": resp.status, "content_type": ct, "body": body})
+
+    page.on("response", on_response)
+
+
+def _visible_text(page: Any) -> str:
+    """Rendered, human-visible text across the main document AND every child frame.
+    ``inner_text`` reflects what is displayed — it pierces shadow DOM and, walked
+    over ``page.frames``, reads cross-origin iframe content, where modern widgets
+    put their data. Generic."""
+    parts: list[str] = []
+    for frame in page.frames:
+        try:
+            text = frame.inner_text("body")
+        except Exception:  # noqa: BLE001 - a detached/empty frame contributes nothing
+            text = ""
+        if text and text.strip():
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _run_actions(page: Any, actions: list) -> str | None:
+    """Apply read-surfacing actions in order; return an error string on the first
+    failure (DOM so far is kept), else None. Each Playwright op auto-waits for the
+    target to be actionable — event-driven, not a fixed sleep.
+
+    Supported: ``click``/``fill``/``select`` (a CSS or ``text=`` selector;
+    ``fill``/``select`` also take ``value``), ``wait_for`` (selector), ``wait_ms``."""
+    for raw in actions[:_MAX_ACTIONS]:
+        if not isinstance(raw, dict):
+            return f"bad action (not an object): {raw!r}"
+        try:
+            if "click" in raw:
+                page.click(raw["click"], timeout=_ACTION_TIMEOUT_MS)
+            elif "fill" in raw:
+                page.fill(raw["fill"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
+            elif "select" in raw:
+                page.select_option(raw["select"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
+            elif "wait_for" in raw:
+                page.wait_for_selector(raw["wait_for"], timeout=_ACTION_TIMEOUT_MS)
+            elif "wait_ms" in raw:
+                page.wait_for_timeout(min(int(raw["wait_ms"]), _ACTION_TIMEOUT_MS))
+            else:
+                return f"unknown action: {sorted(raw)}"
+        except Exception as exc:  # noqa: BLE001 - surface which action failed; keep the DOM
+            return f"action {raw!r} failed: {type(exc).__name__}: {exc}"
+    return None
+
+
+def observe(page: Any, captured: list, *, include_html: bool = False) -> dict:
+    """The observation shape every command returns: the rendered visible text, the
+    current url, optionally the raw html, and (when network capture is on) the
+    accumulated responses both structured (``network``) and folded into a
+    groundable ``content`` key."""
+    out: dict[str, Any] = {"url": page.url, "text": _visible_text(page)}
+    if include_html:
+        out["html"] = page.content()
+    if captured:
+        out["network"] = list(captured)
+        out["content"] = "\n\n".join(
+            f"# {c['url']} ({c['status']})\n{c['body']}" for c in captured
+        )
+    return out
+
+
+def launch_page(browser: Any, width: int, height: int) -> Any:
+    return browser.new_page(viewport={"width": width, "height": height})
+
+
+def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]:
+    """Apply one session command against the held page. Returns (response, done);
+    ``done`` True ends the session (close). State holds the live ``browser``,
+    ``page`` and accumulating ``captured`` responses across commands — that
+    persistence is the whole point: the model drives observe→act→observe.
+
+    Ops: ``open`` (launch/navigate a fresh page), ``act`` (run actions on the held
+    page), ``read`` (re-observe without acting), ``close`` (tear down + end)."""
+    op = cmd.get("op")
+    if op == "open":
+        if state.get("browser") is None:
+            state["browser"] = playwright.chromium.launch(args=_LAUNCH_ARGS)
+        page = launch_page(
+            state["browser"], int(cmd.get("width", _DEFAULT_WIDTH)), int(cmd.get("height", _DEFAULT_HEIGHT))
+        )
+        state["page"] = page
+        state["captured"] = []
+        if cmd.get("capture_network"):
+            _attach_network_capture(page, state["captured"])
+        resp = page.goto(cmd["url"], wait_until=cmd.get("wait_until", "load"), timeout=30000)
+        obs = observe(page, state["captured"], include_html=bool(cmd.get("html")))
+        obs["status"] = resp.status if resp is not None else 200
+        return obs, False
+
+    if op in ("act", "read"):
+        page = state.get("page")
+        if page is None:
+            return {"error": "no open page; send an 'open' command first"}, False
+        action_error = _run_actions(page, cmd.get("actions", [])) if op == "act" else None
+        obs = observe(page, state.get("captured", []), include_html=bool(cmd.get("html")))
+        if action_error:
+            obs["action_error"] = action_error
+        return obs, False
+
+    if op == "close":
+        browser = state.get("browser")
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001 - teardown is best-effort
+                pass
+        state["browser"] = state["page"] = None
+        return {"closed": True}, True
+
+    return {"error": f"unknown op {op!r}; use open/act/read/close"}, False
+
+
+def _next_line(instream: Any, idle_timeout: float | None) -> str | None:
+    """Read one command line, returning None on idle-timeout (so the session can
+    self-terminate). Uses select() when the stream is a real fd; falls back to a
+    blocking readline for in-memory test streams."""
+    if idle_timeout and hasattr(instream, "fileno"):
+        import select
+
+        try:
+            ready, _, _ = select.select([instream], [], [], idle_timeout)
+            if not ready:
+                return None
+        except (OSError, ValueError):
+            pass
+    return instream.readline()
+
+
+def serve(instream: Any, outstream: Any, *, playwright_factory: Any = None,
+          idle_timeout: float | None = _IDLE_TIMEOUT_S) -> int:
+    """Run the session loop: read newline-delimited JSON commands, apply each, and
+    write a one-line JSON response. Ends on ``close``, EOF, or idle-timeout — always
+    tearing the browser down. ``playwright_factory`` is injected for tests."""
+    if playwright_factory is None:
+        from playwright.sync_api import sync_playwright
+
+        playwright_factory = sync_playwright
+    with playwright_factory() as p:
+        state: dict = {"browser": None, "page": None, "captured": []}
+        try:
+            while True:
+                line = _next_line(instream, idle_timeout)
+                if line is None or line == "":  # idle-timeout or EOF
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cmd = json.loads(line)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    _write(outstream, {"error": f"bad json: {exc}"})
+                    continue
+                try:
+                    resp, done = handle_command(state, cmd, p)
+                except Exception as exc:  # noqa: BLE001 - a command error is a response, never a crash
+                    resp, done = {"error": f"{type(exc).__name__}: {exc}"}, False
+                _write(outstream, resp)
+                if done:
+                    break
+        finally:
+            browser = state.get("browser")
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    return 0
+
+
+def _write(outstream: Any, obj: dict) -> None:
+    outstream.write(json.dumps(obj, default=str) + "\n")
+    outstream.flush()

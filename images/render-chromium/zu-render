@@ -1,111 +1,38 @@
 #!/usr/bin/env python3
-"""zu-render — the tier-2 render entrypoint, run inside the browser container.
+"""zu-render — the tier-2 one-shot render entrypoint, run inside the container.
 
 The ``local-docker`` backend execs ``zu-render <url> [flags]`` and reads one JSON
-line from stdout: ``{"status", "html", "url"}`` — the same observation shape
-``http_fetch`` produces, so the loop and detectors stay tool-agnostic. It renders
-the URL in a real headless Chromium (JavaScript executed) via Playwright.
-
-Beyond a plain render it can WAIT for late-injected content (a JS widget that
-populates after ``load``) and perform a short sequence of read-surfacing ACTIONS
-(click an "expand"/"load more"/tab, choose a filter) before capturing — so the
-DOM the loop sees is the one a human would see. It surfaces content; it is not a
-form-submission/transaction driver (no navigation-completing submit primitive).
+line from stdout: ``{"status","html","text","url"}`` (+ ``network``/``content``
+when capturing) — the same observation shape ``http_fetch`` produces, so the loop
+and detectors stay tool-agnostic. It renders the URL in headless Chromium (JS
+executed), and can WAIT for late-injected content, run read-surfacing ACTIONS, and
+CAPTURE the network responses a widget fetches its data from. All generic — the
+shared primitives live in ``_browser_session`` (also used by the persistent
+``zu-browser`` session server).
 
 Chromium runs with ``--no-sandbox`` on purpose: the *container* is the sandbox
-(the backend drops all Linux capabilities and forbids privilege escalation), so
-Chromium's own setuid sandbox — which would need a capability we deny — is not
-the security boundary here.
+(caps dropped, no-new-privileges), so Chromium's own setuid sandbox is not the
+boundary here.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-# Bounds so a hostile/janky page can't wedge the render. Per-action and per-wait
-# timeouts are short; the action list is capped.
-_ACTION_TIMEOUT_MS = 10_000
-_MAX_ACTIONS = 10
-_WAIT_UNTIL = ("load", "domcontentloaded", "networkidle", "commit")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # import the sibling lib
 
-# Bounds for --capture-network: a widget loads its DATA over the network (an
-# availability JSON), so capturing the responses is more robust than scraping the
-# reactive DOM. Capped so a chatty page can't flood the observation.
-_MAX_RESPONSES = 40
-_MAX_RESPONSE_BODY = 60_000
-_MAX_RESPONSE_TOTAL = 600_000
-
-
-def _attach_network_capture(page, captured: list) -> None:
-    """Listen for XHR/fetch (and JSON) responses and collect their bodies. The
-    event-driven way to read a widget's data: it fetches availability/results over
-    the network, so we respond to those events instead of timing a DOM scrape.
-    Generic — it keys on response TYPE (xhr/fetch/json), never on any site."""
-    total = {"n": 0}
-
-    def on_response(resp) -> None:
-        if len(captured) >= _MAX_RESPONSES or total["n"] >= _MAX_RESPONSE_TOTAL:
-            return
-        try:
-            ct = resp.headers.get("content-type", "")
-            if resp.request.resource_type not in ("xhr", "fetch") and "json" not in ct:
-                return
-            body = resp.text()[:_MAX_RESPONSE_BODY]
-        except Exception:  # noqa: BLE001 - an unreadable/streamed body is just skipped
-            return
-        total["n"] += len(body)
-        captured.append({"url": resp.url, "status": resp.status, "content_type": ct, "body": body})
-
-    page.on("response", on_response)
-
-
-def _visible_text(page) -> str:
-    """The rendered, human-visible text across the main document AND every child
-    frame. Unlike ``page.content()`` (a serialization of the TOP frame's HTML),
-    ``inner_text`` reflects what is actually displayed — it pierces shadow DOM and,
-    walked over ``page.frames``, captures cross-origin iframe content too. That is
-    where modern widgets (calendars, booking grids) put their data, so the model
-    sees the slots a human sees, not just the outer page's markup. Generic: no
-    knowledge of any site."""
-    parts: list[str] = []
-    for frame in page.frames:
-        try:
-            text = frame.inner_text("body")
-        except Exception:  # noqa: BLE001 - a detached/empty frame contributes nothing
-            text = ""
-        if text and text.strip():
-            parts.append(text)
-    return "\n\n".join(parts)
-
-
-def _run_actions(page, actions: list) -> str | None:
-    """Apply read-surfacing actions in order. Returns an error string on the first
-    failed action (the DOM captured so far is still returned), or None on success.
-
-    Supported: ``click``/``fill``/``select`` (a CSS selector; ``fill``/``select``
-    also take ``value``) to reveal content, and ``wait_for`` (selector) /
-    ``wait_ms`` to let it settle."""
-    for raw in actions[:_MAX_ACTIONS]:
-        if not isinstance(raw, dict):
-            return f"bad action (not an object): {raw!r}"
-        try:
-            if "click" in raw:
-                page.click(raw["click"], timeout=_ACTION_TIMEOUT_MS)
-            elif "fill" in raw:
-                page.fill(raw["fill"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
-            elif "select" in raw:
-                page.select_option(raw["select"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
-            elif "wait_for" in raw:
-                page.wait_for_selector(raw["wait_for"], timeout=_ACTION_TIMEOUT_MS)
-            elif "wait_ms" in raw:
-                page.wait_for_timeout(min(int(raw["wait_ms"]), _ACTION_TIMEOUT_MS))
-            else:
-                return f"unknown action: {sorted(raw)}"
-        except Exception as exc:  # noqa: BLE001 - surface which action failed; keep the DOM
-            return f"action {raw!r} failed: {type(exc).__name__}: {exc}"
-    return None
+from _browser_session import (  # noqa: E402
+    _ACTION_TIMEOUT_MS,
+    _LAUNCH_ARGS,
+    _WAIT_UNTIL,
+    _attach_network_capture,
+    _run_actions,
+    _visible_text,
+    launch_page,
+)
 
 
 def main() -> int:
@@ -114,10 +41,10 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--wait-until", default="load", choices=_WAIT_UNTIL)
-    parser.add_argument("--wait-for", default=None)          # a selector to await
-    parser.add_argument("--wait-ms", type=int, default=0)    # extra settle time
-    parser.add_argument("--actions", default=None)           # JSON list of actions
-    parser.add_argument("--capture-network", action="store_true")  # collect XHR/JSON responses
+    parser.add_argument("--wait-for", default=None)
+    parser.add_argument("--wait-ms", type=int, default=0)
+    parser.add_argument("--actions", default=None)
+    parser.add_argument("--capture-network", action="store_true")
     args = parser.parse_args(sys.argv[1:])
     url = args.url
     if not url:
@@ -134,18 +61,13 @@ def main() -> int:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            browser = p.chromium.launch(args=_LAUNCH_ARGS)
             action_error = None
             try:
-                page = browser.new_page(viewport={"width": args.width, "height": args.height})
+                page = launch_page(browser, args.width, args.height)
                 captured: list = []
                 if args.capture_network:
                     _attach_network_capture(page, captured)
-                # wait_until default "load" — NOT "networkidle": a DOM scraper wants
-                # the document loaded, and "networkidle" never settles on pages with
-                # long-polling/websockets/analytics. But a caller chasing a widget
-                # that injects content after load can ASK for "networkidle" (or a
-                # wait_for selector / wait_ms below) explicitly.
                 resp = page.goto(url, wait_until=args.wait_until, timeout=30000)
                 status = resp.status if resp is not None else 200
                 if args.wait_for:
@@ -155,20 +77,17 @@ def main() -> int:
                 if args.wait_ms:
                     page.wait_for_timeout(min(args.wait_ms, _ACTION_TIMEOUT_MS))
                 html = page.content()
-                text = _visible_text(page)  # rendered text (pierces shadow DOM + frames)
+                text = _visible_text(page)
             finally:
                 browser.close()
         out = {"status": status, "html": html, "text": text, "url": url}
         if captured:
             out["network"] = captured
-            # Fold the captured bodies into a content key too, so the loop stores
-            # them as retrieved provenance (grounding reads them) and the model
-            # sees the structured data the widget fetched.
             out["content"] = "\n\n".join(
                 f"# {c['url']} ({c['status']})\n{c['body']}" for c in captured
             )
         if action_error:
-            out["action_error"] = action_error  # partial reveal: DOM returned + the failure
+            out["action_error"] = action_error
         print(json.dumps(out))
         return 0
     except Exception as exc:  # noqa: BLE001 - report as an observation, never crash
