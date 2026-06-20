@@ -86,7 +86,7 @@ def _frame_for(page: Any, selector: str) -> Any:
     for frame in getattr(page, "frames", []):
         try:
             loc = frame.locator(selector)
-            if loc.filter(visible=True).count() > 0:   # prefer the frame with a VISIBLE match
+            if _has_visible(loc):                       # prefer the frame with a VISIBLE match
                 return frame
             if fallback is None and loc.count() > 0:
                 fallback = frame
@@ -98,12 +98,45 @@ def _frame_for(page: Any, selector: str) -> Any:
     return frames[0] if frames else page
 
 
+def _has_visible(loc: Any) -> bool:
+    """Does the locator have at least one VISIBLE match? Uses count/nth/is_visible
+    (stable across Playwright versions — ``filter(visible=...)`` is too new for the
+    pinned image)."""
+    try:
+        n = loc.count()
+    except Exception:  # noqa: BLE001
+        return False
+    for i in range(min(n, 20)):
+        try:
+            if loc.nth(i).is_visible():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _first_visible(loc: Any) -> Any:
+    """The first VISIBLE element of a locator (else its first match). Visibility
+    matters: consent banners and responsive UIs render hidden duplicates (a mobile
+    + a desktop copy), so the first DOM match is often a hidden one ('exists but not
+    visible'); the first visible one is what a user actually clicks."""
+    try:
+        n = loc.count()
+    except Exception:  # noqa: BLE001
+        return loc.first
+    for i in range(min(n, 20)):
+        try:
+            el = loc.nth(i)
+            if el.is_visible():
+                return el
+        except Exception:  # noqa: BLE001
+            continue
+    return loc.first
+
+
 def _target(frame: Any, selector: str) -> Any:
-    """The first VISIBLE match of ``selector`` in ``frame``. Visibility matters:
-    consent banners and responsive UIs render hidden duplicates (a mobile + a
-    desktop copy), and acting on the first DOM match clicks a hidden one ('exists
-    but not visible'); the first visible one is what a user would actually click."""
-    return frame.locator(selector).filter(visible=True).first
+    """The first visible match of ``selector`` in ``frame`` (see :func:`_first_visible`)."""
+    return _first_visible(frame.locator(selector))
 
 
 def _run_actions(page: Any, actions: list) -> str | None:
@@ -139,6 +172,53 @@ def _run_actions(page: Any, actions: list) -> str | None:
                 return f"unknown action: {sorted(raw)}"
         except Exception as exc:  # noqa: BLE001 - surface which action failed; keep the DOM
             return f"action {raw!r} failed: {type(exc).__name__}: {exc}"
+    return None
+
+
+# Known consent-platform accept buttons (OneTrust, Cookiebot, TrustArc, Quantcast/
+# IAB-TCF) plus generic "accept all" text. A cookie wall blocks every other click,
+# and these platforms cover most of the web — curated patterns, the same approach
+# as the bot-wall detector, not site-specific logic. The accept button often loads
+# async (present-but-not-visible at first), so dismissal WAITS + retries.
+_CONSENT_SELECTORS = (
+    "#onetrust-accept-btn-handler",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "#CybotCookiebotDialogBodyButtonAccept",
+    "#truste-consent-button",
+    ".truste-button2",
+    ".qc-cmp2-summary-buttons button[mode='primary']",
+    "button[aria-label='Accept all']",
+    "button[aria-label='Accept All']",
+    "button:has-text('Accept all')",
+    "button:has-text('Accept All')",
+    "button:has-text('Allow all')",
+    "button:has-text('I Accept')",
+    "button:has-text('Got it')",
+)
+
+
+def dismiss_consent(page: Any, *, attempts: int = 4, wait_ms: int = 800) -> str | None:
+    """Best-effort: clear a cookie/consent wall so it stops blocking clicks. Tries
+    the known-platform accept buttons across every frame; clicks the first VISIBLE
+    match. The button frequently loads async (present but not yet visible), so this
+    retries with a short wait between sweeps. Returns the selector that worked, or
+    None if no banner was found. Never raises — a missing banner is the normal case."""
+    for i in range(attempts):
+        for frame in getattr(page, "frames", []):
+            for sel in _CONSENT_SELECTORS:
+                try:
+                    loc = frame.locator(sel)
+                    if not _has_visible(loc):
+                        continue
+                    _first_visible(loc).click(timeout=2000)
+                    return sel
+                except Exception:  # noqa: BLE001 - not visible yet / not this one; keep trying
+                    continue
+        if i < attempts - 1:
+            try:
+                page.wait_for_timeout(wait_ms)
+            except Exception:  # noqa: BLE001
+                pass
     return None
 
 
@@ -189,16 +269,25 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
         if cmd.get("capture_network"):
             _attach_network_capture(page, state["captured"])
         resp = page.goto(cmd["url"], wait_until=cmd.get("wait_until", "load"), timeout=30000)
+        state["dismiss_consent"] = cmd.get("dismiss_consent", True)
+        consent = dismiss_consent(page) if state["dismiss_consent"] else None
         obs = observe(page, state["captured"], include_html=bool(cmd.get("html")))
         obs["status"] = resp.status if resp is not None else 200
+        if consent:
+            obs["consent_dismissed"] = consent
         return obs, False
 
     if op in ("act", "read"):
         page = state.get("page")
         if page is None:
             return {"error": "no open page; send an 'open' command first"}, False
+        # A consent wall can pop up AFTER a prior step too — clear it before acting
+        # so the model never has to fight it (the whole reason runs stalled).
+        consent = dismiss_consent(page, attempts=1) if state.get("dismiss_consent", True) else None
         action_error = _run_actions(page, cmd.get("actions", [])) if op == "act" else None
         obs = observe(page, state.get("captured", []), include_html=bool(cmd.get("html")))
+        if consent:
+            obs["consent_dismissed"] = consent
         if action_error:
             obs["action_error"] = action_error
         return obs, False

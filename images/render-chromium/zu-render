@@ -31,6 +31,7 @@ from _browser_session import (  # noqa: E402
     _attach_network_capture,
     _run_actions,
     _visible_text,
+    dismiss_consent,
     launch_page,
 )
 
@@ -70,6 +71,7 @@ def main() -> int:
                     _attach_network_capture(page, captured)
                 resp = page.goto(url, wait_until=args.wait_until, timeout=30000)
                 status = resp.status if resp is not None else 200
+                dismiss_consent(page)  # clear a cookie wall before reading/acting
                 if args.wait_for:
                     page.wait_for_selector(args.wait_for, timeout=_ACTION_TIMEOUT_MS)
                 if actions:

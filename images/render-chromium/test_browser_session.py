@@ -33,8 +33,11 @@ class _Loc:
     def count(self) -> int:
         return self._n
 
-    def filter(self, **_kw):
-        return self          # the fake doesn't model visibility (a Playwright behavior)
+    def nth(self, _i):
+        return self
+
+    def is_visible(self) -> bool:
+        return self._n > 0   # the fake treats a present selector as visible
 
     @property
     def first(self):
@@ -177,6 +180,30 @@ def test_run_actions_pierces_into_a_child_iframe() -> None:
     assert bs._run_actions(page, [{"click": "text=Next"}]) is None
     assert ("click", "text=Next") in child.calls                  # clicked INSIDE the iframe
     assert ("click", "text=Next") not in main.calls               # not the top frame
+
+
+def test_dismiss_consent_clicks_a_known_accept_button() -> None:
+    # A frame holding a known consent accept button gets it clicked; the selector
+    # that worked is returned. Curated platform patterns, no site logic.
+    banner = _FakeFrame(text="cookies", present={"#onetrust-accept-btn-handler"})
+    page = _FakePage(frames=[banner])
+    sel = bs.dismiss_consent(page, attempts=1)
+    assert sel == "#onetrust-accept-btn-handler"
+    assert ("click", "#onetrust-accept-btn-handler") in banner.calls
+
+
+def test_dismiss_consent_noop_when_no_banner() -> None:
+    page = _FakePage(present=set(), frames=[_FakeFrame(present=set())])
+    assert bs.dismiss_consent(page, attempts=1) is None
+
+
+def test_open_auto_dismisses_consent() -> None:
+    # On open, a consent wall is cleared automatically and reported.
+    page = _FakePage(present={"#onetrust-accept-btn-handler"})
+    p = _FakePlaywright(page)
+    out, _ = bs.handle_command({"browser": None, "page": None, "captured": []},
+                               {"op": "open", "url": "https://x/"}, p)
+    assert out.get("consent_dismissed") == "#onetrust-accept-btn-handler"
 
 
 def test_run_actions_capped() -> None:
