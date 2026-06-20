@@ -131,7 +131,11 @@ def test_observe_returns_text_url_and_optional_html_network() -> None:
     assert obs["html"].startswith("<html>")
     captured = [{"url": "https://api/slots", "status": 200, "body": '{"d":["2026-06-24"]}'}]
     obs2 = bs.observe(page, captured)
-    assert obs2["network"] == captured and "2026-06-24" in obs2["content"]
+    # bodies fold into `content` (groundable); `network` is metadata only (no body)
+    assert "2026-06-24" in obs2["content"]
+    assert obs2["network"] == [{"url": "https://api/slots", "status": 200,
+                                "content_type": "", "bytes": len('{"d":["2026-06-24"]}')}]
+    assert "body" not in obs2["network"][0]
 
 
 # --- session handler: state persists across commands -------------------------

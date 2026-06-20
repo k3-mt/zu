@@ -111,10 +111,17 @@ def observe(page: Any, captured: list, *, include_html: bool = False) -> dict:
     if include_html:
         out["html"] = page.content()
     if captured:
-        out["network"] = list(captured)
+        # Bodies go in `content` (a capped, groundable content key); `network` is
+        # METADATA ONLY (url/status/bytes) so the structured list can't bypass the
+        # observation cap and bloat the model's context by duplicating the bodies.
         out["content"] = "\n\n".join(
             f"# {c['url']} ({c['status']})\n{c['body']}" for c in captured
         )
+        out["network"] = [
+            {"url": c["url"], "status": c["status"],
+             "content_type": c.get("content_type", ""), "bytes": len(c.get("body", ""))}
+            for c in captured
+        ]
     return out
 
 

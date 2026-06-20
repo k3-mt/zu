@@ -46,10 +46,12 @@ budget: { max_steps: 40, max_tokens: 600000, wall_time_s: 600 }
 # parts (a model call per chunk) rather than truncating, so nothing important is
 # lost off the end. Use 'truncate' (or remove these) for a large-context model.
 max_observation_chars: 20000
-observation_strategy: extract
+observation_strategy: truncate   # cheap per-read; the model uses `recall` to pull
+                                 # specifics from the full run log on demand
 # Driving the booking widget takes many browser steps; bound the TOTAL running
 # conversation (not just each step) so a long multi-step session never overflows
-# the model's context window — old tool observations are elided, recent ones kept.
+# the model's context window — old tool observations are elided (recall reaches
+# them), recent ones kept.
 max_context_chars: 120000
 
 # audit: runs on a bare host (web_search's egress is scoped to api.exa.ai; the

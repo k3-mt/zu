@@ -82,10 +82,16 @@ def main() -> int:
                 browser.close()
         out = {"status": status, "html": html, "text": text, "url": url}
         if captured:
-            out["network"] = captured
+            # Bodies in `content` (capped/groundable); `network` metadata only, so
+            # the structured list can't bypass the cap by duplicating the bodies.
             out["content"] = "\n\n".join(
                 f"# {c['url']} ({c['status']})\n{c['body']}" for c in captured
             )
+            out["network"] = [
+                {"url": c["url"], "status": c["status"],
+                 "content_type": c.get("content_type", ""), "bytes": len(c.get("body", ""))}
+                for c in captured
+            ]
         if action_error:
             out["action_error"] = action_error
         print(json.dumps(out))
