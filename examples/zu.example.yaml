@@ -36,7 +36,8 @@ event_sink: { driver: sqlite, path: ./zu.db }
 # Default budget for a task that doesn't set its own.
 budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }
 
-# Note: one provider drives the whole run today. The escalation ladder still
-# climbs tiers — a tool's own `tier` gates when it unlocks (render_dom is tier
-# 2) — but binding a *different model per tier* (a cheap model at tier 1, a
-# frontier model at tier 2) is a deferred next rung.
+# A different model per tier (optional): the `provider` above is the global
+# default; add a `providers` map keyed by tier to override it when the ladder
+# climbs — e.g. a cheap/fast model at tier 1, a frontier/vision model at tier 2.
+#   providers:
+#     2: { name: anthropic, model: claude-sonnet-4-6, api_key_env: ANTHROPIC_API_KEY }

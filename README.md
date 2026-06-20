@@ -210,7 +210,8 @@ zu/
 
 ## Documentation
 
-- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install, define a task + config, embed, serve, containerize, schedule, and write your own plugin
+- **[`docs/BUILD_AN_AGENT.md`](docs/BUILD_AN_AGENT.md) — start here.** The guided path from `zu init` to a tested, red-teamed, deployed agent: design the escalation, pick the model(s), supply credentials, test, contain, ship.
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — reference for each surface: install, define a task + config, embed, serve, containerize, schedule, and write your own plugin
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the small core and the six ports, in depth
 - [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — the principles every decision (and every plugin) is held to
 - [`AGENTS.md`](AGENTS.md) — how to navigate and extend this repo (for AI agents and new humans)
