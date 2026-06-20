@@ -23,6 +23,7 @@ dependencies = ["zu-core==0.1.0", "httpx", "selectolax", "zu-backends==0.1.0"]
 web_search = "zu_tools.search:WebSearch"
 http_fetch = "zu_tools.fetch:HttpFetch"
 browser = "zu_tools.browser:Browser"
+recall = "zu_tools.recall:Recall"
 html_parse = "zu_tools.parse:HtmlParse"
 render_dom = "zu_tools.render:RenderDom"
 

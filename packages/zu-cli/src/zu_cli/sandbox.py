@@ -77,6 +77,7 @@ async def _run_in_process(task: dict, config: dict) -> tuple[Result, list]:
             providers=providers, containment=cfg.containment,
             max_observation_chars=cfg.max_observation_chars,
             observation_strategy=cfg.observation_strategy,
+            max_context_chars=cfg.max_context_chars,
         )
         return result, await bus.query()
     finally:

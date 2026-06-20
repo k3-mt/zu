@@ -20,8 +20,13 @@ provider:
   api_key_env: OPENROUTER_API_KEY    # the env var NAME — never the key itself
 
 tiers:                                  # the escalation ladder — tools per tier
-  1: [web_search, http_fetch, html_parse]   # search, then fetch the static page
-  2: [render_dom]                           # unlocked if the page needs JavaScript
+  1: [web_search, http_fetch, html_parse, recall]   # search, fetch, and recall
+                                            # earlier-retrieved content that scrolled
+                                            # out of context (the run log is queryable)
+  2: [render_dom, browser]                  # unlocked if the page needs JavaScript:
+                                            #   render_dom — one-shot render
+                                            #   browser    — a PERSISTENT session to
+                                            #   drive a multi-step widget step by step
 
 plugins:
   # Detectors decide when tier 1 isn't enough and the loop must escalate to the
@@ -32,7 +37,7 @@ plugins:
   # Shape the result, then prove every reported value is on the page.
   validators: [schema, grounding]
 
-budget: { max_steps: 16, max_tokens: 150000, wall_time_s: 120 }
+budget: { max_steps: 40, max_tokens: 600000, wall_time_s: 600 }
 
 # The booking page is JS-heavy; a tier-2 rendered DOM can be hundreds of KB.
 # Bound how much of each fetched/rendered page the MODEL sees so a few pages don't
@@ -40,8 +45,12 @@ budget: { max_steps: 16, max_tokens: 150000, wall_time_s: 120 }
 # (grounding reads that). 'extract' map-reduces the whole page to the task-relevant
 # parts (a model call per chunk) rather than truncating, so nothing important is
 # lost off the end. Use 'truncate' (or remove these) for a large-context model.
-max_observation_chars: 40000
+max_observation_chars: 20000
 observation_strategy: extract
+# Driving the booking widget takes many browser steps; bound the TOTAL running
+# conversation (not just each step) so a long multi-step session never overflows
+# the model's context window — old tool observations are elided, recent ones kept.
+max_context_chars: 120000
 
 # audit: runs on a bare host (web_search's egress is scoped to api.exa.ai; the
 # fetch tools carry their own SSRF guard). Run it --sandboxed to enforce the
@@ -51,11 +60,17 @@ containment: audit
 
 task:
   query: >
-    Find the online booking page for Park Vets in Chislehurst, then read it and
-    return the next 3 soonest available appointment slots. Use web_search first
-    to find the booking page, then http_fetch it (escalate to render_dom only if
-    the page needs JavaScript). Report ONLY slots and a booking_url that actually
-    appear on the page — do not guess or fill in plausible times.
+    Find the online booking page for Park Vets in Chislehurst and return the next
+    3 soonest available appointment slots (date + time). Start with web_search,
+    then http_fetch the booking page. The booking is a multi-step JavaScript widget
+    (Vetstoria), so the times are not in the static HTML: use the `browser` tool to
+    drive it step by step — open the booking page, then act/read to choose the
+    Chislehurst location and work through the wizard (new client, species, a
+    consultation appointment type, then Next) until the calendar of times appears;
+    open it with capture_network so the availability data is captured. Read the
+    page after each step and react — if action_error comes back, the selector
+    missed, so look at the returned text and try another. Report ONLY slots and a
+    booking_url that actually appear in what you retrieved — never guess a time.
   max_tier: 2
   output_schema:
     type: object

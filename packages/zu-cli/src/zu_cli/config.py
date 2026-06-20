@@ -172,6 +172,14 @@ class RunConfig(BaseModel):
         if v not in ("truncate", "extract"):
             raise ValueError(f"observation_strategy must be 'truncate' or 'extract', got {v!r}")
         return v
+
+    # Optional bound on the TOTAL conversation the model sees (chars across all
+    # messages) — OFF by default. Where ``max_observation_chars`` caps a single
+    # tool result, this caps their SUM across a long multi-step run (e.g. driving a
+    # browser for many turns), eliding old tool observations so the running context
+    # never overflows the model's window. Set it for long agentic runs on a
+    # finite-context model; leave it unset for short runs / huge-context models.
+    max_context_chars: int | None = None
     # The agent's task, embedded so a single ``agent.yaml`` is the whole agent
     # (what + how in one file). The task block — query, target, output_schema,
     # max_tier — is split out into a TaskSpec by ``load_agent``. Optional: a config

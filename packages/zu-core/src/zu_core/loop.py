@@ -199,6 +199,40 @@ async def _extract_relevant(
     return combined
 
 
+def _bounded_history(messages: list[dict], max_chars: int | None, *, keep_recent: int = 3) -> list[dict]:
+    """Keep the running conversation within ``max_chars`` by eliding the content of
+    OLD tool observations — the big, stale part of a long agentic run.
+
+    Per-observation capping bounds one tool result; this bounds their SUM across a
+    long multi-step run (e.g. driving a browser open→act→read… for many turns),
+    which otherwise grows until it overflows the model's context window. The system
+    prompt, the task, every assistant turn (the model's own notes/decisions), and
+    the most recent ``keep_recent`` tool results are kept verbatim; older tool
+    results are replaced with a short stub that POINTS AT ``recall`` — the content
+    is still on the event log (elided here, not lost), so the model can query it
+    back in chunks rather than the data being dropped. Off (None) → unchanged."""
+    if max_chars is None:
+        return messages
+    total = sum(len(m.get("content") or "") for m in messages)
+    if total <= max_chars:
+        return messages
+    tool_idxs = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    elidable = tool_idxs[:-keep_recent] if keep_recent else tool_idxs
+    out = list(messages)
+    for i in elidable:
+        content = out[i].get("content") or ""
+        if len(content) <= 200 or content.startswith("[elided"):
+            continue
+        out[i] = {**out[i],
+                  "content": f"[elided {len(content)} chars of an earlier "
+                             f"{out[i].get('name', 'tool')} result to fit the context window — "
+                             "still on the run log; use recall(<keyword>) to retrieve it]"}
+        total -= len(content)
+        if total <= max_chars:
+            break
+    return out
+
+
 async def _shrink_for_model(
     obs: Any, *, max_chars: int | None, strategy: str, provider: ModelProvider, query: str
 ) -> Any:
@@ -421,6 +455,7 @@ async def run_task(
     trace_id: UUID | None = None,
     max_observation_chars: int | None = None,
     observation_strategy: str = "truncate",
+    max_context_chars: int | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -506,6 +541,9 @@ async def run_task(
         remaining = budget.wall_time_s - (time.monotonic() - start)
         if remaining <= 0:
             return await run.terminal("budget:wall_time_s")
+        # Keep the running conversation within the model's context window across a
+        # long multi-step run (elide old tool observations); off unless configured.
+        messages = _bounded_history(messages, max_context_chars)
         try:
             resp = await asyncio.wait_for(
                 turn_provider.complete(ModelRequest(messages=messages, tools=tool_schemas)),

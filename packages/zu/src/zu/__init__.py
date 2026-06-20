@@ -120,6 +120,7 @@ class Zu:
                 providers=providers, containment=self.config.containment,
                 max_observation_chars=self.config.max_observation_chars,
                 observation_strategy=self.config.observation_strategy,
+                max_context_chars=self.config.max_context_chars,
             )
             events = await bus.query()
             return result, events
@@ -170,6 +171,7 @@ async def _arun_agent(source: Any) -> tuple[Result, list[Event]]:
             providers=providers, containment=cfg.containment,
             max_observation_chars=cfg.max_observation_chars,
             observation_strategy=cfg.observation_strategy,
+            max_context_chars=cfg.max_context_chars,
         )
         return result, await bus.query()
     finally:

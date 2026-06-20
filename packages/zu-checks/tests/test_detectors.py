@@ -35,23 +35,17 @@ def test_empty_ignores_non_page_observations() -> None:
     assert EmptyDetector().inspect(_ctx({})) is None
 
 
-def test_error_terminal_on_404() -> None:
-    v = ErrorDetector().inspect(_ctx({"status": 404, "html": ""}))
-    assert v is not None and v.severity is Severity.TERMINAL
-
-
-def test_error_terminal_on_permanent_client_errors() -> None:
-    # 410 Gone / 451 / 400 / 405 won't be fixed by a retry — they're terminal.
-    for status in (400, 405, 410, 451):
-        v = ErrorDetector().inspect(_ctx({"status": status, "html": ""}))
-        assert v is not None and v.severity is Severity.TERMINAL, status
-
-
-def test_error_retry_on_transient() -> None:
-    # 429 (rate limit) and 5xx are transient — RETRY, not TERMINAL.
-    for status in (429, 500, 503):
+def test_error_on_http_status_is_recoverable_not_terminal() -> None:
+    # An HTTP error on a fetched page is RETRY, never TERMINAL: a single bad url
+    # (403 WAF wall, 404, 410, 5xx, 429) must not end a run that can try another
+    # candidate. A truly stuck run ends via budget instead.
+    for status in (400, 403, 404, 405, 410, 429, 451, 500, 503):
         v = ErrorDetector().inspect(_ctx({"status": status, "html": ""}))
         assert v is not None and v.severity is Severity.RETRY, status
+
+
+def test_error_quiet_on_success() -> None:
+    assert ErrorDetector().inspect(_ctx({"status": 200, "html": "<p>ok</p>"})) is None
 
 
 def test_js_shell_fires_on_empty_spa() -> None:

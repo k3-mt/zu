@@ -712,25 +712,26 @@ async def test_checkpoint_acts_on_worst_verdict_not_first() -> None:
     assert fired == {"a-escalate", "z-terminal"}  # both recorded, worst acted on
 
 
-async def test_404_empty_page_terminates_not_escalates() -> None:
-    # The real-built-in trigger for the same bug: a 404 with an empty body fires
-    # both `error` (TERMINAL) and `empty` (ESCALATE, sorts first). It must
-    # terminate on the 404, never waste a tier climb on a dead page.
-    from zu_checks.detectors.empty import EmptyDetector
+async def test_http_error_is_recoverable_not_terminal() -> None:
+    # A 404 (or 403 WAF wall, 5xx) on a fetched page fires `error` as RETRY, NOT
+    # TERMINAL: a bad fetch must not end the run, so an agent that tries several
+    # candidate urls can fetch the next one. The detector still fires (recorded);
+    # it just doesn't halt. Here the model recovers and finalises a value.
     from zu_checks.detectors.error import ErrorDetector
 
     reg = Registry()
     reg.register("tools", "http_fetch", fetch_tool(text="", status=404))
-    reg.register("detectors", "empty", EmptyDetector())
     reg.register("detectors", "error", ErrorDetector())
     provider = ScriptedProvider.from_moves(
-        [{"tool": "http_fetch", "args": {"url": "http://x.test/"}}, {"text": "{}", "finish": "stop"}]
+        [{"tool": "http_fetch", "args": {"url": "http://x.test/"}},
+         {"text": '{"ok": true}', "finish": "stop"}]
     )
     bus = EventBus()
     result = await run_task(TaskSpec(query="x"), provider, reg, bus)
-    assert result.status == Status.TERMINAL
-    assert result.reason == "error"
-    assert not [e for e in await bus.query() if e.type == "harness.task.escalated"]
+    assert result.status == Status.SUCCESS and result.value == {"ok": True}
+    assert result.reason != "error"        # the 404 did not terminate the run
+    fired = [e for e in await bus.query() if e.type == "harness.detector.fired"]
+    assert any(e.payload.get("detector") == "error" for e in fired)  # recorded, not halting
 
 
 async def test_escalation_exhausted_when_no_higher_tier() -> None:
@@ -853,3 +854,41 @@ async def test_shrink_truncate_strategy_makes_no_model_calls() -> None:
     out = await _shrink_for_model(obs, max_chars=100, strategy="truncate", provider=prov, query="q")
     assert prov.prompts == []                          # truncate never calls the model
     assert "truncated" in out["html"]
+
+
+# --- bounded conversation history for long multi-step runs --------------------
+
+
+def test_bounded_history_off_by_default() -> None:
+    from zu_core.loop import _bounded_history
+
+    msgs = [{"role": "tool", "name": "browser", "content": "x" * 100_000}]
+    assert _bounded_history(msgs, None) is msgs            # None -> untouched
+
+
+def test_bounded_history_elides_old_tool_results_keeps_recent() -> None:
+    from zu_core.loop import _bounded_history
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "tool", "name": "browser", "content": "A" * 50_000},   # old -> elided
+        {"role": "assistant", "content": "my notes"},
+        {"role": "tool", "name": "browser", "content": "B" * 50_000},   # recent (kept)
+        {"role": "tool", "name": "browser", "content": "C" * 50_000},   # recent (kept)
+    ]
+    out = _bounded_history(msgs, 120_000, keep_recent=2)
+    assert out[0]["content"] == "sys" and out[1]["content"] == "task"   # system+task kept
+    assert out[3]["content"] == "my notes"                              # assistant notes kept
+    assert "elided" in out[2]["content"] and len(out[2]["content"]) < 200  # old tool elided
+    assert out[4]["content"] == "B" * 50_000 and out[5]["content"] == "C" * 50_000  # recent full
+
+
+def test_bounded_history_stops_once_under_budget() -> None:
+    from zu_core.loop import _bounded_history
+
+    msgs = [{"role": "tool", "name": "t", "content": "x" * 30_000} for _ in range(5)]
+    out = _bounded_history(msgs, 70_000, keep_recent=1)
+    total = sum(len(m["content"]) for m in out)
+    assert total <= 70_000
+    assert out[-1]["content"] == "x" * 30_000   # the most recent is never elided

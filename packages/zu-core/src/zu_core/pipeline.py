@@ -61,6 +61,7 @@ async def run_pipeline(
     pipeline_id: UUID | None = None,
     max_observation_chars: int | None = None,
     observation_strategy: str = "truncate",
+    max_context_chars: int | None = None,
 ) -> PipelineResult:
     """Drive ``phases`` to a ``PipelineResult`` under one shared trace.
 
@@ -95,6 +96,7 @@ async def run_pipeline(
             providers=providers, containment=containment, trace_id=trace,
             max_observation_chars=max_observation_chars,
             observation_strategy=observation_strategy,
+            max_context_chars=max_context_chars,
         )
         results[phase.name] = result
         await _emit(bus, trace, ev.PIPELINE_PHASE_COMPLETED,

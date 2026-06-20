@@ -89,6 +89,7 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
                 providers=providers, containment=cfg.containment,
                 max_observation_chars=cfg.max_observation_chars,
                 observation_strategy=cfg.observation_strategy,
+                max_context_chars=cfg.max_context_chars,
             )
             return result, await bus.count()
         finally:
