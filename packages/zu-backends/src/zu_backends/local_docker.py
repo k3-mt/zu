@@ -58,6 +58,26 @@ class _Sandbox:
 _RENDER_ENTRYPOINT = "zu-render"
 
 
+def _render_argv(args: dict) -> list[str]:
+    """Build the ``zu-render`` argv from a render ToolCall's args. Purely generic —
+    a URL plus optional viewport and wait/reveal flags; no site-specific logic. The
+    model supplies whatever url/wait/actions its reasoning calls for; this only
+    serializes them onto the entrypoint's CLI."""
+    argv = [_RENDER_ENTRYPOINT, str(args["url"])]
+    width, height = args.get("width"), args.get("height")
+    if width and height:
+        argv += ["--width", str(int(width)), "--height", str(int(height))]
+    if args.get("wait_until"):
+        argv += ["--wait-until", str(args["wait_until"])]
+    if args.get("wait_for"):
+        argv += ["--wait-for", str(args["wait_for"])]
+    if args.get("wait_ms"):
+        argv += ["--wait-ms", str(int(args["wait_ms"]))]
+    if args.get("actions"):
+        argv += ["--actions", json.dumps(args["actions"])]
+    return argv
+
+
 class LocalDockerBackend:
     name = "local-docker"
 
@@ -271,13 +291,7 @@ class LocalDockerBackend:
 
     async def exec(self, sandbox: _Sandbox, call: ToolCall) -> dict:
         """Run the tool call inside the container and return its observation."""
-        url = call.args["url"]
-        argv = [_RENDER_ENTRYPOINT, url]
-        # Pass an explicit viewport through to the entrypoint when the tool asked
-        # for one, so a render is reproducible and responsive pages can be sized.
-        width, height = call.args.get("width"), call.args.get("height")
-        if width and height:
-            argv += ["--width", str(int(width)), "--height", str(int(height))]
+        argv = _render_argv(call.args)
         # demux=True keeps stdout and stderr SEPARATE. Chromium under
         # --no-sandbox is extremely noisy on stderr (GPU/font/dbus warnings); if
         # that noise were merged into stdout it would corrupt the single JSON

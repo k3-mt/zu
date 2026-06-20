@@ -90,6 +90,22 @@ async def test_render_threads_viewport_into_the_tool_call() -> None:
     assert captured["width"] == 375 and captured["height"] == 812
 
 
+async def test_render_forwards_wait_and_actions_to_the_backend() -> None:
+    # Wait/reveal params the model reasons out reach the backend exec as-is — no
+    # site logic in the tool, just generic pass-through of what the model asked for.
+    backend = _backend()
+    actions = [{"click": "text=Next"}, {"click": "text=Dog"}, {"wait_for": "text=Choose a time"}]
+    await RenderDom(backend=backend, allow_private=True).__call__(
+        ctx=None, url="http://spa.test/",
+        wait_until="networkidle", wait_for=".slots", wait_ms=2000, actions=actions,
+    )
+    call = backend.exec_calls[0]
+    assert call.args["wait_until"] == "networkidle"
+    assert call.args["wait_for"] == ".slots"
+    assert call.args["wait_ms"] == 2000
+    assert call.args["actions"] == actions
+
+
 def test_render_dom_is_tier_2() -> None:
     # The attribute the loop's ladder reads to withhold it until escalation.
     assert RenderDom().tier == 2

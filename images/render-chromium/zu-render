@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """zu-render — the tier-2 render entrypoint, run inside the browser container.
 
-The ``local-docker`` backend execs ``zu-render <url>`` and reads one JSON line
-from stdout: ``{"status", "html", "url"}`` — the same observation shape
+The ``local-docker`` backend execs ``zu-render <url> [flags]`` and reads one JSON
+line from stdout: ``{"status", "html", "url"}`` — the same observation shape
 ``http_fetch`` produces, so the loop and detectors stay tool-agnostic. It renders
 the URL in a real headless Chromium (JavaScript executed) via Playwright.
+
+Beyond a plain render it can WAIT for late-injected content (a JS widget that
+populates after ``load``) and perform a short sequence of read-surfacing ACTIONS
+(click an "expand"/"load more"/tab, choose a filter) before capturing — so the
+DOM the loop sees is the one a human would see. It surfaces content; it is not a
+form-submission/transaction driver (no navigation-completing submit primitive).
 
 Chromium runs with ``--no-sandbox`` on purpose: the *container* is the sandbox
 (the backend drops all Linux capabilities and forbids privilege escalation), so
@@ -18,37 +24,110 @@ import argparse
 import json
 import sys
 
+# Bounds so a hostile/janky page can't wedge the render. Per-action and per-wait
+# timeouts are short; the action list is capped.
+_ACTION_TIMEOUT_MS = 10_000
+_MAX_ACTIONS = 10
+_WAIT_UNTIL = ("load", "domcontentloaded", "networkidle", "commit")
+
+
+def _visible_text(page) -> str:
+    """The rendered, human-visible text across the main document AND every child
+    frame. Unlike ``page.content()`` (a serialization of the TOP frame's HTML),
+    ``inner_text`` reflects what is actually displayed — it pierces shadow DOM and,
+    walked over ``page.frames``, captures cross-origin iframe content too. That is
+    where modern widgets (calendars, booking grids) put their data, so the model
+    sees the slots a human sees, not just the outer page's markup. Generic: no
+    knowledge of any site."""
+    parts: list[str] = []
+    for frame in page.frames:
+        try:
+            text = frame.inner_text("body")
+        except Exception:  # noqa: BLE001 - a detached/empty frame contributes nothing
+            text = ""
+        if text and text.strip():
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _run_actions(page, actions: list) -> str | None:
+    """Apply read-surfacing actions in order. Returns an error string on the first
+    failed action (the DOM captured so far is still returned), or None on success.
+
+    Supported: ``click``/``fill``/``select`` (a CSS selector; ``fill``/``select``
+    also take ``value``) to reveal content, and ``wait_for`` (selector) /
+    ``wait_ms`` to let it settle."""
+    for raw in actions[:_MAX_ACTIONS]:
+        if not isinstance(raw, dict):
+            return f"bad action (not an object): {raw!r}"
+        try:
+            if "click" in raw:
+                page.click(raw["click"], timeout=_ACTION_TIMEOUT_MS)
+            elif "fill" in raw:
+                page.fill(raw["fill"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
+            elif "select" in raw:
+                page.select_option(raw["select"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
+            elif "wait_for" in raw:
+                page.wait_for_selector(raw["wait_for"], timeout=_ACTION_TIMEOUT_MS)
+            elif "wait_ms" in raw:
+                page.wait_for_timeout(min(int(raw["wait_ms"]), _ACTION_TIMEOUT_MS))
+            else:
+                return f"unknown action: {sorted(raw)}"
+        except Exception as exc:  # noqa: BLE001 - surface which action failed; keep the DOM
+            return f"action {raw!r} failed: {type(exc).__name__}: {exc}"
+    return None
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="zu-render", add_help=False)
     parser.add_argument("url", nargs="?", default="")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--wait-until", default="load", choices=_WAIT_UNTIL)
+    parser.add_argument("--wait-for", default=None)          # a selector to await
+    parser.add_argument("--wait-ms", type=int, default=0)    # extra settle time
+    parser.add_argument("--actions", default=None)           # JSON list of actions
     args = parser.parse_args(sys.argv[1:])
     url = args.url
     if not url:
-        print(json.dumps({"status": 400, "html": "", "error": "usage: zu-render <url> [--width W --height H]"}))
+        print(json.dumps({"status": 400, "html": "", "error": "usage: zu-render <url> [flags]"}))
+        return 2
+    try:
+        actions = json.loads(args.actions) if args.actions else []
+        if not isinstance(actions, list):
+            raise ValueError("--actions must be a JSON list")
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(json.dumps({"status": 400, "html": "", "url": url, "error": f"bad --actions: {exc}"}))
         return 2
     try:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            action_error = None
             try:
-                # Set the viewport explicitly so the rendered DOM is reproducible
-                # and responsive pages render at a known width (Playwright's
-                # implicit default is 1280x720; we make it explicit + overridable).
                 page = browser.new_page(viewport={"width": args.width, "height": args.height})
-                # wait_until="load" — NOT "networkidle": a DOM scraper wants the
-                # document loaded, and "networkidle" never settles on pages with
-                # long-polling / websockets / analytics beacons, so it would time
-                # out on exactly the JS-heavy SPAs tier 2 exists to handle.
-                resp = page.goto(url, wait_until="load", timeout=30000)
-                html = page.content()
+                # wait_until default "load" — NOT "networkidle": a DOM scraper wants
+                # the document loaded, and "networkidle" never settles on pages with
+                # long-polling/websockets/analytics. But a caller chasing a widget
+                # that injects content after load can ASK for "networkidle" (or a
+                # wait_for selector / wait_ms below) explicitly.
+                resp = page.goto(url, wait_until=args.wait_until, timeout=30000)
                 status = resp.status if resp is not None else 200
+                if args.wait_for:
+                    page.wait_for_selector(args.wait_for, timeout=_ACTION_TIMEOUT_MS)
+                if actions:
+                    action_error = _run_actions(page, actions)
+                if args.wait_ms:
+                    page.wait_for_timeout(min(args.wait_ms, _ACTION_TIMEOUT_MS))
+                html = page.content()
+                text = _visible_text(page)  # rendered text (pierces shadow DOM + frames)
             finally:
                 browser.close()
-        print(json.dumps({"status": status, "html": html, "url": url}))
+        out = {"status": status, "html": html, "text": text, "url": url}
+        if action_error:
+            out["action_error"] = action_error  # partial reveal: DOM returned + the failure
+        print(json.dumps(out))
         return 0
     except Exception as exc:  # noqa: BLE001 - report as an observation, never crash
         print(json.dumps({"status": 500, "html": "", "url": url, "error": f"{type(exc).__name__}: {exc}"}))

@@ -12,8 +12,28 @@ import json
 
 import pytest
 
-from zu_backends.local_docker import DockerUnavailableError, LocalDockerBackend
+from zu_backends.local_docker import DockerUnavailableError, LocalDockerBackend, _render_argv
 from zu_core.ports import ToolCall
+
+
+def test_render_argv_is_generic_url_plus_wait_and_actions() -> None:
+    # The argv builder serializes whatever the model asked for — no site logic.
+    actions = [{"click": "text=Next"}, {"wait_for": ".slots"}]
+    argv = _render_argv({
+        "url": "https://x/booking", "width": 1100, "height": 1400,
+        "wait_until": "networkidle", "wait_for": ".slots", "wait_ms": 2000, "actions": actions,
+    })
+    assert argv[:2] == ["zu-render", "https://x/booking"]
+    assert "--wait-until" in argv and "networkidle" in argv
+    assert "--wait-for" in argv and ".slots" in argv
+    assert "--wait-ms" in argv and "2000" in argv
+    i = argv.index("--actions")
+    assert json.loads(argv[i + 1]) == actions     # actions round-trip as JSON
+
+
+def test_render_argv_minimal_is_just_url() -> None:
+    # No wait/actions -> a plain render, unchanged from before the capability.
+    assert _render_argv({"url": "https://x/"}) == ["zu-render", "https://x/"]
 
 _RENDERED = "<html><body><h1>Rendered</h1></body></html>"
 

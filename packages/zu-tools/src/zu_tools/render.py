@@ -41,20 +41,55 @@ class RenderDom:
     tier = 2  # unlocked only after a detector escalates off tier 1
     schema = {
         "name": "render_dom",
-        "description": "Render a URL in a headless browser and return the DOM after JS executes.",
+        "description": (
+            "Render a URL in a headless browser and return the DOM after JS executes. "
+            "Can wait for late-injected widget content and perform read-surfacing "
+            "clicks/selects (expand, load-more, tabs, filters) before capturing."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "url": {"type": "string"},
                 "width": {"type": "integer", "description": "viewport width in px (optional)"},
                 "height": {"type": "integer", "description": "viewport height in px (optional)"},
+                "wait_until": {
+                    "type": "string",
+                    "enum": ["load", "domcontentloaded", "networkidle", "commit"],
+                    "description": "when to consider navigation done; use 'networkidle' "
+                                   "for a widget that loads content after load (optional)",
+                },
+                "wait_for": {
+                    "type": "string",
+                    "description": "a CSS selector to wait for before capturing (optional)",
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": "extra settle time in ms after load/actions (optional)",
+                },
+                "actions": {
+                    "type": "array",
+                    "description": (
+                        "read-surfacing actions run IN ORDER before capture, to drive a "
+                        "multi-step widget you reason through step by step. Each is "
+                        "{click|fill|select|wait_for: <selector>, value?: <str>} or {wait_ms:<n>}. "
+                        "A selector is a CSS selector OR a Playwright text selector "
+                        "(text=\"I am a new client\") — target what you SEE in the rendered "
+                        "page. Each render is a fresh browser, so include the FULL sequence "
+                        "from the start each call; read the returned DOM, then append the next "
+                        "action. Example: [{\"click\":\"text=Next\"},{\"click\":\"text=Dog\"},"
+                        "{\"wait_for\":\"text=Choose a time\"}]."
+                    ),
+                    "items": {"type": "object"},
+                },
             },
             "required": ["url"],
         },
     }
     prompt_fragment = (
-        "render_dom(url): render a page in a real browser (JS executed). "
-        "More expensive than http_fetch; use when a page needs JavaScript."
+        "render_dom(url, [wait_until|wait_for|wait_ms|actions]): render a page in a "
+        "real browser (JS executed). Use when a page needs JavaScript; pass wait_for/"
+        "wait_until or read-surfacing actions (click/select to expand, load-more, pick "
+        "a tab) when content loads after the page or behind a control."
     )
     # Provisions a sandbox (CAP_SANDBOX) and renders a model-chosen URL inside
     # it, so it declares open egress (the browser must reach the page). The
@@ -87,7 +122,9 @@ class RenderDom:
         return self._backend
 
     async def __call__(
-        self, ctx: Any, url: str, width: int | None = None, height: int | None = None
+        self, ctx: Any, url: str, width: int | None = None, height: int | None = None,
+        wait_until: str | None = None, wait_for: str | None = None,
+        wait_ms: int | None = None, actions: list | None = None,
     ) -> dict:
         # Apply the same host-level SSRF backstop tier-1 http_fetch uses, *before*
         # leasing a browser: escalating to tier 2 must not become a way to fetch
@@ -124,15 +161,32 @@ class RenderDom:
             "width": int(width) if width else _DEFAULT_WIDTH,
             "height": int(height) if height else _DEFAULT_HEIGHT,
         }
+        # Forward the model's wait/reveal choices verbatim (generic; no site logic).
+        if wait_until:
+            args["wait_until"] = wait_until
+        if wait_for:
+            args["wait_for"] = wait_for
+        if wait_ms:
+            args["wait_ms"] = int(wait_ms)
+        if actions:
+            args["actions"] = actions
         try:
             obs = await backend.exec(sandbox, ToolCall(name=self.name, args=args))
         finally:
             await backend.destroy(sandbox)
         # Normalise to the same observation shape http_fetch produces, so the
-        # loop's content handling and the detectors are tool-agnostic.
-        return {
+        # loop's content handling and the detectors are tool-agnostic. ``text`` is
+        # the rendered visible text (shadow DOM + child frames) when the entrypoint
+        # supplies it — where dynamic widgets put their data; it is a content key
+        # the loop stores for grounding and the model reads.
+        out: dict[str, Any] = {
             "status": obs.get("status", 200),
             "html": obs.get("html", ""),
             "url": obs.get("url", url),
             "rendered": True,
         }
+        if obs.get("text"):
+            out["text"] = obs["text"]
+        if obs.get("action_error"):
+            out["action_error"] = obs["action_error"]
+        return out

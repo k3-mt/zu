@@ -109,6 +109,7 @@ class FakeSandboxBackend:
         self.launched: list[dict] = []
         self.destroyed = 0
         self.exec_env: dict | None = None
+        self.exec_calls: list[Any] = []  # render ToolCalls seen by exec()
 
     @property
     def last_launch(self) -> dict | None:
@@ -119,6 +120,7 @@ class FakeSandboxBackend:
         return {"id": f"sbx-{len(self.launched)}", "spec": spec}
 
     async def exec(self, sandbox: Any, call: Any) -> dict:
+        self.exec_calls.append(call)
         if self.exec_raises:
             raise RuntimeError("render blew up")
         return {"status": 200, "html": self.rendered, "url": call.args["url"]}
