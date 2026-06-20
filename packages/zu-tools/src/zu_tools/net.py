@@ -158,12 +158,13 @@ def validate_and_pin(url: str, *, allow_private: bool | None = None) -> str | No
     return next(iter(ips))
 
 
-def pin_ip(host: str) -> str:
-    """Resolve ``host`` ONCE, validate every address, and return one validated IP
-    to pin a connection to. This is the *authoritative* resolution: closing the
-    DNS-rebinding TOCTOU means the address we validate is the address we connect
-    to, with no second lookup in between. Raises ``BlockedURLError`` if any
-    resolved address is internal (same default-deny as ``check_url``)."""
+def _validated_ips(host: str) -> list[str]:
+    """Resolve ``host`` ONCE, validate every address, and return ALL validated IPs
+    to try, IPv4 first (broadest reachability) then IPv6. This is the
+    *authoritative* resolution: closing the DNS-rebinding TOCTOU means the
+    addresses we validate are the addresses we connect to, with no second lookup
+    in between. Raises ``BlockedURLError`` if ANY resolved address is internal
+    (default-deny: one poisoned answer fails the whole fetch)."""
     ips = _resolve_ips(host)
     for ip in ips:
         reason = _ip_blocked_reason(ip)
@@ -173,11 +174,16 @@ def pin_ip(host: str) -> str:
                 kind="ssrf",
                 target=host,
             )
-    # Prefer an IPv4 address for the pin (broadest reachability); else any.
-    for ip in ips:
-        if ":" not in ip:
-            return ip
-    return next(iter(ips))
+    v4 = sorted(ip for ip in ips if ":" not in ip)
+    v6 = sorted(ip for ip in ips if ":" in ip)
+    return v4 + v6
+
+
+def pin_ip(host: str) -> str:
+    """One validated IP to pin a connection to (the first, IPv4-preferred). Kept
+    for callers that want a single pin; ``PinnedTransport`` uses ``_validated_ips``
+    so it can fall back across a host's endpoints."""
+    return _validated_ips(host)[0]
 
 
 class PinnedTransport(httpx.AsyncBaseTransport):
@@ -189,9 +195,12 @@ class PinnedTransport(httpx.AsyncBaseTransport):
     check. This transport performs the authoritative resolution itself: it
     validates the host and **pins the connection to a validated IP**, while
     preserving the original hostname for the ``Host`` header and the TLS SNI (via
-    httpcore's ``sni_hostname`` extension), so certificate validation is
-    unchanged. There is no second, unvalidated lookup. ``allow_private`` (None ⇒
-    ``ZU_HTTP_ALLOW_PRIVATE``) skips pinning for local development."""
+    httpcore's ``sni_hostname`` extension), so certificate validation is against
+    the hostname, not the IP. There is no second, unvalidated lookup. When a host
+    has several endpoints, an idempotent fetch falls back across the validated IPs
+    (each keeps SNI/Host on the hostname) instead of dying on one bad endpoint.
+    ``allow_private`` (None ⇒ ``ZU_HTTP_ALLOW_PRIVATE``) skips pinning for local
+    development."""
 
     def __init__(
         self,
@@ -207,13 +216,27 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         if allow_private is None:
             allow_private = os.environ.get("ZU_HTTP_ALLOW_PRIVATE") == "1"
         host = request.url.host
-        if not allow_private and host and request.url.scheme in _ALLOWED_SCHEMES:
-            ip = pin_ip(host)  # authoritative resolve+validate, raises if internal
-            # Keep the original hostname for TLS SNI / cert validation; the Host
-            # header httpx already set from the URL stays the original host too.
-            request.extensions = {**request.extensions, "sni_hostname": host}
-            request.url = request.url.copy_with(host=ip)
-        return await self._inner.handle_async_request(request)
+        if allow_private or not host or request.url.scheme not in _ALLOWED_SCHEMES:
+            return await self._inner.handle_async_request(request)
+
+        ips = _validated_ips(host)  # authoritative resolve+validate, raises if internal
+        # Keep the original hostname for TLS SNI + cert validation; the Host header
+        # httpx already set from the original URL stays the hostname too.
+        request.extensions = {**request.extensions, "sni_hostname": host}
+        original = request.url
+        # A host often resolves to several CDN/WAF endpoints; if the pinned one
+        # fails the handshake (the cert-vs-endpoint case) or is unreachable, fall
+        # back across the rest rather than failing the fetch. Only an idempotent
+        # request is retried — a body may not be re-sendable; http_fetch is GET.
+        candidates = ips if request.method in ("GET", "HEAD") else ips[:1]
+        last_exc: Exception | None = None
+        for ip in candidates:
+            request.url = original.copy_with(host=ip)
+            try:
+                return await self._inner.handle_async_request(request)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                last_exc = exc  # connect/TLS failure before any response byte
+        raise last_exc if last_exc is not None else RuntimeError("no validated IP")
 
     async def aclose(self) -> None:
         await self._inner.aclose()

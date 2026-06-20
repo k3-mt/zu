@@ -103,12 +103,18 @@ class HttpFetch:
                 # instead of buffering an unbounded (or decompression-bombed) page.
                 async with c.stream("GET", current) as r:
                     if r.is_redirect and r.headers.get("location"):
-                        nxt = urljoin(str(r.url), r.headers["location"])
+                        # Resolve the next hop against the original *hostname* URL
+                        # (``current``), NOT ``r.url`` — PinnedTransport rewrites
+                        # the request host to the pinned IP, so a relative Location
+                        # joined to ``r.url`` would carry the IP as host and the
+                        # next TLS handshake would verify the cert against the IP.
+                        nxt = urljoin(current, r.headers["location"])
                         check_url(nxt, allow_private=self.allow_private)
                         current = nxt
                         continue
                     html = await self._read_capped(r, current)
-                    return {"status": r.status_code, "html": html, "url": str(r.url)}
+                    # Report the hostname URL we fetched, not r.url (the IP form).
+                    return {"status": r.status_code, "html": html, "url": current}
         raise BlockedURLError(f"too many redirects (> {self.max_redirects}) starting from {url!r}")
 
     async def _read_capped(self, r: httpx.Response, url: str) -> str:

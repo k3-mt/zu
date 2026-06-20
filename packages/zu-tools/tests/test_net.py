@@ -79,6 +79,49 @@ async def test_pin_connects_to_validated_ip_keeps_host_and_sni(monkeypatch) -> N
     assert cap.request.extensions.get("sni_hostname") == "example.com"  # TLS SNI preserved
 
 
+class _FlakyTransport(httpx.AsyncBaseTransport):
+    """Inner transport that raises ConnectError for some endpoint IPs (a bad
+    handshake / unreachable endpoint) and records the request that succeeds."""
+
+    def __init__(self, fail_ips: set[str]) -> None:
+        self.fail_ips = fail_ips
+        self.tried: list[str] = []
+        self.ok_request: httpx.Request | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        ip = request.url.host
+        self.tried.append(ip)
+        if ip in self.fail_ips:
+            raise httpx.ConnectError("bad endpoint", request=request)
+        self.ok_request = request
+        return httpx.Response(200, text="ok")
+
+
+async def test_pin_falls_back_across_validated_ips_keeping_hostname(monkeypatch) -> None:
+    # A host with two endpoints; the first fails the handshake (the cert-vs-IP
+    # transient). The fetch must not die — it tries the next validated IP, with
+    # SNI/Host still on the hostname.
+    monkeypatch.setattr(net_mod, "_resolve_ips", lambda host: {"5.5.5.5", "6.6.6.6"})
+    flaky = _FlakyTransport(fail_ips={"5.5.5.5"})  # the IPv4-first pick fails
+    t = PinnedTransport(allow_private=False, inner=flaky)
+    async with httpx.AsyncClient(transport=t) as c:
+        r = await c.get("https://example.com/page")
+    assert r.status_code == 200
+    assert flaky.tried == ["5.5.5.5", "6.6.6.6"]                 # fell back in order
+    assert flaky.ok_request is not None
+    assert flaky.ok_request.url.host == "6.6.6.6"               # connected to the survivor
+    assert flaky.ok_request.headers["Host"] == "example.com"    # hostname preserved
+    assert flaky.ok_request.extensions.get("sni_hostname") == "example.com"
+
+
+async def test_pin_raises_last_error_when_every_endpoint_fails(monkeypatch) -> None:
+    monkeypatch.setattr(net_mod, "_resolve_ips", lambda host: {"5.5.5.5", "6.6.6.6"})
+    t = PinnedTransport(allow_private=False, inner=_FlakyTransport(fail_ips={"5.5.5.5", "6.6.6.6"}))
+    async with httpx.AsyncClient(transport=t) as c:
+        with pytest.raises(httpx.ConnectError):
+            await c.get("https://example.com/")
+
+
 async def test_pin_refuses_a_rebind_to_an_internal_ip(monkeypatch) -> None:
     # The classic rebind: check_url saw a public IP, but at connect time the host
     # now resolves to metadata. The transport does the authoritative lookup and

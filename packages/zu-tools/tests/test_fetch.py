@@ -46,6 +46,32 @@ def test_contained_mode_selected_only_inside_the_sandbox(monkeypatch) -> None:
     assert HttpFetch(transport=_transport(b"x"))._contained() is False  # injected -> guarded
 
 
+async def test_relative_redirect_resolves_against_hostname_not_pinned_ip(monkeypatch) -> None:
+    # Regression: PinnedTransport rewrites the request host to the pinned IP. A
+    # relative redirect Location must be resolved against the original HOSTNAME,
+    # not r.url (the IP form) — else the next hop carries the IP as host and TLS
+    # verifies the cert against the IP. The reported url must be the hostname too.
+    import zu_tools.net as net_mod
+    from zu_tools.net import PinnedTransport
+
+    monkeypatch.setattr(net_mod, "_resolve_ips", lambda host: {"9.9.9.9"})
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.url.path, request.extensions.get("sni_hostname")))
+        if request.url.path == "/Book":
+            return httpx.Response(301, headers={"location": "/book-lower"})
+        return httpx.Response(200, text="<html>ok</html>")
+
+    fetch = HttpFetch(transport=PinnedTransport(allow_private=False, inner=httpx.MockTransport(handler)))
+    out = await fetch(None, "https://shop.example/Book")
+    assert out["status"] == 200
+    assert out["url"] == "https://shop.example/book-lower"        # hostname kept through redirect
+    assert [host for host, _, _ in seen] == ["9.9.9.9", "9.9.9.9"]  # both hops pinned to the IP
+    assert all(sni == "shop.example" for _, _, sni in seen)        # SNI stayed the hostname
+    assert seen[1][1] == "/book-lower"                             # redirect resolved correctly
+
+
 async def test_initial_url_still_ssrf_checked() -> None:
     # The cap doesn't weaken the SSRF guard: an internal target is refused
     # before any request is made (no transport needed).

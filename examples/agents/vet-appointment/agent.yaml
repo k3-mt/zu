@@ -25,8 +25,10 @@ tiers:                                  # the escalation ladder — tools per ti
 
 plugins:
   # Detectors decide when tier 1 isn't enough and the loop must escalate to the
-  # tier-2 browser: an empty/erroring fetch, a JS shell, or a bot wall.
-  detectors: [empty, error, js-shell, bot-wall]
+  # tier-2 browser: an empty/erroring fetch, a JS shell, a bot wall, or a page
+  # whose content is deferred to an embedded JS widget (e.g. a booking widget —
+  # the common case for vet appointments).
+  detectors: [empty, error, js-shell, embedded-widget, bot-wall]
   # Shape the result, then prove every reported value is on the page.
   validators: [schema, grounding]
 

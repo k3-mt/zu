@@ -113,8 +113,65 @@ def test_bot_wall_fires_on_weak_phrase_with_cloudflare_fingerprint() -> None:
     assert v is not None and v.severity is Severity.ESCALATE
 
 
+# --- embedded-widget: content deferred to a JS widget/iframe -----------------
+
+_VETSTORIA = (
+    "<html><body><h1>Park Vets</h1><p>Lots of normal page chrome here, nav, "
+    "footer, plenty of visible text so this is NOT an empty shell.</p>"
+    "<div id='oabp-widget' domain='booking.vetstoria.com'></div>"
+    "<script src='https://booking.vetstoria.com/js/oabp-widget.js'></script>"
+    "</body></html>"
+)
+
+
+def test_embedded_widget_fires_on_a_js_booking_widget() -> None:
+    from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
+
+    v = EmbeddedWidgetDetector().inspect(_ctx({"html": _VETSTORIA}))
+    assert v is not None and v.severity is Severity.ESCALATE
+
+
+def test_embedded_widget_fires_on_an_external_iframe_app() -> None:
+    from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
+
+    html = "<html><body><p>book below</p><iframe src='https://book.example/app'></iframe></body></html>"
+    v = EmbeddedWidgetDetector().inspect(_ctx({"html": html}))
+    assert v is not None and v.severity is Severity.ESCALATE
+
+
+def test_embedded_widget_quiet_on_a_plain_content_page_with_analytics() -> None:
+    from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
+
+    # A real content page that merely loads an external analytics script and links
+    # to a booking page must NOT escalate — the data is in the HTML.
+    html = (
+        "<html><body><h1>Opening hours</h1><p>Mon-Fri 9-5. Call 020 555 1234.</p>"
+        "<a href='/book-an-appointment'>Book an appointment</a>"
+        "<script src='https://www.googletagmanager.com/gtag/js'></script></body></html>"
+    )
+    assert EmbeddedWidgetDetector().inspect(_ctx({"html": html})) is None
+
+
+def test_embedded_widget_fires_once_then_stays_quiet() -> None:
+    # It's an escalation trigger: it unlocks the browser once, then must go quiet —
+    # a later widget page (or the rendered DOM) re-firing at the top tier would end
+    # the run as 'escalation exhausted' before the model can use the browser.
+    import types
+
+    from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
+
+    det = EmbeddedWidgetDetector()
+    assert det.inspect(RunContext(spec=None, observation={"html": _VETSTORIA}, events=[])) is not None
+    for prior in (
+        types.SimpleNamespace(type="harness.task.escalated", source=None, payload={}),
+        types.SimpleNamespace(type="data.source.fetched", source="render_dom", payload={}),
+    ):
+        ctx = RunContext(spec=None, observation={"html": _VETSTORIA}, events=[prior])
+        assert det.inspect(ctx) is None
+
+
 def test_detectors_discoverable() -> None:
     reg = Registry()
     reg.discover()
-    for name in ("empty", "error", "js-shell", "bot-wall"):
+    for name in ("empty", "error", "js-shell", "embedded-widget", "bot-wall"):
         assert name in reg.names("detectors")
