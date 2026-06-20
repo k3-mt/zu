@@ -165,6 +165,10 @@ class LocalDockerBackend:
                 with open(profile, encoding="utf-8") as fh:
                     profile = fh.read()
             run_kwargs["security_opt"] = [*run_kwargs.get("security_opt", []), f"seccomp={profile}"]
+        # Bind mounts requested by the caller (e.g. a bundle's tools/ mounted
+        # read-only). Applied unconditionally; the CA branches below merge into it.
+        if spec.get("volumes"):
+            run_kwargs["volumes"] = dict(spec["volumes"])
         environment = dict(spec.get("environment") or {})
         proxy = spec.get("proxy")
         if proxy:

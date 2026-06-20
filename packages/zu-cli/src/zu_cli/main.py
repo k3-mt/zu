@@ -145,6 +145,9 @@ def _execute_sandboxed(agent: str) -> Result:
     doc = _read_doc(str(p / AGENT_FILE if p.is_dir() else p))
     task_doc = doc.get("task", {})
     config_doc = {k: v for k, v in doc.items() if k != "task"}
+    # The bundle directory (the folder holding agent.yaml) is mounted into the
+    # container so its own tools/ resolve inside the box.
+    bundle_dir = str(p if p.is_dir() else p.parent)
     try:
         from zu_backends.local_docker import LocalDockerBackend
 
@@ -158,7 +161,7 @@ def _execute_sandboxed(agent: str) -> Result:
     launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
     typer.echo(f"zu run --sandboxed: {agent} in {image} (egress via proxy)")
     result, events = asyncio.run(
-        launcher.run(task_doc, config_doc, allowlist=_egress_allowlist(cfg))
+        launcher.run(task_doc, config_doc, allowlist=_egress_allowlist(cfg), bundle_dir=bundle_dir)
     )
     typer.echo(f"status : {result.status.value}")
     if result.value is not None:

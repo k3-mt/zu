@@ -37,6 +37,52 @@ def test_in_container_entrypoint_emits_result_json(monkeypatch, capsys) -> None:
     assert payload["result"]["value"] == {"ok": True}
 
 
+def test_entrypoint_loads_a_bundles_tools_from_zu_bundle(tmp_path, monkeypatch, capsys) -> None:
+    # The in-container half of bundle support: ZU_BUNDLE points at the mounted
+    # bundle; the entrypoint adds it to sys.path so the agent's `tools.x:Class`
+    # import-ref resolves and the custom tool runs — no packaging, no install.
+    import sys
+
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "tools" / "greet.py").write_text(
+        "class Greet:\n"
+        "    name = 'greet'\n"
+        "    tier = 1\n"
+        "    schema = {'name': 'greet', 'parameters': {'type': 'object',\n"
+        "              'properties': {'name': {'type': 'string'}}, 'required': ['name']}}\n"
+        "    prompt_fragment = 'greet(name)'\n"
+        "    capabilities = frozenset()\n"
+        "    egress = frozenset()\n"
+        "    async def __call__(self, ctx, name):\n"
+        "        return {'text': 'hi ' + name}\n",
+        encoding="utf-8",
+    )
+    config = {
+        "provider": {"name": "scripted", "script": [
+            {"tool": "greet", "args": {"name": "World"}},
+            {"text": '{"ok": true}', "finish": "stop"}]},
+        "tiers": {1: ["tools.greet:Greet"]},
+        "plugins": {"validators": []},
+    }
+    monkeypatch.setenv("ZU_SANDBOXED", "1")
+    monkeypatch.setenv("ZU_BUNDLE", str(tmp_path))
+    monkeypatch.setenv("ZU_TASK", json.dumps({"query": "q"}))
+    monkeypatch.setenv("ZU_CONFIG", json.dumps(config))
+
+    for m in [k for k in sys.modules if k == "tools" or k.startswith("tools.")]:
+        del sys.modules[m]
+    try:
+        rc = run_contained_from_env()
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert rc == 0 and payload["result"]["status"] == "success"
+        # the custom tool actually ran inside
+        assert any(e["type"] == "harness.tool.invoked" for e in payload["events"])
+    finally:
+        for m in [k for k in sys.modules if k == "tools" or k.startswith("tools.")]:
+            del sys.modules[m]
+
+
 @pytest.mark.docker
 async def test_launcher_runs_the_agent_inside_the_box() -> None:
     from zu_backends.local_docker import LocalDockerBackend
@@ -57,3 +103,31 @@ async def test_launcher_runs_the_agent_inside_the_box() -> None:
     assert "harness.turn.started" in types
     assert "harness.turn.completed" in types
     assert "harness.task.completed" in types
+
+
+@pytest.mark.docker
+async def test_launcher_mounts_a_bundles_own_tools() -> None:
+    # A bundle's custom tools/ are not in the image — mounting the bundle dir lets
+    # its `tools.x:Class` import-refs resolve INSIDE the contained container.
+    from pathlib import Path
+
+    from zu_backends.local_docker import LocalDockerBackend
+    from zu_cli.sandbox import SandboxLauncher
+
+    bundle = Path(__file__).resolve().parents[3] / "examples" / "agents" / "custom-tool"
+    image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:test")
+    config = {
+        "provider": {"name": "scripted", "script": [
+            {"tool": "greet", "args": {"name": "World"}},
+            {"text": '{"greeting": "Hello, World!"}', "finish": "stop"}]},
+        "tiers": {1: ["tools.greet:Greet"]},
+        "plugins": {"validators": []},
+    }
+    launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
+    result, events = await launcher.run(
+        {"query": "greet"}, config, allowlist=[], bundle_dir=str(bundle),
+    )
+    assert result.status.value == "success"
+    assert result.value == {"greeting": "Hello, World!"}
+    # the bundle's own tool ran inside the box
+    assert any(e.get("type") == "harness.tool.invoked" for e in events)

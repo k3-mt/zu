@@ -34,6 +34,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from zu_core.contracts import Result
@@ -45,8 +46,6 @@ def _seccomp_block_profile() -> str:
     """The host path of the shipped blocking seccomp profile (Docker reads the
     profile from the client host). Resolved lazily so importing this module never
     requires zu-backends to be installed."""
-    from pathlib import Path
-
     import zu_backends
 
     return str(Path(zu_backends.__file__).parent / "seccomp" / "redteam-block.json")
@@ -86,6 +85,12 @@ def run_contained_from_env(argv: list[str] | None = None) -> int:
     """Console-script entrypoint (``zu-run-contained``) executed INSIDE the
     container. Reads ``ZU_TASK`` / ``ZU_CONFIG`` (JSON) from the environment, runs
     the agent, and emits the Result + event log as one JSON object on stdout."""
+    # The launcher mounts a bundle at ZU_BUNDLE and sets PYTHONPATH to it; add it
+    # to sys.path explicitly too, so the bundle's tools/ import-refs resolve even
+    # if PYTHONPATH wasn't honored by the exec environment.
+    bundle = os.environ.get("ZU_BUNDLE")
+    if bundle and bundle not in sys.path:
+        sys.path.insert(0, bundle)
     task = json.loads(os.environ.get("ZU_TASK") or "{}")
     config = json.loads(os.environ.get("ZU_CONFIG") or "{}")
     result, events = asyncio.run(_run_in_process(task, config))
@@ -127,7 +132,7 @@ class SandboxLauncher:
     ready_timeout_s: float = 20.0
 
     async def run(
-        self, task: dict, config: dict, *, allowlist: list[str]
+        self, task: dict, config: dict, *, allowlist: list[str], bundle_dir: str | None = None
     ) -> tuple[Result, list[dict]]:
         client = self.backend._docker()
         proxy_name = f"{self.network_name}-proxy"
@@ -165,6 +170,14 @@ class SandboxLauncher:
                 "seccomp": self.seccomp or _seccomp_block_profile(),
                 "command": ["sleep", "infinity"],
             }
+            # A bundle's own tools/ are not in the image — mount the bundle dir
+            # READ-ONLY at /bundle so the agent's `tools.x:Class` import-refs
+            # resolve inside the box. The user owns this code; the mount is ro and
+            # the container is still caps-dropped + egress-gated.
+            if bundle_dir is not None:
+                target_spec["volumes"] = {
+                    str(Path(bundle_dir).resolve()): {"bind": "/bundle", "mode": "ro"}
+                }
             sandbox = await self.backend.launch(target_spec)
             # `docker exec` does not inherit the container's runtime proxy env, so
             # pass it explicitly. ZU_SANDBOXED marks the run contained — set HERE,
@@ -178,6 +191,10 @@ class SandboxLauncher:
                 "http_proxy": proxy_url, "https_proxy": proxy_url,
                 "NO_PROXY": "localhost,127.0.0.1",
             }
+            if bundle_dir is not None:
+                # Put the mounted bundle on the path so its tools/ import-refs resolve.
+                exec_env["PYTHONPATH"] = "/bundle"
+                exec_env["ZU_BUNDLE"] = "/bundle"
             code, out, err = await self.backend.exec_entrypoint(
                 sandbox, ["zu-run-contained"],
                 environment=exec_env, timeout_s=self.exec_timeout_s,
