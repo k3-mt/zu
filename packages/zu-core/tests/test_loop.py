@@ -12,7 +12,7 @@ no Docker, no real browser, the same fixture discipline as everywhere else.
 
 from __future__ import annotations
 
-import httpx
+import pytest
 
 from zu_core.bus import EventBus
 from zu_core.contracts import Budget, Status, TaskSpec
@@ -20,7 +20,8 @@ from zu_core.loop import run_task
 from zu_core.ports import Finish, ModelResponse, Scope, Severity, ToolCall, Verdict
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
-from zu_tools.fetch import HttpFetch
+from zu_testing import FakeSandboxBackend, fetch_tool
+from zu_tools.fetch import HttpFetch  # the real tool (SSRF guard) for the no-transport case
 from zu_tools.parse import HtmlParse
 
 _PAGE = "<html><body><h1>Acme Widget</h1><span class='price'>$9.00</span></body></html>"
@@ -39,12 +40,9 @@ def test_parse_value_handles_plain_fenced_and_scalar() -> None:
     assert _parse_value(None) is None
 
 
-def _fetch_fixture() -> HttpFetch:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=_PAGE)
-
-    # allow_private skips DNS; the MockTransport returns the saved page — no net.
-    return HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
+def _fetch_fixture():
+    # The real http_fetch tool served the saved page off a mock transport (no net).
+    return fetch_tool(text=_PAGE)
 
 
 def _registry_with_tools() -> Registry:
@@ -99,6 +97,100 @@ async def test_oversized_tool_observation_is_rejected() -> None:
     assert result.status == Status.SUCCESS  # the bomb did not crash the run
     returned = [e for e in await bus.query() if e.type == "harness.tool.returned"]
     assert any("size limit" in str(e.payload) for e in returned)
+
+
+class _NetTool:
+    """A tool with off-box reach: declares egress, so it needs containment."""
+    name = "net_tool"
+    tier = 1
+    schema = {"name": "net_tool", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "net_tool()"
+    capabilities: frozenset[str] = frozenset()
+    egress: frozenset[str] = frozenset({"*"})
+
+    async def __call__(self, ctx) -> dict:
+        return {"ok": True}
+
+
+def _net_registry() -> Registry:
+    reg = Registry()
+    reg.register("tools", "net_tool", _NetTool())
+    return reg
+
+
+async def test_containment_required_refuses_uncontained_capability_tool() -> None:
+    from zu_core.security import ContainmentRequired
+
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    with pytest.raises(ContainmentRequired) as ei:
+        await run_task(TaskSpec(query="q"), provider, _net_registry(), EventBus(),
+                       containment="required")
+    assert "net_tool" in ei.value.tools
+
+
+async def test_containment_required_allows_when_sandboxed(monkeypatch) -> None:
+    # Inside the sandbox (ZU_SANDBOXED set) the container is the boundary, so the
+    # same capability tool is permitted to run.
+    monkeypatch.setenv("ZU_SANDBOXED", "1")
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "net_tool", "args": {}}, {"text": '{"ok": true}', "finish": "stop"}]
+    )
+    result = await run_task(TaskSpec(query="q"), provider, _net_registry(), EventBus(),
+                            containment="required")
+    assert result.status == Status.SUCCESS
+
+
+async def test_containment_required_allows_pure_cpu_tool() -> None:
+    # html_parse has an empty envelope and is tier 1 — host-safe, no sandbox needed.
+    reg = Registry()
+    reg.register("tools", "html_parse", HtmlParse())
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    result = await run_task(TaskSpec(query="q"), provider, reg, EventBus(),
+                            containment="required")
+    assert result.status == Status.SUCCESS
+
+
+async def test_containment_audit_is_the_permissive_default() -> None:
+    # The default posture runs the capability tool in-process (declarations logged).
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "net_tool", "args": {}}, {"text": '{"ok": true}', "finish": "stop"}]
+    )
+    result = await run_task(TaskSpec(query="q"), provider, _net_registry(), EventBus())
+    assert result.status == Status.SUCCESS
+
+
+async def test_hung_tool_is_bounded_by_wall_time() -> None:
+    # Tools are the untrusted surface: one hung on a dead socket must not block
+    # the run forever. The tool call is bounded by the run's remaining wall-time,
+    # so the hang becomes a timeout observation and the run ends on the budget.
+    import asyncio
+
+    class Hang:
+        name = "hang"
+        tier = 1
+        schema = {"name": "hang", "parameters": {"type": "object", "properties": {}}}
+        prompt_fragment = "hang()"
+        capabilities: frozenset[str] = frozenset()
+        egress: frozenset[str] = frozenset()
+
+        async def __call__(self, ctx) -> dict:
+            await asyncio.sleep(60)  # never returns within the budget
+            return {"never": True}
+
+    reg = Registry()
+    reg.register("tools", "hang", Hang())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "hang", "args": {}}, {"text": '{"ok": true}', "finish": "stop"}]
+    )
+    bus = EventBus()
+    spec = TaskSpec(query="q", budget=Budget(wall_time_s=1))
+    result = await run_task(spec, provider, reg, bus)
+
+    assert result.status == Status.TERMINAL
+    assert result.reason == "budget:wall_time_s"
+    # the contained timeout is on the log as a defense, not a silent hang
+    blocked = [e for e in await bus.query() if e.type == "harness.defense.blocked"]
+    assert any(e.payload.get("kind") == "tool_timeout" for e in blocked)
 
 
 async def test_loop_fetch_then_finalise() -> None:
@@ -359,39 +451,13 @@ _SHELL = '<html><body><div id="root"></div><script src="/app.js"></script></body
 _RENDERED = "<html><body><h1>Acme Widget</h1><span class='price'>$9.00</span></body></html>"
 
 
-class _FakeBackend:
-    """A scripted SandboxBackend: no Docker, no browser — it returns a saved
-    rendered page, freezing tier 2 the way the ScriptedProvider freezes the
-    model. Records the lifecycle so the test can assert launch/destroy ran."""
-
-    name = "fake-sandbox"
-
-    def __init__(self, rendered: str) -> None:
-        self._rendered = rendered
-        self.launched: list[dict] = []
-        self.destroyed = 0
-
-    async def launch(self, spec: dict):
-        self.launched.append(spec)
-        return {"id": "sbx-1", "spec": spec}
-
-    async def exec(self, sandbox, call: ToolCall) -> dict:
-        return {"status": 200, "html": self._rendered, "url": call.args["url"]}
-
-    async def destroy(self, sandbox) -> None:
-        self.destroyed += 1
+def _shell_fetch():
+    return fetch_tool(text=_SHELL)
 
 
-def _shell_fetch() -> HttpFetch:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=_SHELL)
-
-    return HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
-
-
-def _registry_with_tiers(backend: _FakeBackend):
+def _registry_with_tiers(backend: FakeSandboxBackend):
+    from zu_checks.detectors.js_shell import JsShellDetector
     from zu_core.registry import Registry
-    from zu_detectors.js_shell import JsShellDetector
     from zu_tools.render import RenderDom
 
     reg = Registry()
@@ -407,7 +473,7 @@ async def test_escalation_climbs_to_tier2_and_succeeds() -> None:
     # The step-5 story: tier-1 fetch returns a JS shell -> js-shell detector
     # escalates -> the loop climbs to tier 2 -> render_dom (a browser) returns
     # the real page -> the model finalises. The same job, one tier higher.
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     provider = _RecordingProvider(
         [
             {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},   # tier 1: shell
@@ -449,7 +515,7 @@ async def test_per_tier_provider_takes_over_on_escalation() -> None:
     # Global (cheap) provider runs tier 1; on the climb to tier 2 the bound
     # provider takes over the same conversation. The tier→model record in the
     # event log proves which provider produced each turn.
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     cheap = _RecordingProvider([{"tool": "http_fetch", "args": {"url": "http://spa.test/"}}])
     cheap.model = "cheap-tier1"
     frontier = _RecordingProvider([
@@ -479,7 +545,7 @@ async def test_per_tier_provider_takes_over_on_escalation() -> None:
 
 async def test_no_per_tier_override_uses_global_provider_everywhere() -> None:
     # Back-compat: with no providers map, the global provider runs every tier.
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     only = _RecordingProvider([
         {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},
         {"tool": "render_dom", "args": {"url": "http://spa.test/"}},
@@ -497,13 +563,13 @@ async def test_escalation_via_real_builtin_detectors() -> None:
     # End-to-end through the *real* built-in detectors (empty/error/js-shell/
     # bot-wall registered together), not a hand-rolled one: a JS-shell page must
     # drive the climb via js-shell's own logic, with the others coexisting.
-    from zu_detectors.bot_wall import BotWallDetector
-    from zu_detectors.empty import EmptyDetector
-    from zu_detectors.error import ErrorDetector
-    from zu_detectors.js_shell import JsShellDetector
+    from zu_checks.detectors.bot_wall import BotWallDetector
+    from zu_checks.detectors.empty import EmptyDetector
+    from zu_checks.detectors.error import ErrorDetector
+    from zu_checks.detectors.js_shell import JsShellDetector
     from zu_tools.render import RenderDom
 
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     reg = Registry()
     reg.register("tools", "http_fetch", _shell_fetch())
     reg.register("tools", "render_dom", RenderDom(backend=backend, allow_private=True))
@@ -564,7 +630,7 @@ async def test_turn_usage_is_recorded_for_cost() -> None:
 async def test_turn_completed_attributes_tokens_to_the_right_tier() -> None:
     # After a climb, usage is attributed to the tier that produced it — the
     # per-tier breakdown a savings (cheap-tier-first) calculation needs.
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     provider = ScriptedProvider.from_moves(
         [
             {"tool": "http_fetch", "args": {"url": "http://spa.test/"}},  # tier 1
@@ -581,7 +647,7 @@ async def test_turn_completed_attributes_tokens_to_the_right_tier() -> None:
 async def test_tier2_tool_is_withheld_before_escalation() -> None:
     # The ladder is enforced on dispatch, not just on what the model is shown:
     # calling a tier-2 tool before any escalation hits the unknown-tool branch.
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     provider = ScriptedProvider.from_moves(
         [
             {"tool": "render_dom", "args": {"url": "http://spa.test/"}},  # not yet unlocked
@@ -634,16 +700,11 @@ async def test_404_empty_page_terminates_not_escalates() -> None:
     # The real-built-in trigger for the same bug: a 404 with an empty body fires
     # both `error` (TERMINAL) and `empty` (ESCALATE, sorts first). It must
     # terminate on the 404, never waste a tier climb on a dead page.
-    from zu_detectors.empty import EmptyDetector
-    from zu_detectors.error import ErrorDetector
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, text="")
+    from zu_checks.detectors.empty import EmptyDetector
+    from zu_checks.detectors.error import ErrorDetector
 
     reg = Registry()
-    reg.register(
-        "tools", "http_fetch", HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
-    )
+    reg.register("tools", "http_fetch", fetch_tool(text="", status=404))
     reg.register("detectors", "empty", EmptyDetector())
     reg.register("detectors", "error", ErrorDetector())
     provider = ScriptedProvider.from_moves(
@@ -660,7 +721,7 @@ async def test_escalation_exhausted_when_no_higher_tier() -> None:
     # With max_tier pinned to 1, an escalating detector has nowhere to climb,
     # so the run ends with an ESCALATE Result naming the detector (and the
     # event records the exhaustion rather than a climb).
-    backend = _FakeBackend(_RENDERED)
+    backend = FakeSandboxBackend(rendered=_RENDERED)
     provider = ScriptedProvider.from_moves(
         [{"tool": "http_fetch", "args": {"url": "http://spa.test/"}}, {"text": "{}", "finish": "stop"}]
     )

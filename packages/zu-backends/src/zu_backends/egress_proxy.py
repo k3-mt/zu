@@ -227,10 +227,22 @@ class LocalEgressProxy:
 
         return self.upstream_ssl if self.upstream_ssl is not None else ssl.create_default_context()
 
-    async def _read_bounded_body(self, reader: asyncio.StreamReader, header_block: bytes) -> bytes:
-        """Read up to ``body_cap`` bytes of the request body (when Content-Length
-        says there is one), so a secret smuggled into a POST body — not just a query
-        string — lands in the exfil log. Best-effort: a short/absent body is fine."""
+    async def _read_bounded_body(
+        self, reader: asyncio.StreamReader, header_block: bytes
+    ) -> tuple[bytes, bytes]:
+        """Read up to ``body_cap`` bytes of the request body so a secret smuggled
+        into a POST body — not just a query string — lands in the exfil log.
+
+        Returns ``(raw, decoded)``: ``raw`` is the on-wire bytes to forward upstream
+        verbatim; ``decoded`` is the inspectable plaintext for the log (identical to
+        ``raw`` for a Content-Length body, dechunked for a chunked one). Both
+        Content-Length AND ``Transfer-Encoding: chunked`` are handled — chunked is a
+        trivial framing any HTTP client can use to evade a Content-Length-only
+        capture, which would otherwise be a gaping exfil bypass. Best-effort: a
+        short/absent body is fine."""
+        headers = header_block.lower()
+        if b"transfer-encoding:" in headers and b"chunked" in headers:
+            return await self._read_chunked_body(reader)
         length = 0
         for line in header_block.split(b"\r\n"):
             if line.lower().startswith(b"content-length:"):
@@ -239,11 +251,41 @@ class LocalEgressProxy:
                 except ValueError:
                     length = 0
         if length <= 0:
-            return b""
+            return b"", b""
         try:
-            return await asyncio.wait_for(reader.readexactly(min(length, self.body_cap)), self.io_timeout_s)
-        except (asyncio.IncompleteReadError, asyncio.TimeoutError):
-            return b""
+            raw = await asyncio.wait_for(
+                reader.readexactly(min(length, self.body_cap)), self.io_timeout_s
+            )
+            return raw, raw
+        except (TimeoutError, asyncio.IncompleteReadError):
+            return b"", b""
+
+    async def _read_chunked_body(self, reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
+        """Read a ``Transfer-Encoding: chunked`` body up to ``body_cap``, returning
+        the raw on-wire framing (to forward) and the dechunked plaintext (to log)."""
+        raw = bytearray()
+        decoded = bytearray()
+        try:
+            while len(raw) < self.body_cap:
+                size_line = await asyncio.wait_for(reader.readline(), self.io_timeout_s)
+                if not size_line:
+                    break
+                raw.extend(size_line)
+                token = size_line.split(b";", 1)[0].strip()  # size, ignoring any ;ext
+                try:
+                    size = int(token, 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    raw.extend(await asyncio.wait_for(reader.readline(), self.io_timeout_s))
+                    break  # last chunk (and any trailing CRLF/trailers)
+                data = await asyncio.wait_for(reader.readexactly(size), self.io_timeout_s)
+                raw.extend(data)
+                decoded.extend(data[: max(0, self.body_cap - len(decoded))])
+                raw.extend(await asyncio.wait_for(reader.readexactly(2), self.io_timeout_s))
+        except (TimeoutError, asyncio.IncompleteReadError):
+            pass
+        return bytes(raw), bytes(decoded)
 
     async def _mitm_forward(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -264,16 +306,16 @@ class LocalEgressProxy:
         except ValueError:
             path = "/"
         entry["url"] = f"https://{host}{path.strip()}"
-        body = await self._read_bounded_body(reader, header_block)
-        if body:
-            entry["body"] = body.decode("latin1", "replace")[: self.body_cap]
-        entry["bytes_out"] += len(header_block) + len(body)
+        raw_body, decoded_body = await self._read_bounded_body(reader, header_block)
+        if decoded_body:
+            entry["body"] = decoded_body.decode("latin1", "replace")[: self.body_cap]
+        entry["bytes_out"] += len(header_block) + len(raw_body)
         # Re-originate TLS upstream and pump the response (re-encrypted to client).
         up_reader, up_writer = await asyncio.wait_for(
             asyncio.open_connection(host, port, ssl=self._upstream_ssl(), server_hostname=host),
             self.io_timeout_s)
         try:
-            up_writer.write(header_block + body)
+            up_writer.write(header_block + raw_body)
             await up_writer.drain()
             await self._pump(reader, up_reader, writer, up_writer, entry)
         finally:

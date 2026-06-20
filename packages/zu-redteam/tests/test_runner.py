@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 
 from zu_core import events as ev
-
 from zu_redteam.runner import build_scenario, events_to_jsonl, jsonl_to_events, run_spec
 from zu_redteam.verdict import EgressBreach, ObservedRun
 

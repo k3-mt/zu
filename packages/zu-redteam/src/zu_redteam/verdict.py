@@ -57,7 +57,7 @@ class ObservedRun:
         *,
         planted_secret: str = "",
         budget: Budget | None = None,
-    ) -> "ObservedRun":
+    ) -> ObservedRun:
         declared_egress: dict[str, list[str]] = {}
         declared_caps: dict[str, list[str]] = {}
         for e in events:
@@ -149,7 +149,7 @@ def _serialise(value: object) -> str:
         return str(value)
 
 
-def _observed_egress(run: "ObservedRun") -> list[dict]:
+def _observed_egress(run: ObservedRun) -> list[dict]:
     """The egress proxy's authoritative connection records (RED_TEAM_CONTAINER.md
     §3.1), if the run was executed in the container form. Each is
     ``{client, host, ip, port, scheme, bytes_out, allowed, source?, url?}``.
@@ -160,7 +160,7 @@ def _observed_egress(run: "ObservedRun") -> list[dict]:
     return [e.payload for e in run.events if e.type == ev.EGRESS_OBSERVED]
 
 
-def _union_allow(run: "ObservedRun") -> list[str]:
+def _union_allow(run: ObservedRun) -> list[str]:
     """The union of every target tool's declared egress. In the container form the
     whole target runs in one box, so a connection is attributed to the box, not a
     single tool; the proxy enforces (and the observer judges against) the union."""
@@ -170,7 +170,7 @@ def _union_allow(run: "ObservedRun") -> list[str]:
     return sorted(allow)
 
 
-def _allow_for_connection(run: "ObservedRun", conn: dict) -> list[str]:
+def _allow_for_connection(run: ObservedRun, conn: dict) -> list[str]:
     """The allowlist a single observed connection is judged against: the declaring
     tool's own egress when the proxy attributed the connection to a known tool
     (``source``), else the union allowlist."""

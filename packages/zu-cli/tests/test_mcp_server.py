@@ -23,7 +23,6 @@ def _result(out) -> dict:
     return json.loads(out[0].text)
 
 
-@pytest.mark.asyncio
 async def test_lists_tools_and_resources():
     srv = build_server()
     tools = {t.name for t in await srv.list_tools()}
@@ -32,7 +31,6 @@ async def test_lists_tools_and_resources():
     assert "zu://plugins" in uris and "zu://config/schema" in uris
 
 
-@pytest.mark.asyncio
 async def test_zu_plugins_reports_discovered_plugins():
     srv = build_server()
     plugins = _result(await srv.call_tool("zu_plugins", {}))
@@ -40,7 +38,6 @@ async def test_zu_plugins_reports_discovered_plugins():
     assert "schema" in plugins["validators"]
 
 
-@pytest.mark.asyncio
 async def test_zu_scaffold_writes_starter_files(tmp_path):
     srv = build_server()
     res = _result(await srv.call_tool("zu_scaffold", {"directory": str(tmp_path), "template": "web"}))
@@ -48,7 +45,6 @@ async def test_zu_scaffold_writes_starter_files(tmp_path):
     assert (tmp_path / "zu.yaml").exists() and (tmp_path / "task.yaml").exists()
 
 
-@pytest.mark.asyncio
 async def test_zu_validate_ok_and_error(tmp_path):
     srv = build_server()
     await srv.call_tool("zu_scaffold", {"directory": str(tmp_path), "template": "web"})
@@ -60,7 +56,6 @@ async def test_zu_validate_ok_and_error(tmp_path):
     assert bad["ok"] is False and "unknown provider" in bad["error"]
 
 
-@pytest.mark.asyncio
 async def test_zu_run_executes_and_persists_then_traces(tmp_path):
     srv = build_server()
     db = str(tmp_path / "mcp.db")
@@ -86,7 +81,6 @@ async def test_zu_run_executes_and_persists_then_traces(tmp_path):
     assert "harness.task.completed" in types
 
 
-@pytest.mark.asyncio
 async def test_zu_run_reports_model_failure_cleanly(tmp_path):
     srv = build_server()
     cfg = {

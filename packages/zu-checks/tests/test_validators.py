@@ -9,17 +9,15 @@ observation is gone, so grounding must read the data.source.fetched events).
 
 from __future__ import annotations
 
-import httpx
-
+from zu_checks.validators.grounding import GroundingValidator
+from zu_checks.validators.schema import SchemaValidator
 from zu_core.bus import EventBus
 from zu_core.contracts import Result, Status, TaskSpec
 from zu_core.loop import run_task
 from zu_core.ports import RunContext, Severity
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
-from zu_tools.fetch import HttpFetch
-from zu_validators.grounding import GroundingValidator
-from zu_validators.schema import SchemaValidator
+from zu_testing import fetch_tool
 
 _SCHEMA = {
     "type": "object",
@@ -158,13 +156,8 @@ _PAGE = "<html><body><span class='price'>$9.00</span></body></html>"
 
 
 def _loop_registry() -> Registry:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=_PAGE)
-
     reg = Registry()
-    reg.register(
-        "tools", "http_fetch", HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
-    )
+    reg.register("tools", "http_fetch", fetch_tool(text=_PAGE))
     reg.register("validators", "schema", SchemaValidator())
     reg.register("validators", "grounding", GroundingValidator())
     return reg

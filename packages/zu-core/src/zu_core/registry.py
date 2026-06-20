@@ -16,6 +16,8 @@ visible to the loop and the CLI without any extra wiring. Pass an explicit
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, NamedTuple
 
@@ -84,6 +86,11 @@ class Registry:
     def __init__(self) -> None:
         self._items: dict[str, dict[str, Any]] = {k: {} for k in GROUPS}
         self.failures: list[LoadFailure] = []
+        # Guards mutation/iteration of the shared maps. ``REGISTRY`` is a
+        # process-wide singleton that decorators, entry-point discovery, and
+        # config assembly can all write — a plain ``threading.Lock`` keeps
+        # register's check-then-set and ``names``' iteration consistent.
+        self._lock = threading.Lock()
 
     def discover(self) -> list[LoadFailure]:
         """Load every pip-installed plugin declared via entry points.
@@ -116,29 +123,31 @@ class Registry:
         # incompatible major for this port, with a clear error, before it can
         # enter the registry and fail in confusing ways at call time.
         check_interface(kind, obj)
-        existing = self._items[kind].get(name)
-        if existing is not None and existing is not obj:
-            # A name collision means one plugin is shadowing another (e.g. a
-            # typosquat on a built-in like 'http_fetch'). Last-write-wins is
-            # preserved for back-compat, but the collision must not be silent —
-            # surface it so a caller can see what overrode what.
-            log.warning(
-                "plugin name collision on %s:%s — %r is overriding %r",
-                kind, name, obj, existing,
-            )
-        self._items[kind][name] = obj
+        with self._lock:
+            existing = self._items[kind].get(name)
+            if existing is not None and existing is not obj:
+                # A name collision means one plugin is shadowing another (e.g. a
+                # typosquat on a built-in like 'http_fetch'). Last-write-wins is
+                # preserved for back-compat, but the collision must not be silent —
+                # surface it so a caller can see what overrode what.
+                log.warning(
+                    "plugin name collision on %s:%s — %r is overriding %r",
+                    kind, name, obj, existing,
+                )
+            self._items[kind][name] = obj
 
     def get(self, kind: str, name: str) -> Any:
         return self._items[kind][name]
 
     def names(self, kind: str) -> list[str]:
-        return sorted(self._items[kind])
+        with self._lock:
+            return sorted(self._items[kind])
 
 
 REGISTRY = Registry()
 
 
-def _deco(kind: str):
+def _deco(kind: str) -> Callable[[Any], Any]:
     """In-process registration: @zu.tool / @zu.detector / ..."""
 
     def wrap(obj: Any) -> Any:

@@ -65,7 +65,7 @@ Add what your agent needs:
 | `pip install 'zu-runtime[all]'` | everything above |
 
 Every plugin is also a standalone package — `pip install zu-tools`,
-`zu-providers`, `zu-detectors`, `zu-validators`, `zu-backends` — exactly the way
+`zu-providers`, `zu-checks`, `zu-backends` — exactly the way
 dbt ships adapters. Mix and match; `zu plugins` lists whatever is installed.
 
 Verify and see every plugin the runtime discovered:

@@ -144,6 +144,36 @@ def test_unknown_plugin_names_its_kind_in_the_error():
         build_registry(cfg)
 
 
+# --- networked surface: a per-request config may not write host paths --------
+
+
+def test_networked_config_refuses_a_filesystem_sink_path():
+    """A per-request config (``allow_imports=False``) may not name an event_sink
+    path: a sink path is an arbitrary host file the process opens for write, the
+    same code-on-host risk as the import door it already blocks."""
+    from zu_cli.config import EventSinkConfig
+
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        event_sink=EventSinkConfig(driver="sqlite", path="/tmp/zu-attacker.db"),
+    )
+    with pytest.raises(ConfigError, match="does not permit writing arbitrary host paths"):
+        assemble(cfg, allow_imports=False)
+
+
+def test_trusted_config_still_allows_a_sink_path():
+    """The operator-trusted surface (default ``allow_imports=True``) keeps the
+    full sink configuration — only the networked surface is restricted."""
+    from zu_cli.config import EventSinkConfig
+
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        event_sink=EventSinkConfig(driver="sqlite", path=":memory:"),
+    )
+    provider, registry, bus, providers = assemble(cfg)  # allow_imports defaults True
+    assert bus.sink is not None
+
+
 # --- the third door: a plugin by import reference ----------------------------
 
 
@@ -152,7 +182,7 @@ def test_plugin_by_import_reference():
     third registration door, exercised here with a real built-in class path."""
     cfg = RunConfig(
         provider=ProviderConfig(name="scripted"),
-        plugins=PluginsConfig(validators=["zu_validators.schema:SchemaValidator"]),
+        plugins=PluginsConfig(validators=["zu_checks.validators.schema:SchemaValidator"]),
     )
     reg = build_registry(cfg)
     assert reg.names("validators") == ["schema"]  # registered under its .name
@@ -231,7 +261,7 @@ def test_import_reference_refused_when_imports_disallowed():
 
     plug = RunConfig(
         provider=ProviderConfig(name="scripted"),
-        plugins=PluginsConfig(validators=["zu_validators.schema:SchemaValidator"]),
+        plugins=PluginsConfig(validators=["zu_checks.validators.schema:SchemaValidator"]),
     )
     with pytest.raises(ConfigError, match="does not permit arbitrary"):
         build_registry(plug, allow_imports=False)
@@ -260,7 +290,6 @@ def test_no_event_sink_means_in_memory_default():
     assert build_sink(cfg) is None  # bus falls back to MemoryEventSink
 
 
-@pytest.mark.asyncio
 async def test_trace_sinks_ship_events_alongside_the_canonical_store(tmp_path):
     # A run with a canonical sqlite store AND a jsonl trace sink: events land in
     # both. The trace sink is how a run emits to local/cloud storage.

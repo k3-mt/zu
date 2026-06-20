@@ -10,6 +10,31 @@ import asyncio
 from zu_backends.egress_proxy import LocalEgressProxy
 
 
+def _reader_of(data: bytes) -> asyncio.StreamReader:
+    r = asyncio.StreamReader()
+    r.feed_data(data)
+    r.feed_eof()
+    return r
+
+
+async def test_chunked_request_body_is_captured_for_the_exfil_log() -> None:
+    # A Content-Length-only capture would miss a secret smuggled via
+    # Transfer-Encoding: chunked — a trivial bypass. The proxy must dechunk it.
+    proxy = LocalEgressProxy()
+    headers = b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"  # "hello" + " world"
+    raw, decoded = await proxy._read_bounded_body(_reader_of(body), headers)
+    assert decoded == b"hello world"          # the inspectable secret
+    assert raw == body                         # forwarded on-wire framing is intact
+
+
+async def test_content_length_body_raw_equals_decoded() -> None:
+    proxy = LocalEgressProxy()
+    headers = b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n\r\n"
+    raw, decoded = await proxy._read_bounded_body(_reader_of(b"secret"), headers)
+    assert raw == decoded == b"secret"
+
+
 async def _connect_request(host: str, port: int, line: bytes) -> tuple[bytes, asyncio.StreamWriter]:
     """Open a raw connection to the proxy, send one request line + blank line, and
     read the proxy's status line back."""

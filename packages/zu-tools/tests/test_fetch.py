@@ -35,6 +35,17 @@ async def test_body_over_cap_is_refused() -> None:
         await fetch(None, "http://localhost/huge")
 
 
+def test_contained_mode_selected_only_inside_the_sandbox(monkeypatch) -> None:
+    # Inside the box (ZU_SANDBOXED set, no injected transport) the proxy-routed
+    # path is used; an injected transport (tests) or a bare host always takes the
+    # guarded path so the host-side SSRF/DNS-pin guard still applies off-sandbox.
+    monkeypatch.delenv("ZU_SANDBOXED", raising=False)
+    assert HttpFetch()._contained() is False                      # bare host
+    monkeypatch.setenv("ZU_SANDBOXED", "1")
+    assert HttpFetch()._contained() is True                       # in the box
+    assert HttpFetch(transport=_transport(b"x"))._contained() is False  # injected -> guarded
+
+
 async def test_initial_url_still_ssrf_checked() -> None:
     # The cap doesn't weaken the SSRF guard: an internal target is refused
     # before any request is made (no transport needed).

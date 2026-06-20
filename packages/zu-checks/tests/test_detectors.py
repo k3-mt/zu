@@ -6,12 +6,12 @@ build step 5; these lock the basic verdicts and the entry-point contract now.
 
 from __future__ import annotations
 
+from zu_checks.detectors.bot_wall import BotWallDetector
+from zu_checks.detectors.empty import EmptyDetector
+from zu_checks.detectors.error import ErrorDetector
+from zu_checks.detectors.js_shell import JsShellDetector
 from zu_core.ports import RunContext, Severity
 from zu_core.registry import Registry
-from zu_detectors.bot_wall import BotWallDetector
-from zu_detectors.empty import EmptyDetector
-from zu_detectors.error import ErrorDetector
-from zu_detectors.js_shell import JsShellDetector
 
 
 def _ctx(observation: dict) -> RunContext:

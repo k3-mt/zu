@@ -126,6 +126,26 @@ async def test_container_is_hardened_by_default() -> None:
     assert container.reloads >= 1  # readiness was actually awaited
 
 
+async def test_hardening_floor_cannot_be_loosened_by_spec() -> None:
+    # A caller cannot silently strip the baseline: even passing empty/zero values,
+    # cap_drop keeps ALL, security_opt keeps no-new-privileges, pids stays bounded.
+    # A genuine cap is still re-addable via cap_add (drop-ALL-then-add).
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({
+        "image": "img",
+        "cap_drop": [], "security_opt": [], "pids_limit": 0,
+        "cap_add": ["SYS_ADMIN"],
+    })
+    kw = client.containers.run_kwargs
+    assert kw is not None
+    assert "ALL" in kw["cap_drop"]
+    assert "no-new-privileges" in kw["security_opt"]
+    assert kw["pids_limit"] == 256          # 0 (unlimited) refused -> floored
+    assert kw["cap_add"] == ["SYS_ADMIN"]   # legitimate opt-back-in still honoured
+
+
 async def test_dead_container_fails_fast() -> None:
     # If the container exits before becoming ready, launch raises rather than
     # execing into a dead container.
@@ -297,12 +317,32 @@ async def test_mitm_ca_is_bind_mounted_trusted_and_cleaned_up() -> None:
     assert not os.path.exists(ca_path)      # the CA dies with the run
 
 
-async def test_seccomp_profile_is_appended_to_security_opt() -> None:
-    # P3: the audit seccomp profile is applied via security_opt.
+async def test_seccomp_profile_path_is_inlined_to_json() -> None:
+    # The docker SDK passes security_opt verbatim (it does NOT read a file like the
+    # CLI), so a profile given as a PATH must be inlined to its JSON content here.
+    from pathlib import Path
+
+    import zu_backends
+    profile = Path(zu_backends.__file__).parent / "seccomp" / "redteam-audit.json"
     container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
     client = _FakeClient(container)
     backend = LocalDockerBackend(client=client)
-    await backend.launch({"image": "img", "seccomp": "/etc/redteam-audit.json"})
+    await backend.launch({"image": "img", "seccomp": str(profile)})
     kw = client.containers.run_kwargs
-    assert "seccomp=/etc/redteam-audit.json" in kw["security_opt"]
+    assert kw is not None
+    opt = next(o for o in kw["security_opt"] if o.startswith("seccomp="))
+    assert "defaultAction" in opt and "SCMP_ACT" in opt  # the JSON content, not the path
+    assert "/" not in opt.split("=", 1)[1].splitlines()[0]  # first line is JSON, not a path
     assert "no-new-privileges" in kw["security_opt"]  # default hardening preserved
+
+
+async def test_seccomp_json_and_unconfined_pass_through() -> None:
+    # A profile already given as JSON, or the special "unconfined", is not treated
+    # as a path (no file read).
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "seccomp": '{"defaultAction": "SCMP_ACT_ALLOW"}'})
+    kw = client.containers.run_kwargs
+    assert kw is not None
+    assert 'seccomp={"defaultAction": "SCMP_ACT_ALLOW"}' in kw["security_opt"]

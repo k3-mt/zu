@@ -42,7 +42,10 @@ docker volume create "$VOL" >/dev/null  # shares the per-run CA proxy->target
 # Proxy starts on the internal net (so the target resolves it by name), then gets
 # a second leg on the default bridge so IT — and only it — can reach the internet.
 # MITM on: it writes its per-run CA to the shared volume for the target to trust.
-docker run -d --name "$PROXY" --network "$NET_INT" -v "$VOL":/ca \
+# --user 0: the proxy is trusted control-plane infra and must write the CA into the
+# root-owned shared volume even though the image's default user is non-root (the
+# untrusted target containers below keep that non-root user).
+docker run -d --name "$PROXY" --network "$NET_INT" -v "$VOL":/ca --user 0 \
   -e ZU_EGRESS_ALLOWLIST="$ALLOW" -e ZU_EGRESS_MITM=1 -e ZU_EGRESS_CA_OUT=/ca/ca.pem \
   "$IMAGE" zu-egress-proxy >/dev/null
 docker network connect bridge "$PROXY" >/dev/null

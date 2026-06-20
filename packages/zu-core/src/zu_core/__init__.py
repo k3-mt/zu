@@ -11,10 +11,6 @@ from .bus import EventBus, SubscriberFailure
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
-from .projections import SessionState, SessionStore
-from .security import SecurityBlock
-from .sinks import MemoryEventSink
-from .view import RENDER_KEYS, scope_event, scope_payload
 from .ports import (
     CAP_FS_READ,
     CAP_FS_WRITE,
@@ -41,6 +37,7 @@ from .ports import (
     Verdict,
     declared_envelope,
 )
+from .projections import SessionState, SessionStore
 from .registry import (
     REGISTRY,
     IncompatibleInterfaceError,
@@ -54,6 +51,9 @@ from .registry import (
     tool,
     validator,
 )
+from .security import SecurityBlock
+from .sinks import MemoryEventSink
+from .view import RENDER_KEYS, scope_event, scope_payload
 
 __all__ = [
     # contracts

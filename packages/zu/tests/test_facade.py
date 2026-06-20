@@ -52,7 +52,6 @@ def test_zu_class_reuses_one_config_for_many_runs():
     assert r1.status is Status.SUCCESS and r2.status is Status.SUCCESS
 
 
-@pytest.mark.asyncio
 async def test_async_entry_point():
     result = await zu.arun(_TASK, config=_cfg({"name": "Acme", "price": "$9"}))
     assert result.status is Status.SUCCESS

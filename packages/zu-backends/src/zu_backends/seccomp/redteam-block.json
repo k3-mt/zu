@@ -1,0 +1,24 @@
+{
+  "_comment": "Blocking seccomp profile for the contained-agent form. Sibling of redteam-audit.json: that one OBSERVES (SCMP_ACT_LOG); this one ENFORCES. Default ALLOW so a normal agent (fork/exec, file and socket IO) runs, but SCMP_ACT_ERRNO the syscalls a contained agent never legitimately needs and an escape/privilege-escalation attempt does — namespace and mount manipulation, ptrace, kernel-module and kexec loads, BPF, perf, reboot, swap. Apply via the backend spec: {\"seccomp\": \"/path/to/redteam-block.json\"}. EPERM (errnoRet 1) is returned so the call fails like a denied permission rather than crashing the process. Not a substitute for cap_drop + a default-DROP network; a defence-in-depth layer alongside them.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64"],
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "mount", "umount2", "move_mount", "fsmount", "open_tree", "pivot_root", "chroot",
+        "setns", "unshare",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "bpf",
+        "perf_event_open",
+        "reboot",
+        "swapon", "swapoff",
+        "add_key", "request_key", "keyctl",
+        "acct", "quotactl"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

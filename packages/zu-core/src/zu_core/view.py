@@ -47,7 +47,7 @@ def _cap(v: Any) -> Any:
     if _is_scalar(v):
         return v
     if isinstance(v, str):
-        return v if len(v) <= _RENDER_STR_CAP else v[:_RENDER_STR_CAP] + "…[+%d]" % (len(v) - _RENDER_STR_CAP)
+        return v if len(v) <= _RENDER_STR_CAP else v[:_RENDER_STR_CAP] + f"…[+{len(v) - _RENDER_STR_CAP}]"
     if isinstance(v, dict):
         # Small, all-scalar dicts (token-usage counters) render; anything richer
         # is summarized rather than walked and trusted verbatim.

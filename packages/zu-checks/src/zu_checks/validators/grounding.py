@@ -12,7 +12,7 @@ value such as ``"5"`` is not spuriously grounded by ``"1985"``.
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 from zu_core.contracts import Result
 from zu_core.ports import RunContext, Severity, Verdict
@@ -41,7 +41,12 @@ def _grounded(leaf_norm: str, corpus: str) -> bool:
       — but ``"5"`` in ``"Qty: 5."`` (the dot ends a sentence) still grounds.
     """
     if not leaf_norm:
-        return True
+        # An empty normalized value has no provenance to prove, so it is NOT
+        # grounded — fail safe rather than free-pass. ``_leaf_strings`` already
+        # drops empty/whitespace leaves upstream, so this is reached only if a
+        # non-empty value normalizes to nothing; treating that as ungrounded
+        # keeps "I said nothing" from passing the anti-fabrication gate.
+        return False
     n = len(leaf_norm)
     start = 0
     while True:

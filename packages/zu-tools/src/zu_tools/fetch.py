@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urljoin
 
 import httpx
 
 from zu_core.ports import CAP_NET, EGRESS_OPEN
+from zu_core.security import SANDBOX_ENV
 
 from .net import BlockedURLError, PinnedTransport, check_url
 
@@ -50,10 +52,43 @@ class HttpFetch:
         # transport is a testability seam (httpx.MockTransport); None -> real net.
         self._transport = transport
 
+    def _contained(self) -> bool:
+        """Inside the Zu sandbox the egress proxy on the internal (default-DROP)
+        network IS the boundary, so route through it (honor ``HTTP(S)_PROXY``) and
+        skip the host-side SSRF/DNS-pin guard — which is both redundant there and,
+        by resolving + connecting to the IP directly, would BYPASS the proxy and hit
+        the default-DROP, making even an allowlisted host unreachable. An injected
+        transport (tests) always takes the guarded path."""
+        return bool(os.environ.get(SANDBOX_ENV)) and self._transport is None
+
     async def __call__(self, ctx, url: str) -> dict:
-        # Validate the initial URL and every redirect hop: a public URL that
-        # 302s to an internal address is the classic SSRF bypass, so we follow
-        # redirects manually and re-check each Location before requesting it.
+        if self._contained():
+            return await self._fetch_via_proxy(url)
+        return await self._fetch_guarded(url)
+
+    async def _fetch_via_proxy(self, url: str) -> dict:
+        """Contained path: a plain proxy-respecting client. The proxy enforces the
+        egress allowlist (a refused host fails the connection / returns non-2xx)
+        and re-checks each redirect hop by host, so no host-side guard is needed."""
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True, timeout=20, trust_env=True,
+                max_redirects=self.max_redirects,
+            ) as c:
+                async with c.stream("GET", url) as r:
+                    html = await self._read_capped(r, url)
+                    return {"status": r.status_code, "html": html, "url": str(r.url)}
+        except httpx.HTTPError as exc:
+            # A proxy refusal (off-allowlist host) surfaces as a connect/proxy error;
+            # report it as a blocked fetch — the proxy already logged it out of band.
+            raise BlockedURLError(
+                f"egress to {url!r} refused or unreachable via the sandbox proxy: {exc}"
+            ) from exc
+
+    async def _fetch_guarded(self, url: str) -> dict:
+        # Uncontained (host) path. Validate the initial URL and every redirect hop:
+        # a public URL that 302s to an internal address is the classic SSRF bypass,
+        # so we follow redirects manually and re-check each Location before it.
         check_url(url, allow_private=self.allow_private)
         current = url
         # Default to the DNS-pinning transport: check_url is an early reject, but

@@ -4,6 +4,16 @@ version = "0.1.0"
 description = "Zu built-in tools: http_fetch, html_parse, render_dom"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 # zu-backends supplies render_dom's default sandbox (local-docker); it is
 # imported lazily, so a tier-1-only run never touches it, but the default
 # tier-2 render works out of the box once installed.

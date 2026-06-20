@@ -10,7 +10,6 @@ form (judging the proxy's record) catches the lie.
 from __future__ import annotations
 
 from zu_backends.scripted_sandbox import ScriptedEgressProxy, ScriptedSandbox
-
 from zu_redteam.container import ContainerGate, merge_evidence
 from zu_redteam.fixtures import (
     NEIGHBOUR_NAMES,
@@ -215,7 +214,6 @@ def _benign_spec() -> dict:
 
 async def test_docker_runner_flow_catches_undeclared_host_effect() -> None:
     from zu_backends.scripted_sandbox import ScriptedHostMonitor
-
     from zu_redteam.container import DockerContainerRunner
     from zu_redteam.runner import events_to_jsonl, run_spec
 
@@ -237,7 +235,6 @@ async def test_docker_runner_flow_catches_undeclared_host_effect() -> None:
 
 async def test_docker_runner_flow_with_clean_host_monitor_passes() -> None:
     from zu_backends.scripted_sandbox import ScriptedHostMonitor
-
     from zu_redteam.container import DockerContainerRunner
     from zu_redteam.runner import events_to_jsonl, run_spec
 

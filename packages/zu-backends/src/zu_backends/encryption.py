@@ -47,7 +47,7 @@ class AesGcmCodec:
         self._aes = AESGCM(key)
 
     @classmethod
-    def from_env(cls, var: str = "ZU_EVENT_KEY") -> "AesGcmCodec":
+    def from_env(cls, var: str = "ZU_EVENT_KEY") -> AesGcmCodec:
         """Build from a base64/hex 32-byte key in the environment."""
         raw = os.environ.get(var)
         if not raw:
@@ -86,7 +86,7 @@ class EnvKeyProvider:
         self._current = current_key_id or os.environ.get("ZU_EVENT_KEY_ID", self._DEFAULT_ID)
 
     @classmethod
-    def from_env(cls) -> "EnvKeyProvider":
+    def from_env(cls) -> EnvKeyProvider:
         return cls()
 
     @property
@@ -115,7 +115,7 @@ class ManagedAesGcmCodec:
         self._kp = key_provider
 
     @classmethod
-    def from_env(cls) -> "ManagedAesGcmCodec":
+    def from_env(cls) -> ManagedAesGcmCodec:
         return cls(EnvKeyProvider.from_env())
 
     def _aes(self, key_id: str) -> AESGCM:
@@ -130,15 +130,27 @@ class ManagedAesGcmCodec:
         if not 0 < len(kid_b) <= 255:
             raise ValueError(f"key id must be 1..255 UTF-8 bytes, got {len(kid_b)}")
         nonce = os.urandom(_NONCE_LEN)
-        ct = self._aes(kid).encrypt(nonce, plaintext.encode("utf-8"), aad)
+        ct = self._aes(kid).encrypt(nonce, plaintext.encode("utf-8"), _bind_kid(aad, kid_b))
         return bytes([len(kid_b)]) + kid_b + nonce + ct
 
     def decode_body(self, body: bytes, aad: bytes) -> str:
         klen = body[0]
-        kid = body[1 : 1 + klen].decode("utf-8")
+        kid_b = body[1 : 1 + klen]
+        kid = kid_b.decode("utf-8")
         rest = body[1 + klen :]
         nonce, ct = rest[:_NONCE_LEN], rest[_NONCE_LEN:]
-        return self._aes(kid).decrypt(nonce, ct, aad).decode("utf-8")
+        # ``kid`` is bound into the AAD so the key id recorded in the blob is
+        # authenticated: an at-rest attacker who rewrites it to point at a
+        # different (weaker/known) key makes the row fail to decrypt rather than
+        # silently re-key it.
+        return self._aes(kid).decrypt(nonce, ct, _bind_kid(aad, kid_b)).decode("utf-8")
+
+
+def _bind_kid(aad: bytes, kid_b: bytes) -> bytes:
+    """The effective GCM AAD for a v2 blob: the row's index columns plus a
+    length-framed key id, so the embedded ``kid`` is authenticated alongside the
+    plaintext columns. Length-framing keeps ``aad``/``kid`` unambiguous."""
+    return aad + bytes([len(kid_b)]) + kid_b
 
 
 def _decode_key(raw: str) -> bytes:

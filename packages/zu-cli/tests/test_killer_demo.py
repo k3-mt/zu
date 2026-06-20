@@ -22,7 +22,6 @@ runner = CliRunner()
 # --- the arc, offline (wiring self-test for each type) -----------------------
 
 
-@pytest.mark.asyncio
 async def test_web_arc_offline_fetches_and_validates():
     provider = demo.DEMOS["web"]["scripted"]()
     result, bus, backend = await demo.run_arc(provider, kind="web", offline=True)
@@ -33,7 +32,6 @@ async def test_web_arc_offline_fetches_and_validates():
     assert "harness.tool.invoked" in types  # a real tool ran (http_fetch)
 
 
-@pytest.mark.asyncio
 async def test_minimal_arc_offline_no_tools():
     provider = demo.DEMOS["minimal"]["scripted"]()
     result, bus, _ = await demo.run_arc(provider, kind="minimal", offline=True)
@@ -42,7 +40,6 @@ async def test_minimal_arc_offline_no_tools():
     assert "harness.tool.invoked" not in [e.type for e in await bus.query()]
 
 
-@pytest.mark.asyncio
 async def test_escalation_arc_offline_climbs_to_tier2():
     provider = demo.DEMOS["escalation"]["scripted"]()
     result, bus, backend = await demo.run_arc(provider, kind="escalation", offline=True)
@@ -53,7 +50,6 @@ async def test_escalation_arc_offline_climbs_to_tier2():
     assert backend.launched and backend.destroyed == 1
 
 
-@pytest.mark.asyncio
 async def test_real_escalation_is_not_available_without_docker_image():
     # The real tier-2 path is honest about the missing browser image.
     with pytest.raises(RuntimeError, match="needs Docker"):

@@ -30,8 +30,48 @@ three disciplines no one else ships as a framework:
   record. Every run is lossless and replayable; OpenTelemetry and OpenLineage are
   derived, rebuildable views — not bolted-on, sampled debugging telemetry.
 - **Capability-envelope security.** Capability acquisition is the orchestrator's job;
-  the model may signal "I can't," never acquire. Injection-resistance is enforced by
-  construction, not advised in a doc.
+  the model may signal "I can't," never acquire — and the orchestrator, not the model,
+  owns tool dispatch and tier gating. In the base runtime each tool *declares* its
+  capability envelope (egress, capabilities) and every declaration and every contained
+  block is recorded on the event log — **audited by construction**. Turning that
+  declaration into a hard *boundary* a hostile tool cannot cross (default-deny egress,
+  filesystem/syscall limits) is the job of a sandbox backend: real, and enforced in the
+  Docker/container path (`zu-backends`, the red-team container form), but **opt-in and
+  off by default**. Run untrusted tools behind that backend — do not assume the base
+  runtime contains a tool just because it declares a narrow envelope. See
+  [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) and [`docs/RED_TEAM_CONTAINER.md`](docs/RED_TEAM_CONTAINER.md).
+
+### Containing a run
+
+Containment is two problems, and they have different answers:
+
+- **A rogue/injected model** is contained *in-process, by construction*: the model
+  only ever signals an action — the orchestrator owns dispatch and tier escalation,
+  and only offers tools unlocked at the current tier. A prompt-injected model cannot
+  acquire a capability it wasn't given. This holds in the base runtime today.
+- **A hostile *tool* (supply chain)** cannot be contained in-process — a tool is code
+  running in your interpreter. Real tool containment is an OS boundary, so it's a
+  deployment posture:
+
+  ```yaml
+  # zu.yaml
+  containment: required   # fail closed — see below
+  ```
+
+  With `containment: required`, the runtime **refuses to run** any tool with off-box
+  reach (declared egress/capabilities, or tier ≥ 2) unless the run is executing
+  inside the Zu sandbox — it will not silently run a capability-bearing tool
+  unguarded. To actually run such a tool, launch the **whole agent inside a hardened
+  container** (default-DROP network, egress only via a logging allowlist proxy, all
+  caps dropped, blocking seccomp):
+
+  ```bash
+  zu run task.yaml -c zu.yaml --sandboxed   # needs Docker + the zu image
+  ```
+
+  Inside that box the container — not the loop — is the boundary, so the tool runs
+  contained. `containment: audit` (the default) runs tools in-process and logs every
+  declaration; right for trusted tools, where tier-1's own SSRF/DNS-pin guards apply.
 
 **Run it on any model.** The harness depends only on a `ModelProvider` port, so the
 same build runs on Anthropic, OpenAI, OpenRouter, or a local model (Ollama / vLLM)
@@ -160,8 +200,7 @@ zu/
     zu-core/        # contracts, ports, registry, loop, bus   <- stable, tiny, SDK-free
     zu-providers/   # model adapters: scripted, anthropic, openai-compatible
     zu-tools/       # http_fetch, html_parse, render_dom
-    zu-detectors/   # empty, error, js-shell, bot-wall
-    zu-validators/  # schema, grounding
+    zu-checks/      # detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)
     zu-backends/    # local-docker sandbox + sqlite/jsonl event sinks
     zu-redteam/     # the plugin-test gate + adversarial red team (zu test-plugin)
     zu-cli/         # the `zu` command + `zu serve` (HTTP)

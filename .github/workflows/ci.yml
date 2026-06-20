@@ -3,7 +3,10 @@ name: ci
 on: [push, pull_request]
 
 jobs:
-  test:
+  # Tier 0–1: unit + integration, fully hermetic (no network, no Docker). This is
+  # the gate every PR must pass. Includes the example agents (run offline against
+  # their fixtures) via the normal pytest run.
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -12,7 +15,7 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: uv run ruff check packages
-      - run: uv run pytest
+      - run: uv run pytest --cov   # enforces the coverage floor in [tool.coverage]
       - run: uv run mypy packages
 
   audit:
@@ -25,3 +28,28 @@ jobs:
       - run: uv sync
       # Supply-chain visibility: fail on a known-vulnerable dependency.
       - run: uvx pip-audit
+
+  # Tier 2–3: build the image, then run everything marked @docker — the whole
+  # agent inside the hardened container + the red-team egress enforcement proofs +
+  # the containment shell suite. Skipped on PRs to keep them fast; runs on pushes
+  # and on demand.
+  docker:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: Build the image under test
+        run: docker build -t zu:ci .
+      - name: Tier 2–3 — docker-marked tests (launcher + redteam enforcement)
+        env:
+          ZU_SANDBOX_IMAGE: zu:ci
+          ZU_REDTEAM_CONTAINER_IMAGE: zu:ci
+        run: uv run pytest --run-docker -m docker
+      - name: Tier 3 — containment proof suite
+        env:
+          ZU_IMAGE: zu:ci
+        run: bash examples/containment/run_all.sh --no-build

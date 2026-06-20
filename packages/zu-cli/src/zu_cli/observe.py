@@ -18,7 +18,8 @@ append-before-notify. Observation never participates in a run.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from zu_core import events as ev
 

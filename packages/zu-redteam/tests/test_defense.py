@@ -9,7 +9,6 @@ from zu_core.loop import run_task
 from zu_core.registry import Registry
 from zu_core.sinks import MemoryEventSink
 from zu_providers.scripted import ScriptedProvider
-
 from zu_redteam.defense import monitor_defenses
 from zu_redteam.fixtures import StaticFetch, benign_neighbours
 from zu_redteam.gate import run_gate

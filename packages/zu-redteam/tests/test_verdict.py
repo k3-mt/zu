@@ -7,8 +7,7 @@ from uuid import uuid4
 
 from zu_core import events as ev
 from zu_core.contracts import Budget, Event
-
-from zu_redteam.fixtures import StaticFetch, LeakyFetch, SecretEchoTool, benign_neighbours
+from zu_redteam.fixtures import LeakyFetch, SecretEchoTool, StaticFetch, benign_neighbours
 from zu_redteam.harness import Scenario, run_scenario
 from zu_redteam.verdict import (
     EgressBreach,

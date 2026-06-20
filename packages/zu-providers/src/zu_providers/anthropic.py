@@ -39,6 +39,14 @@ _FINISH = {
 # JSON answer); override per request via ``ModelRequest.params["max_tokens"]``.
 _DEFAULT_MAX_TOKENS = 4096
 
+# Default per-call wall-time and retry bounds. A "production runtime" must not
+# inherit the SDK's unbounded defaults: a hung connection or the SDK's own
+# exponential-backoff retries can otherwise stack arbitrarily inside a short
+# run budget. The loop wraps ``complete`` in its own wall-time too, but the
+# adapter sets a floor so direct/embed use (no loop deadline) is bounded as well.
+_DEFAULT_TIMEOUT_S = 60.0
+_DEFAULT_MAX_RETRIES = 2
+
 
 class AnthropicProvider:
     def __init__(
@@ -47,6 +55,8 @@ class AnthropicProvider:
         api_key_env: str = "ANTHROPIC_API_KEY",
         api_key: str | None = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        timeout: float = _DEFAULT_TIMEOUT_S,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
         client: Any = None,
     ) -> None:
         self.model = model
@@ -57,6 +67,8 @@ class AnthropicProvider:
         # model's context. Never hard-code or ship a key.
         self.api_key = api_key
         self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.max_retries = max_retries
         # client is a testability/config seam (an AsyncAnthropic, possibly with a
         # mock transport); None -> construct from the resolved key on first use.
         self._client = client
@@ -81,7 +93,9 @@ class AnthropicProvider:
                     f"no Anthropic API key: pass api_key=... or set ${self.api_key_env} "
                     "(the key is read here, never placed in the model's context or a config file)."
                 )
-            self._client = anthropic.AsyncAnthropic(api_key=key)
+            self._client = anthropic.AsyncAnthropic(
+                api_key=key, timeout=self.timeout, max_retries=self.max_retries
+            )
         return self._client
 
     async def complete(self, req: ModelRequest) -> ModelResponse:

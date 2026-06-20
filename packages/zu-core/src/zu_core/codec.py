@@ -22,7 +22,8 @@ later is a contained change with no on-disk format impact.
 
 from __future__ import annotations
 
-from typing import Mapping, Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable

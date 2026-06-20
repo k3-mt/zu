@@ -39,6 +39,12 @@ _FINISH = {
     "content_filter": Finish.STOP,
 }
 
+# Default per-call wall-time and retry bounds — see the anthropic adapter: a
+# production runtime must not inherit the SDK's unbounded timeout / stacked
+# backoff. Override per provider via the constructor (or config ``options``).
+_DEFAULT_TIMEOUT_S = 60.0
+_DEFAULT_MAX_RETRIES = 2
+
 
 class OpenAICompatibleProvider:
     def __init__(
@@ -50,6 +56,8 @@ class OpenAICompatibleProvider:
         base_url: str | None = None,
         native_tools: bool = True,
         max_tokens: int | None = None,
+        timeout: float = _DEFAULT_TIMEOUT_S,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
         client: Any = None,
     ) -> None:
         self.model = model
@@ -61,6 +69,8 @@ class OpenAICompatibleProvider:
         self.api_key = api_key
         self.base_url = base_url
         self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.max_retries = max_retries
         self._client = client
         self.capabilities = Capabilities(native_tools=native_tools)
 
@@ -79,7 +89,12 @@ class OpenAICompatibleProvider:
             # optional (defaults to OpenAI) and read from the env when set.
             key = self.api_key or os.environ.get(self.api_key_env) or "not-needed"
             base_url = self.base_url or os.environ.get(self.base_url_env) or None
-            self._client = openai.AsyncOpenAI(api_key=key, base_url=base_url)
+            self._client = openai.AsyncOpenAI(
+                api_key=key,
+                base_url=base_url,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
+            )
         return self._client
 
     async def complete(self, req: ModelRequest) -> ModelResponse:
@@ -103,7 +118,15 @@ class OpenAICompatibleProvider:
 
 
 def _to_model_response(resp: Any) -> ModelResponse:
-    choice = resp.choices[0]
+    # Some OpenAI-compatible servers (vLLM/Ollama/proxies) return an empty
+    # ``choices`` array on certain errors or policy stops. Index [0] would
+    # IndexError; instead surface it as a no-answer STOP (the loop ends the run
+    # cleanly with "model finalised with no answer") and keep any usage reported.
+    choices = resp.choices or []
+    if not choices:
+        logger.warning("provider returned no choices (mapped to an empty STOP response)")
+        return ModelResponse(text=None, tool_calls=[], finish=Finish.STOP, usage=_usage_of(resp))
+    choice = choices[0]
     msg = choice.message
     calls: list[ToolCall] = []
     for tc in msg.tool_calls or []:
@@ -132,11 +155,19 @@ def _to_model_response(resp: Any) -> ModelResponse:
         # a clean completion (the same "fail loudly" posture as malformed args).
         logger.warning("model response stopped by content_filter (mapped to STOP)")
     finish = Finish.TOOL_CALLS if calls else _FINISH.get(choice.finish_reason, Finish.STOP)
-    usage: dict = {}
-    if resp.usage is not None:
-        usage = {
-            "input_tokens": resp.usage.prompt_tokens,
-            "output_tokens": resp.usage.completion_tokens,
-            "total_tokens": resp.usage.total_tokens,
-        }
-    return ModelResponse(text=msg.content or None, tool_calls=calls, finish=finish, usage=usage)
+    return ModelResponse(
+        text=msg.content or None, tool_calls=calls, finish=finish, usage=_usage_of(resp)
+    )
+
+
+def _usage_of(resp: Any) -> dict:
+    """The normalised usage shape (input/output/total) shared with the anthropic
+    adapter, degrading to ``{}`` when the provider reports no usage."""
+    raw = getattr(resp, "usage", None)
+    if raw is None:
+        return {}
+    return {
+        "input_tokens": raw.prompt_tokens,
+        "output_tokens": raw.completion_tokens,
+        "total_tokens": raw.total_tokens,
+    }

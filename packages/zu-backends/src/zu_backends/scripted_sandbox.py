@@ -46,6 +46,10 @@ class ScriptedEgressProxy:
     log: list[dict] = field(default_factory=list)
     host: str = "proxy.local"
     port: int = 8080
+    # Optional per-run MITM CA carrier (P2). A real MITM-capable proxy exposes
+    # ``ca_cert_pem()``; the container runner reads it via ``getattr(proxy,
+    # "mitm", None)``, so the scripted stand-in declares the slot too.
+    mitm: Any = None
 
     async def launch(self, spec: dict) -> _ProxyHandle:
         return _ProxyHandle(
@@ -88,7 +92,7 @@ class ScriptedSandbox:
     name = "scripted-sandbox"
     saved_events: list[Any] = field(default_factory=list)
 
-    async def launch(self, spec: dict) -> "ScriptedSandbox":
+    async def launch(self, spec: dict) -> ScriptedSandbox:
         return self
 
     async def exec(self, sandbox: Any, call: ToolCall) -> dict:

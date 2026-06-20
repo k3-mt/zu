@@ -38,7 +38,7 @@ def check_plugin(kind: str, name: str, obj: Any) -> list[ContractFinding]:
         need(isinstance(getattr(obj, "schema", None), dict), "missing a dict `schema`")
         need(_is_str(getattr(obj, "prompt_fragment", None)), "missing a str `prompt_fragment`")
         need(isinstance(getattr(obj, "tier", None), int), "missing an int `tier`")
-        need(callable(getattr(obj, "__call__", None)), "is not callable")
+        need(callable(obj), "is not callable")
         # The capability envelope is part of the contract — declare least privilege
         # explicitly rather than relying on the loop's safe default.
         caps = getattr(obj, "capabilities", None)

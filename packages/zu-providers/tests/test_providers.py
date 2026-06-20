@@ -181,6 +181,28 @@ async def test_native_tools_false_raises_not_implemented() -> None:
         await p.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
 
 
+async def test_openai_empty_choices_is_no_answer_not_crash() -> None:
+    # Some OpenAI-compatible servers (vLLM/Ollama/proxies) return choices: [] on
+    # certain errors/policy stops. The adapter must surface that as a no-answer
+    # STOP, never IndexError on choices[0].
+    captured: list = []
+    payload = {
+        "id": "c0", "object": "chat.completion", "created": 0, "model": "gpt-x",
+        "choices": [],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+    }
+    client = openai.AsyncOpenAI(
+        api_key="test", base_url="http://test.local/v1",
+        http_client=httpx.AsyncClient(transport=_mock_transport(payload, captured)),
+    )
+    p = OpenAICompatibleProvider(model="gpt-x", client=client)
+    resp = await p.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert resp.text is None
+    assert resp.tool_calls == []
+    assert resp.finish is Finish.STOP
+    assert resp.usage["total_tokens"] == 3  # usage still captured
+
+
 def test_orphan_tool_result_raises_not_silent() -> None:
     # A tool result with no preceding tool call is a malformed history; both
     # translators must fail loudly here rather than fabricate an id that the
@@ -329,10 +351,11 @@ async def test_anthropic_adapter_drives_the_loop() -> None:
     assert turn["n"] == 2  # the loop drove two model turns through the adapter
 
 
-# --- opt-in live calls (skipped unless env-gated) -----------------------------
+# --- opt-in live calls (@pytest.mark.live + a real key; run with --run-live) ---
 
 
-@pytest.mark.skipif(not os.environ.get("ZU_LIVE_ANTHROPIC"), reason="set ZU_LIVE_ANTHROPIC=1 + ANTHROPIC_API_KEY")
+@pytest.mark.live
+@pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason="needs ANTHROPIC_API_KEY")
 async def test_live_anthropic() -> None:
     p = AnthropicProvider()
     r = await p.complete(
@@ -341,7 +364,11 @@ async def test_live_anthropic() -> None:
     assert r.text is not None and "pong" in r.text.lower()
 
 
-@pytest.mark.skipif(not os.environ.get("ZU_LIVE_OPENAI"), reason="set ZU_LIVE_OPENAI=1 + OPENAI_API_KEY (+ OPENAI_BASE_URL)")
+@pytest.mark.live
+@pytest.mark.skipif(
+    not (os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_BASE_URL")),
+    reason="needs OPENAI_API_KEY or OPENAI_BASE_URL",
+)
 async def test_live_openai() -> None:
     p = OpenAICompatibleProvider(model=os.environ.get("ZU_LIVE_OPENAI_MODEL", "gpt-4o-mini"))
     r = await p.complete(

@@ -35,6 +35,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from zu_cli.config import (
+    ConfigError,
+    RunConfig,
+    assemble,
+    coerce_config,
+    coerce_task,
+)
 from zu_core.contracts import Budget, Event, Result, Status, TaskSpec
 from zu_core.loop import run_task
 from zu_core.registry import (
@@ -44,13 +51,6 @@ from zu_core.registry import (
     sink,
     tool,
     validator,
-)
-from zu_cli.config import (
-    ConfigError,
-    RunConfig,
-    assemble,
-    coerce_config,
-    coerce_task,
 )
 
 __version__ = "0.1.0"
@@ -108,9 +108,18 @@ class Zu:
         from zu_cli.observe import attach_observability
 
         attach_observability(bus, self.config.observability)
-        result = await run_task(spec, provider, registry, bus, providers=providers)
-        events = await bus.query()
-        return result, events
+        try:
+            result = await run_task(
+                spec, provider, registry, bus,
+                providers=providers, containment=self.config.containment,
+            )
+            events = await bus.query()
+            return result, events
+        finally:
+            # ``assemble`` builds a fresh bus (and its canonical/trace sinks) per
+            # run; release them here so a long-lived, reused ``Zu`` instance does
+            # not leak one sqlite connection per ``run()``.
+            await bus.aclose()
 
     async def arun(self, task: Any) -> Result:
         """Async: run one task, returning just the Result."""

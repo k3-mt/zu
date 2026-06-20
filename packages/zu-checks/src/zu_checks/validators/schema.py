@@ -5,7 +5,7 @@ from __future__ import annotations
 import jsonschema
 
 from zu_core.contracts import Result
-from zu_core.ports import RunContext, Verdict, Severity
+from zu_core.ports import RunContext, Severity, Verdict
 
 
 class SchemaValidator:
@@ -25,7 +25,7 @@ class SchemaValidator:
         except jsonschema.ValidationError as e:
             # The data didn't match a valid schema — a retry might fix it.
             return Verdict(severity=Severity.RETRY, detector=self.name, detail=message_of(e))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - a broken schema is terminal; see below
             # The output_schema itself is unusable (comes from the TaskSpec,
             # unvalidated): malformed (jsonschema.SchemaError), or an
             # unresolvable ``$ref`` — which jsonschema raises as a *referencing*

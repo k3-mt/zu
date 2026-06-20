@@ -22,6 +22,7 @@ FastAPI is an optional dependency (the ``serve`` extra): the import lives inside
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 from typing import Any
@@ -112,7 +113,9 @@ def create_app(
             return
         header = authorization or ""
         presented = header[7:] if header[:7].lower() == "bearer " else token
-        if presented != required_token:
+        # Constant-time compare so the bearer token can't be recovered byte-by-byte
+        # via response-timing on a budget-spending endpoint.
+        if presented is None or not hmac.compare_digest(presented, required_token):
             raise HTTPException(status_code=401, detail="missing or invalid bearer token")
 
     auth = [Depends(require_auth)]  # applied per protected route below
@@ -173,19 +176,22 @@ def create_app(
             spec = coerce_task(req.task, cfg.budget, allow_paths=False)
             provider, registry, bus, providers = assemble(cfg, allow_imports=allow_imports)
         except ConfigError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         bus.subscribe(_tee)  # feed the dashboard + review queue
 
         try:
-            result = await run_task(spec, provider, registry, bus, providers=providers)
+            result = await run_task(spec, provider, registry, bus, providers=providers, containment=default_cfg.containment)
+            body: dict = {"result": result.model_dump(mode="json")}
+            if req.include_events:
+                events = await bus.query()
+                body["events"] = [e.model_dump(mode="json") for e in events]
+            return body
         except Exception as exc:  # noqa: BLE001 - a model/infra failure is a 502, not a crash
-            raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
-
-        body: dict = {"result": result.model_dump(mode="json")}
-        if req.include_events:
-            events = await bus.query()
-            body["events"] = [e.model_dump(mode="json") for e in events]
-        return body
+            raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
+        finally:
+            # Release the per-request bus's sink (e.g. a sqlite connection) so a
+            # long-lived server doesn't leak one connection per request.
+            await bus.aclose()
 
     @app.post("/run/stream", dependencies=auth)
     async def run_stream(req: RunRequest) -> Any:
@@ -197,7 +203,7 @@ def create_app(
             spec = coerce_task(req.task, cfg.budget, allow_paths=False)
             provider, registry, bus, providers = assemble(cfg, allow_imports=allow_imports)
         except ConfigError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         # Bounded queue with drop-on-full: a slow/disconnected SSE consumer must
         # never let events accumulate without limit (the same backpressure
@@ -216,7 +222,7 @@ def create_app(
 
         async def runner() -> None:
             try:
-                result = await run_task(spec, provider, registry, bus, providers=providers)
+                result = await run_task(spec, provider, registry, bus, providers=providers, containment=default_cfg.containment)
                 await queue.put(("result", result))
             except asyncio.CancelledError:
                 raise
@@ -224,6 +230,8 @@ def create_app(
                 await queue.put(("error", exc))
             finally:
                 await queue.put(("done", None))
+                # Release the per-request bus's sink even if the client vanished.
+                await bus.aclose()
 
         async def gen() -> Any:
             task = asyncio.create_task(runner())

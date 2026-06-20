@@ -230,10 +230,20 @@ async def _container_gate() -> GateResult:
             + ("envelope held on the out-of-band record" if result.passed else result.summary())
         )
         return GateResult("container", PASS if result.passed else FAIL, detail)
-    except Exception as exc:  # noqa: BLE001 - infra failure SKIPs, never FAILs a plugin
+    except Exception as exc:  # noqa: BLE001 - see below: an opted-in gate that breaks FAILs
+        # The operator opted INTO the container form (ZU_REDTEAM_CONTAINER=1) and
+        # it could not run. FAIL loudly rather than SKIP: a SKIP reads as a pass
+        # (GateReport.passed treats non-FAIL as passing), which would hide that the
+        # STRONGEST gate never actually ran — exactly the false-green the container
+        # form exists to prevent. Set ZU_REDTEAM_CONTAINER_STRICT=0 to downgrade an
+        # infra failure back to SKIP (e.g. known-flaky CI image pulls).
+        lenient = os.environ.get("ZU_REDTEAM_CONTAINER_STRICT") == "0"
         return GateResult(
-            "container", SKIP,
-            f"Docker present but the container form could not run ({type(exc).__name__}: {exc})")
+            "container", SKIP if lenient else FAIL,
+            f"Docker present and ZU_REDTEAM_CONTAINER=1, but the container form could "
+            f"not run ({type(exc).__name__}: {exc}) — "
+            + ("downgraded to SKIP by ZU_REDTEAM_CONTAINER_STRICT=0"
+               if lenient else "failing: the requested containment gate did not run"))
 
 
 def _unit_gate(pkg_dir: str | Path | None) -> GateResult:

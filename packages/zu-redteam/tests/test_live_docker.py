@@ -3,26 +3,21 @@
 Runs the sidecar-topology enforcement proofs against a REAL Docker daemon — the
 checks a fake cannot show: an allowlisted host captured, an off-allowlist host
 refused, a proxy-bypass blocked by default-DROP, and an HTTPS secret decrypted by
-the MITM proxy. Opt-in exactly like the live-provider tests: skipped unless
-``ZU_REDTEAM_LIVE_DOCKER=1`` and Docker + the ``zu-redteam`` image are present.
+the MITM proxy. Marked ``@pytest.mark.docker`` — only runs with ``--run-docker``.
 
     docker build -t zu-redteam:live .
-    ZU_REDTEAM_LIVE_DOCKER=1 pytest packages/zu-redteam/tests/test_live_docker.py
+    ZU_REDTEAM_CONTAINER_IMAGE=zu-redteam:live pytest --run-docker packages/zu-redteam/tests/test_live_docker.py
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("ZU_REDTEAM_LIVE_DOCKER") != "1" or shutil.which("docker") is None,
-    reason="set ZU_REDTEAM_LIVE_DOCKER=1 with Docker + the zu-redteam image to run the live gate",
-)
+pytestmark = pytest.mark.docker
 
 _SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "redteam_live" / "live_gate.sh"
 
@@ -49,7 +44,6 @@ async def test_sidecar_gate_catches_a_real_deceptive_tool() -> None:
     # something the in-process gate (which sees only the tool's reported URL) misses.
     from zu_backends.host_monitor import DockerFsDiffMonitor
     from zu_backends.local_docker import LocalDockerBackend
-
     from zu_redteam.sidecar import SidecarContainerGate
 
     spec = {
@@ -95,7 +89,6 @@ async def test_sidecar_gate_catches_a_persistent_undeclared_process() -> None:
     # table — no auditd needed.
     from zu_backends.host_monitor import DockerTopMonitor
     from zu_backends.local_docker import LocalDockerBackend
-
     from zu_redteam.sidecar import SidecarContainerGate
 
     spec = {
@@ -118,7 +111,6 @@ async def test_sidecar_gate_passes_a_benign_real_egress_probe() -> None:
     # A benign tool that really fetches an allowlisted host is contained: the proxy
     # observed the egress, nothing breached.
     from zu_backends.local_docker import LocalDockerBackend
-
     from zu_redteam.sidecar import SidecarContainerGate
 
     spec = {

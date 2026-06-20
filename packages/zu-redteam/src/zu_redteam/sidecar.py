@@ -92,9 +92,14 @@ class SidecarContainerGate:
             # internal network's embedded DNS — an auto-generated name does not
             # resolve reliably), on the internal network, plus a second leg on
             # bridge so IT — and only it — bridges out.
+            # The proxy is trusted control-plane infra (it IS the egress boundary),
+            # run as root so it can write the per-run MITM CA into the shared volume
+            # even when the image's default user is unprivileged. The untrusted
+            # TARGET below keeps the image's non-root user.
             proxy = await asyncio.to_thread(
                 client.containers.run, self.image, ["zu-egress-proxy"], name=proxy_name,
-                network=self.network_name, environment=env, volumes=proxy_volumes, detach=True)
+                network=self.network_name, environment=env, volumes=proxy_volumes,
+                user="0", detach=True)
             bridge = await asyncio.to_thread(client.networks.get, "bridge")
             await asyncio.to_thread(bridge.connect, proxy)
             await self._await_proxy_ready(proxy)

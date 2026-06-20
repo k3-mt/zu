@@ -111,7 +111,7 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
                     blocks.append({"type": "text", "text": str(text)})
                 blocks += [
                     {"type": "tool_use", "id": tid, "name": c["name"], "input": c.get("args", {})}
-                    for tid, c in zip(tids, calls)
+                    for tid, c in zip(tids, calls, strict=True)
                 ]
                 out.append({"role": "assistant", "content": blocks})
             else:
@@ -145,7 +145,7 @@ def to_openai_messages(messages: list[dict]) -> list[dict]:
                         "type": "function",
                         "function": {"name": c["name"], "arguments": json.dumps(c.get("args", {}))},
                     }
-                    for tid, c in zip(tids, calls)
+                    for tid, c in zip(tids, calls, strict=True)
                 ]
                 # Keep the model's reasoning text alongside the calls when
                 # present (OpenAI allows content + tool_calls on one message).

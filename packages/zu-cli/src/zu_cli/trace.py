@@ -10,7 +10,8 @@ what you watch locally and what you watch against a container are identical.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 def _truncate(value: Any, limit: int = 160) -> str:

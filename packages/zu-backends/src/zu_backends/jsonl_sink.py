@@ -20,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from typing import IO, Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import IO, Any
 
 from zu_core.contracts import Event
 from zu_core.eventstore import event_matches, validate_filter

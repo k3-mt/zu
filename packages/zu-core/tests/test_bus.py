@@ -9,7 +9,6 @@ a record).
 
 from __future__ import annotations
 
-from typing import AsyncIterator
 from uuid import uuid4
 
 from zu_core import events as event_types
@@ -17,41 +16,7 @@ from zu_core.bus import EventBus
 from zu_core.contracts import Event
 from zu_core.projections import SessionStore
 from zu_core.sinks import MemoryEventSink
-
-
-class FakeSink:
-    """Minimal EventSink exposing a sync view, to observe notify-time ordering."""
-
-    def __init__(self) -> None:
-        self.appended: list[Event] = []
-
-    async def append(self, event: Event) -> None:
-        self.appended.append(event)
-
-    async def query(self, flt=None, *, limit=None, after_seq=0) -> list[Event]:
-        return list(self.appended)
-
-    async def stream(self, flt=None, *, batch_size=500) -> AsyncIterator[Event]:
-        for ev in self.appended:
-            yield ev
-
-    async def count(self, flt=None) -> int:
-        return len(self.appended)
-
-
-class ExplodingSink:
-    async def append(self, event: Event) -> None:
-        raise RuntimeError("disk is on fire")
-
-    async def query(self, flt=None, *, limit=None, after_seq=0) -> list[Event]:
-        return []
-
-    async def stream(self, flt=None, *, batch_size=500) -> AsyncIterator[Event]:
-        return
-        yield  # pragma: no cover - makes this an async generator
-
-    async def count(self, flt=None) -> int:
-        return 0
+from zu_testing import ExplodingSink, FakeSink
 
 
 def _event(task_id, type=event_types.TASK_STARTED) -> Event:
@@ -61,6 +26,34 @@ def _event(task_id, type=event_types.TASK_STARTED) -> Event:
 def test_default_sink_is_in_memory() -> None:
     bus = EventBus()
     assert isinstance(bus.sink, MemoryEventSink)
+
+
+async def test_aclose_releases_canonical_and_destination_sinks() -> None:
+    # aclose closes any sink that has a close(), isolates a close failure, and is
+    # safe even for sinks (in-memory, FakeSink) that have none.
+    class ClosingSink(FakeSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    canonical = ClosingSink()
+    destination = ClosingSink()
+    bus = EventBus(sink=canonical)
+    bus.add_destination(destination)
+
+    await bus.aclose()
+    assert canonical.closed == 1
+    assert destination.closed == 1
+    await bus.aclose()  # idempotent: safe to call again
+    assert canonical.closed == 2
+
+
+async def test_aclose_tolerates_a_sink_without_close() -> None:
+    bus = EventBus(sink=FakeSink())  # FakeSink has no close()
+    await bus.aclose()  # must not raise
 
 
 async def test_append_before_notify() -> None:

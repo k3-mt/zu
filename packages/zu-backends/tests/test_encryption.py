@@ -15,13 +15,13 @@ pytest.importorskip("cryptography")
 
 from cryptography.exceptions import InvalidTag  # noqa: E402
 
-from zu_core.contracts import Event  # noqa: E402
 from zu_backends.encryption import (  # noqa: E402
     AesGcmCodec,
     EnvKeyProvider,
     ManagedAesGcmCodec,
 )
 from zu_backends.sqlite_sink import SqliteSink  # noqa: E402
+from zu_core.contracts import Event  # noqa: E402
 
 _KEY = os.urandom(32)
 
@@ -116,6 +116,20 @@ def test_managed_codec_roundtrip_and_embeds_key_id() -> None:
     klen = body[0]
     assert body[1 : 1 + klen] == b"k1"
     assert codec.decode_body(body, aad=b"e1") == "hello"
+
+
+def test_tampered_key_id_is_rejected() -> None:
+    # The embedded key id is bound into the AAD, so an at-rest attacker who
+    # rewrites it (to point a row at a different/weaker key) makes the row fail
+    # to decrypt rather than silently re-key it.
+    keys = {"k1": os.urandom(32), "k2": os.urandom(32)}
+    codec = ManagedAesGcmCodec(_DictKeyProvider(keys, current="k1"))
+    body = bytearray(codec.encode_body("secret", aad=b"e1"))
+    klen = body[0]
+    assert bytes(body[1 : 1 + klen]) == b"k1"
+    body[1 : 1 + klen] = b"k2"  # forge the key id to another valid, known key
+    with pytest.raises(InvalidTag):
+        codec.decode_body(bytes(body), aad=b"e1")
 
 
 def test_rotation_old_rows_still_decrypt_new_rows_use_new_key() -> None:

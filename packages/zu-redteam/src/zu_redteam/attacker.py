@@ -287,7 +287,7 @@ class LiveAttacker:
         extra_plugins: Sequence[tuple[str, str, Any]] = (),
         rounds: int | None = None,
         budget: AttackerBudget | None = None,
-    ) -> "LiveAttacker":
+    ) -> LiveAttacker:
         if os.environ.get("ZU_REDTEAM_LIVE") != "1":
             raise RuntimeError(
                 "LiveAttacker is the opt-in discovery mode (a live frontier model). "

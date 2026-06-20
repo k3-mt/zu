@@ -1,0 +1,25 @@
+name: live
+
+# Tier 4: the @live lane — real models over the network. Costs money and needs
+# secrets, so it does NOT run per-PR: nightly + on demand only. Tests that need a
+# key self-skip when it's absent (so a no-secret run is green, not red).
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily ~06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: Tier 4 — live model tests (skip cleanly without keys)
+        run: uv run pytest --run-live -m live

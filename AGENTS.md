@@ -33,12 +33,12 @@ zu/
     zu-core/                # contracts, ports, registry, loop, bus  <- stable, SDK-free
     zu-providers/           # model adapters: scripted, anthropic, openai-compatible
     zu-tools/               # http_fetch, html_parse, render_dom
-    zu-detectors/           # empty, error, js-shell, bot-wall
-    zu-validators/          # schema, grounding
+    zu-checks/              # detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)
     zu-backends/            # local-docker sandbox + sqlite/jsonl event sinks
     zu-redteam/             # the plugin-test gate + adversarial red-team agent
     zu-cli/                 # the `zu` command, HTTP server, MCP server
     zu/                     # the `import zu` embed facade (published as zu-runtime)
+    zu-testing/             # shared test kit: fakes, fixtures, the pytest plugin
   examples/                 # runnable demos (the killer demo lives here)
 ```
 
@@ -76,8 +76,8 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 |-----------------------------|------------------|-------------------|-----------------|
 | a model adapter             | `zu-providers`   | `zu.providers`    | `ModelProvider` |
 | a tool the model can call   | `zu-tools`       | `zu.tools`        | `Tool`          |
-| a detector (escalation)     | `zu-detectors`   | `zu.detectors`    | `Detector`      |
-| an on-final result check    | `zu-validators`  | `zu.validators`   | `Validator`     |
+| a detector (escalation)     | `zu-checks`      | `zu.detectors`    | `Detector`      |
+| an on-final result check    | `zu-checks`      | `zu.validators`   | `Validator`     |
 | a sandbox backend           | `zu-backends`    | `zu.backends`     | `SandboxBackend`|
 | an event sink (storage)     | `zu-backends`    | `zu.sinks`        | `EventSink`     |
 

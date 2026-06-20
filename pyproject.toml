@@ -13,8 +13,7 @@ dependencies = [
     "zu-core",
     "zu-providers",
     "zu-tools",
-    "zu-detectors",
-    "zu-validators",
+    "zu-checks",
     "zu-backends",
     "zu-redteam",
     "zu-cli",
@@ -31,19 +30,22 @@ members = ["packages/*"]
 zu-core       = { workspace = true }
 zu-providers  = { workspace = true }
 zu-tools      = { workspace = true }
-zu-detectors  = { workspace = true }
-zu-validators = { workspace = true }
+zu-checks     = { workspace = true }
 zu-backends   = { workspace = true }
 zu-redteam    = { workspace = true }
 zu-cli        = { workspace = true }
 zu-runtime    = { workspace = true }
+zu-testing    = { workspace = true }
 
 # Dev tooling installed by `uv sync` (PEP 735 dependency group).
 [dependency-groups]
 dev = [
+    "zu-testing",         # the shared test kit + pytest plugin (markers, fixtures, fakes)
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5",      # coverage measurement + gate (see [tool.coverage])
     "mypy>=1.8",
+    "ruff>=0.5",          # lint/format (config in [tool.ruff]); also run in CI
     "cryptography>=42",   # exercises zu-backends[encryption] in CI
     "anthropic>=0.40",    # exercises zu-providers[anthropic] in CI
     "openai>=1.40",       # exercises zu-providers[openai] in CI
@@ -57,10 +59,57 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["packages"]
 addopts = "-q"
+# Markers are also registered by the zu-testing pytest plugin; declared here too
+# so `pytest --markers` documents them and an unknown-marker typo is an error.
+# Gating (auto-skip unless --run-live / --run-docker) lives in the plugin.
+markers = [
+    "live: needs network / a real model or external service (opt in with --run-live)",
+    "docker: needs a real Docker daemon (opt in with --run-docker)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["packages/*/src"]
+
+[tool.ruff.lint]
+# Beyond ruff's default E/F: import order (I), bugbears (B), comprehensions (C4),
+# pyupgrade (UP), and flake8-2020 (YTT). The deliberate broad-except boundaries
+# carry an explicit `# noqa: BLE001`, so BLE is on to keep any *new* bare except
+# honest. Add rules as the codebase tightens.
+select = ["E", "F", "I", "B", "C4", "UP", "YTT", "BLE"]
+# E501 (line length): the formatter owns code width; don't churn prose/docstrings.
+# UP042 (StrEnum): ``class X(str, Enum)`` is idiomatic and correct on 3.11; the
+# StrEnum rewrite is purely stylistic and risks subtle serialization changes.
+ignore = ["E501", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may shadow builtins and use broad excepts freely.
+"**/tests/**" = ["BLE001"]
 
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-# Ports and contracts are the load-bearing types; check them strictly.
-# Adapters can tighten over time.
 warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+no_implicit_optional = true
+
+# The core contracts and ports are the load-bearing types every plugin is held
+# to — check them strictly. Adapters/CLI can tighten over time.
+[[tool.mypy.overrides]]
+module = ["zu_core.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+
+[tool.coverage.run]
+branch = true
+source = ["zu_core", "zu_providers", "zu_tools", "zu_checks",
+          "zu_backends", "zu_redteam", "zu_cli", "zu"]
+
+[tool.coverage.report]
+show_missing = true
+# A floor, not a ceiling — raise it as coverage grows. Set below the current
+# level so an accidental regression in a security-critical module trips CI.
+fail_under = 80

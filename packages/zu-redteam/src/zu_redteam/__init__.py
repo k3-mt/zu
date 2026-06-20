@@ -33,12 +33,12 @@ from .container import (
     DockerContainerRunner,
     merge_evidence,
 )
-from .sidecar import SidecarContainerGate, parse_proxy_log
 from .contract import ContractFinding, check_plugin
 from .corpus import CORPUS_OBJECTIVES, CorpusCase, build_corpus
 from .defense import DefenseMonitor, monitor_defenses
 from .gate import AttackFinding, GateReport, GateResult, run_gate
 from .harness import Scenario, run_scenario
+from .sidecar import SidecarContainerGate, parse_proxy_log
 from .verdict import (
     Breach,
     EgressBreach,

@@ -6,16 +6,15 @@ from __future__ import annotations
 
 import json
 
+from zu_cli.config import ObservabilityConfig
+from zu_cli.observe import attach_observability
+from zu_cli.trace import format_event
 from zu_core.bus import EventBus
 from zu_core.contracts import Event, TaskSpec
 from zu_core.loop import run_task
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
 from zu_tools.fetch import HttpFetch
-
-from zu_cli.config import ObservabilityConfig
-from zu_cli.observe import attach_observability
-from zu_cli.trace import format_event
 
 
 async def test_hook_queues_blocked_attempt_from_a_plain_run(tmp_path):

@@ -8,7 +8,7 @@ boundary, not swallowed.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import UUID, uuid4
 
@@ -70,7 +70,7 @@ class Event(BaseModel):
     task_id: UUID
     parent_id: UUID | None = None
     type: str
-    ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: str
     payload: dict = Field(default_factory=dict)
     schema_version: int = 1

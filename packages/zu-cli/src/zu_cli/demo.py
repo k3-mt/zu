@@ -126,7 +126,7 @@ class _FixtureBrowser:
 
 
 def _minimal_registry(offline: bool) -> tuple[Registry, None]:
-    from zu_validators.schema import SchemaValidator
+    from zu_checks.validators.schema import SchemaValidator
 
     reg = Registry()
     reg.register("validators", "schema", SchemaValidator())
@@ -135,10 +135,10 @@ def _minimal_registry(offline: bool) -> tuple[Registry, None]:
 
 def _web_registry(offline: bool) -> tuple[Registry, None]:
     ensure_web_tools()
+    from zu_checks.validators.grounding import GroundingValidator
+    from zu_checks.validators.schema import SchemaValidator
     from zu_tools.fetch import HttpFetch
     from zu_tools.parse import HtmlParse
-    from zu_validators.grounding import GroundingValidator
-    from zu_validators.schema import SchemaValidator
 
     if offline:
         import httpx
@@ -165,16 +165,17 @@ def _escalation_registry(offline: bool) -> tuple[Registry, Any]:
             "(not available yet); run it with --offline to see the escalation logic."
         )
     ensure_web_tools()
-    from zu_detectors.bot_wall import BotWallDetector
-    from zu_detectors.empty import EmptyDetector
-    from zu_detectors.error import ErrorDetector
-    from zu_detectors.js_shell import JsShellDetector
+    import httpx
+
+    from zu_checks.detectors.bot_wall import BotWallDetector
+    from zu_checks.detectors.empty import EmptyDetector
+    from zu_checks.detectors.error import ErrorDetector
+    from zu_checks.detectors.js_shell import JsShellDetector
+    from zu_checks.validators.grounding import GroundingValidator
+    from zu_checks.validators.schema import SchemaValidator
     from zu_tools.fetch import HttpFetch
     from zu_tools.parse import HtmlParse
     from zu_tools.render import RenderDom
-    from zu_validators.grounding import GroundingValidator
-    from zu_validators.schema import SchemaValidator
-    import httpx
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_SHELL)
@@ -349,7 +350,8 @@ def build_provider(
     config surface), defaulting to Anthropic when only a model is given."""
     if offline:
         return DEMOS[kind]["scripted"](), "scripted"
-    from .config import ConfigError, ProviderConfig, build_provider as cfg_build_provider
+    from .config import ConfigError, ProviderConfig
+    from .config import build_provider as cfg_build_provider
 
     # No hard-coded provider default: an agent must say which provider it runs on.
     # If a real run names none, fail clearly rather than silently assuming one.

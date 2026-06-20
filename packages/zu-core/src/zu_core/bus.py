@@ -22,7 +22,8 @@ from __future__ import annotations
 import inspect
 import logging
 from collections import deque
-from typing import AsyncIterator, Awaitable, Callable, NamedTuple
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import NamedTuple
 
 from .contracts import Event
 from .ports import EventSink
@@ -52,6 +53,9 @@ class EventBus:
         # sink for production. Never accompanied by a second in-bus copy.
         self.sink: EventSink = sink if sink is not None else MemoryEventSink()
         self._subscribers: list[Subscriber] = []
+        # Secondary sinks attached via ``add_destination`` — tracked so ``aclose``
+        # can release their resources (e.g. a sqlite connection) too.
+        self._destinations: list[EventSink] = []
         # Bounded so a long-lived bus can't leak memory via recorded failures.
         self.subscriber_failures: deque[SubscriberFailure] = deque(
             maxlen=max_recorded_failures
@@ -71,7 +75,29 @@ class EventBus:
         async def _ship(event: Event) -> None:
             await sink.append(event)
 
+        self._destinations.append(sink)
         self.subscribe(_ship)
+
+    async def aclose(self) -> None:
+        """Release the canonical store and every secondary destination that holds
+        a resource (e.g. a sqlite connection). ``close`` is an optional capability
+        on a sink — a sink without one (the in-memory default, the per-append
+        jsonl sink) is simply skipped. Each close is isolated so one failure does
+        not strand the others. Idempotent: safe to call more than once.
+
+        The embed facade assembles a fresh bus per run, so calling this in a
+        ``finally`` is what keeps a long-lived ``Zu`` instance from leaking one
+        connection per ``run()``."""
+        for sink in [self.sink, *self._destinations]:
+            closer = getattr(sink, "close", None)
+            if closer is None:
+                continue
+            try:
+                result = closer()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - one close failure must not strand the rest
+                log.warning("sink %r failed to close: %s", sink, exc)
 
     async def publish(self, event: Event) -> None:
         # 1. canonical store first; a failure here propagates (source of truth).

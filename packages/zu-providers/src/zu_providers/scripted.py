@@ -45,7 +45,7 @@ class ScriptedProvider:
         self.capabilities = capabilities or Capabilities()
 
     @classmethod
-    def from_moves(cls, moves: list[dict], **kw) -> "ScriptedProvider":
+    def from_moves(cls, moves: list[dict], **kw) -> ScriptedProvider:
         responses: list[ModelResponse] = []
         for i, m in enumerate(moves):
             # Fail loudly on a malformed move rather than silently swallowing it:

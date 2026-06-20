@@ -8,29 +8,26 @@ extracted values are then held to the **default** validators (schema + grounding
 a value present on the page is returned; a fabricated one is refused, not returned
 as success. Regression for "how can it pass with a made-up answer".
 
-A live variant (``test_live_*``) fetches an actual URL and is skipped unless
-``ZU_E2E_LIVE=1`` (it needs outbound network), mirroring the repo's opt-in
-live-call convention.
+A live variant (``test_live_*``) fetches an actual URL and is marked
+``@pytest.mark.live`` (needs outbound network); run it with ``--run-live``.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import httpx
 import pytest
 
+from zu_checks.validators.grounding import GroundingValidator
+from zu_checks.validators.schema import SchemaValidator
+from zu_cli.config import PluginsConfig
 from zu_core.bus import EventBus
 from zu_core.contracts import Status, TaskSpec
 from zu_core.loop import run_task
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
+from zu_testing import fetch_tool
 from zu_tools.fetch import HttpFetch
-from zu_validators.grounding import GroundingValidator
-from zu_validators.schema import SchemaValidator
-
-from zu_cli.config import PluginsConfig
 
 _PAGE_HTML = (Path(__file__).parent / "fixtures" / "product.html").read_text(encoding="utf-8")
 _URL = "https://brewterra.example/equipment/hv60-ceramic"
@@ -47,12 +44,9 @@ _SCHEMA = {
 
 
 def _real_fetch() -> HttpFetch:
-    """The real http_fetch tool, but served the saved page off a MockTransport —
-    no network, real fetch logic. allow_private skips DNS (the transport answers)."""
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=_PAGE_HTML)
-
-    return HttpFetch(allow_private=True, transport=httpx.MockTransport(handler))
+    """The real http_fetch tool served the saved page off a mock transport —
+    no network, real fetch logic (SSRF guard, byte cap, decoding)."""
+    return fetch_tool(text=_PAGE_HTML)
 
 
 def _registry(fetch: HttpFetch) -> Registry:
@@ -94,7 +88,7 @@ async def test_fabricated_value_is_refused_not_returned():
     assert result.status is not Status.SUCCESS
 
 
-@pytest.mark.skipif(os.environ.get("ZU_E2E_LIVE") != "1", reason="needs network; set ZU_E2E_LIVE=1")
+@pytest.mark.live
 async def test_live_fetch_of_a_real_website_grounds():
     # The real tool against a real URL over real network (opt-in). example.com is
     # stable and its page contains the heading "Example Domain".

@@ -3,7 +3,7 @@ proof the gate is real — it both clears a good plugin and stops a bad one."""
 
 from __future__ import annotations
 
-from zu_redteam.fixtures import StaticFetch, LeakyFetch, SecretEchoTool
+from zu_redteam.fixtures import LeakyFetch, SecretEchoTool, StaticFetch
 from zu_redteam.gate import run_gate
 
 
@@ -65,7 +65,6 @@ async def test_dormant_pivot_probe_passes_a_benign_plugin() -> None:
 async def test_controlled_handler_flips_benign_then_trigger() -> None:
     # Phase 1 benign, phase 2 (armed) carries the trigger.
     from zu_core.ports import RunContext
-
     from zu_redteam.fixtures import ControlledHandler
 
     h = ControlledHandler(arm_after=1)

@@ -4,6 +4,16 @@ version = "0.1.0"
 description = "The `zu` command — Agent Production Runtime CLI"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 # The lean engine: the `zu` command + config, and nothing but the core. Plugins
 # are opt-in — installed as separate packages (zu-tools, zu-providers, …) or
 # pulled by the `zu-runtime` bundle and its extras. The CLI discovers whatever
@@ -30,6 +40,9 @@ Repository = "https://github.com/k3-mt/zu"
 
 [project.scripts]
 zu = "zu_cli.main:app"
+# In-container entrypoint for the whole-agent-in-container form: the sandbox
+# launcher execs this inside the hardened container (see zu_cli.sandbox).
+zu-run-contained = "zu_cli.sandbox:run_contained_from_env"
 
 [build-system]
 requires = ["hatchling"]

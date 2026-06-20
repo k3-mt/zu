@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from zu_core.codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from zu_core.contracts import Event

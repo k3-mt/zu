@@ -40,7 +40,7 @@ class MitmCA:
     def __init__(self, common_name: str = "Zu Red-Team MITM CA") -> None:
         self._ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         self._ca_cert = (
             x509.CertificateBuilder()
             .subject_name(name)
@@ -61,7 +61,7 @@ class MitmCA:
 
     def _mint(self, host: str) -> tuple[bytes, bytes]:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         try:
             san: Any = x509.IPAddress(ipaddress.ip_address(host))
         except ValueError:

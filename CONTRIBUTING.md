@@ -42,10 +42,49 @@ You need Python 3.11+ and uv. Nothing else for the offline suite.
 |-----------------------------|-------------------|-------------------|
 | a model adapter             | `zu-providers`    | `zu.providers`    |
 | a tool the model can call   | `zu-tools`        | `zu.tools`        |
-| a detector (escalation)     | `zu-detectors`    | `zu.detectors`    |
-| an on-final result check    | `zu-validators`   | `zu.validators`   |
+| a detector (escalation)     | `zu-checks`       | `zu.detectors`    |
+| an on-final result check    | `zu-checks`       | `zu.validators`   |
 | a sandbox backend           | `zu-backends`     | `zu.backends`     |
 | an event sink (storage)     | `zu-backends`     | `zu.sinks`        |
+
+## Testing
+
+Tests live **beside the package they test** (`packages/<pkg>/tests/`), so every
+package stays independently testable and publishable. `pytest` from the root runs
+them all (`testpaths = ["packages"]`).
+
+**Shared test infrastructure lives in `zu-testing`** — don't reinvent fakes.
+It ships drop-in doubles and pytest fixtures (auto-loaded via its plugin):
+
+```python
+from zu_testing import FakeSandboxBackend, FakeSink, mock_transport, scripted_config
+
+async def test_my_tool(agent_runner, make_fetch_tool):     # fixtures, no import
+    result, events = await agent_runner(
+        [{"tool": "my_tool", "args": {}}, {"text": "{}", "finish": "stop"}],
+        tools={"my_tool": MyTool()},
+    )
+    assert result.status.value == "success"
+```
+
+The same kit is for **your own out-of-tree plugins**: `pip install zu-testing`,
+then use `agent_runner` to exercise a tool/detector/validator against the real
+loop. See [`packages/zu-testing/README.md`](packages/zu-testing/README.md).
+
+**Test lanes** — the default run is fast and hermetic (no network, no Docker):
+
+```bash
+make test          # unit only (the default; what CI gates on)
+make test-live     # + @pytest.mark.live  (network / real models + keys)
+make test-docker   # + @pytest.mark.docker (a real daemon; the containment proofs)
+make cov           # unit + coverage gate
+make check         # lint + type + cov, the full local gate
+```
+
+Mark a test `@pytest.mark.live` or `@pytest.mark.docker` if it needs network or a
+daemon — it is then auto-skipped unless you pass `--run-live` / `--run-docker`.
+Don't gate with ad-hoc `os.environ`/`skipif` strings. Async tests need no
+decorator (`asyncio_mode = "auto"`).
 
 ## Submitting a change
 

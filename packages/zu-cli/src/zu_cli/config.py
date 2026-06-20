@@ -30,7 +30,7 @@ import importlib
 import inspect
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from zu_core.bus import EventBus
 from zu_core.contracts import Budget, TaskSpec
@@ -142,6 +142,25 @@ class RunConfig(BaseModel):
     # how a run emits to local files or cloud storage for observability.
     trace_sinks: list[EventSinkConfig] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
+    # The containment posture for tool execution (see zu_core.security):
+    #   * ``audit``    (default) — tools run in-process; each declared envelope and
+    #     every contained block is recorded on the event log. Tier-1 tools carry
+    #     their own in-process guards (the SSRF/DNS-pin in zu-tools). Right for
+    #     trusted tools on a host.
+    #   * ``required`` — fail closed: refuse to run any tool with off-box reach
+    #     (non-empty egress/capabilities, or tier >= 2) UNLESS the run is executing
+    #     inside the Zu sandbox (``ZU_SANDBOXED=1``), where the container — default-
+    #     DROP network + egress proxy + dropped caps — is the real boundary. Run
+    #     such a config via the sandboxed launcher; on a bare host it refuses rather
+    #     than run a capability-bearing (or untrusted third-party) tool unguarded.
+    containment: str = "audit"
+
+    @field_validator("containment")
+    @classmethod
+    def _known_containment(cls, v: str) -> str:
+        if v not in ("audit", "required"):
+            raise ValueError(f"containment must be 'audit' or 'required', got {v!r}")
+        return v
 
 
 # --- loading -----------------------------------------------------------------
@@ -399,8 +418,30 @@ def build_registry(
     return reg
 
 
-def _build_one_sink(spec: EventSinkConfig, catalog: Registry) -> Any:
-    """Construct one EventSink from its config (driver name + path/options)."""
+def _refuse_path(spec: EventSinkConfig) -> None:
+    """Raise when a sink names a filesystem ``path`` on a surface that may not
+    write the host. A sink ``path`` is an arbitrary file the process opens for
+    write (a sqlite db, a jsonl log), so a config that can name any path is a
+    file-write door — fine for the operator-trusted CLI, never for a config that
+    arrived over the network. The in-memory default (no ``event_sink``) and any
+    path-free, options-only sink remain available to a per-request config."""
+    raise ConfigError(
+        f"refusing to open sink path {spec.path!r}: this surface does not permit "
+        "writing arbitrary host paths (a per-request config may not configure a "
+        "filesystem sink). Configure event_sink/trace_sinks on the trusted server "
+        "default instead."
+    )
+
+
+def _build_one_sink(
+    spec: EventSinkConfig, catalog: Registry, *, allow_paths: bool = True
+) -> Any:
+    """Construct one EventSink from its config (driver name + path/options).
+
+    ``allow_paths=False`` forbids a sink that names a filesystem ``path`` (the
+    networked surface), so a remote caller cannot drive an arbitrary file write."""
+    if not allow_paths and spec.path is not None:
+        _refuse_path(spec)
     try:
         factory = catalog.get("sinks", spec.driver)
     except KeyError:
@@ -441,20 +482,24 @@ def _build_codec(encryption: str) -> Any:
     )
 
 
-def build_sink(cfg: RunConfig, catalog: Registry | None = None) -> Any:
+def build_sink(
+    cfg: RunConfig, catalog: Registry | None = None, *, allow_paths: bool = True
+) -> Any:
     """The canonical EventSink for the run, or None for the in-memory default."""
     if cfg.event_sink is None:
         return None
-    return _build_one_sink(cfg.event_sink, catalog or _catalog())
+    return _build_one_sink(cfg.event_sink, catalog or _catalog(), allow_paths=allow_paths)
 
 
-def build_trace_sinks(cfg: RunConfig, catalog: Registry | None = None) -> list[Any]:
+def build_trace_sinks(
+    cfg: RunConfig, catalog: Registry | None = None, *, allow_paths: bool = True
+) -> list[Any]:
     """The secondary trace destinations (shippers) — one EventSink per
     ``trace_sinks`` entry, attached to the bus alongside the canonical store."""
     if not cfg.trace_sinks:
         return []
     catalog = catalog or _catalog()
-    return [_build_one_sink(s, catalog) for s in cfg.trace_sinks]
+    return [_build_one_sink(s, catalog, allow_paths=allow_paths) for s in cfg.trace_sinks]
 
 
 def build_providers_by_tier(
@@ -483,13 +528,15 @@ def assemble(
     ``allow_imports`` defaults True for the operator-trusted CLI; pass False when
     the config arrived over the network (``zu serve`` per-request override) so an
     arbitrary ``module:Attr`` provider/plugin cannot be imported (and its
-    top-level code executed) by a remote caller."""
+    top-level code executed) by a remote caller. The same flag gates filesystem
+    sink paths: a per-request config may not name an ``event_sink``/``trace_sinks``
+    ``path`` (an arbitrary host file the process would open for write)."""
     catalog = _catalog()
     provider = build_provider(cfg.provider, catalog, allow_imports=allow_imports)
     providers_by_tier = build_providers_by_tier(cfg, catalog, allow_imports=allow_imports)
     registry = build_registry(cfg, catalog, allow_imports=allow_imports)
-    bus = EventBus(sink=build_sink(cfg, catalog))
-    for trace_sink in build_trace_sinks(cfg, catalog):
+    bus = EventBus(sink=build_sink(cfg, catalog, allow_paths=allow_imports))
+    for trace_sink in build_trace_sinks(cfg, catalog, allow_paths=allow_imports):
         bus.add_destination(trace_sink)
     return provider, registry, bus, providers_by_tier
 

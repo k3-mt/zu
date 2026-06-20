@@ -12,8 +12,8 @@ from uuid import uuid4
 
 import pytest
 
-from zu_core.contracts import Event
 from zu_backends.sqlite_sink import SqliteSink
+from zu_core.contracts import Event
 
 
 def _event(task_id, type="harness.task.started", parent=None, **payload) -> Event:

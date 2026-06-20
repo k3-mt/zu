@@ -10,6 +10,7 @@ exposes it over HTTP; ``plugins`` lists everything the registry can discover.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 import typer
@@ -76,8 +77,23 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
     suffix = f" model={model}" if model else ""
     typer.echo(f"zu run: {task_file} · provider={cfg.provider.name}{suffix}")
 
+    async def _drive() -> tuple[Result, int]:
+        # Run, count, and release the bus on a *single* event loop: a second
+        # ``asyncio.run`` would count on a different loop than the run used, which
+        # breaks sinks holding loop-bound resources. ``aclose`` in the finally
+        # releases the sink so the scheduled-worker path (``--every``) doesn't
+        # leak one connection per tick.
+        try:
+            result = await run_task(
+                spec, provider, registry, bus,
+                providers=providers, containment=cfg.containment,
+            )
+            return result, await bus.count()
+        finally:
+            await bus.aclose()
+
     try:
-        result: Result = asyncio.run(run_task(spec, provider, registry, bus, providers=providers))
+        result, event_count = asyncio.run(_drive())
     except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
         # A model-call failure (unset key, unreachable endpoint) propagates here;
         # report it as a terminal outcome rather than a traceback.
@@ -89,7 +105,62 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
         typer.echo(f"value  : {result.value}")
     if result.reason is not None:
         typer.echo(f"reason : {result.reason}")
-    typer.echo(f"events : {asyncio.run(bus.count())} recorded")
+    typer.echo(f"events : {event_count} recorded")
+    return result
+
+
+def _egress_allowlist(cfg) -> list[str]:
+    """The hosts the proxy permits for a contained run: the union of the configured
+    tools' declared egress. ``*`` (open) is surfaced as a warning — a real boundary
+    wants an explicit host list, not 'any'."""
+    from zu_core.ports import declared_envelope
+
+    from .config import build_registry
+
+    reg = build_registry(cfg)
+    allow: set[str] = set()
+    for name in reg.names("tools"):
+        allow.update(declared_envelope(reg.get("tools", name))["egress"])
+    if "*" in allow:
+        typer.echo(
+            "warning: a configured tool declares open egress ('*'); the proxy will "
+            "permit any host. Narrow each tool's egress for a real boundary.",
+            err=True,
+        )
+    return sorted(allow)
+
+
+def _execute_sandboxed(task_file: str, config: str) -> Result:
+    """Run the whole agent inside a hardened container behind an egress proxy — the
+    real boundary for ``containment='required'``. Needs Docker, the zu image, and
+    zu-backends installed; the in-container agent runs as contained, so a
+    capability tool the bare-host floor would refuse runs here behind the proxy."""
+    from .config import _read_doc, load_config
+
+    cfg = load_config(config)  # validate + read the egress allowlist from it
+    task = _read_doc(task_file)
+    config_doc = _read_doc(config)
+    try:
+        from zu_backends.local_docker import LocalDockerBackend
+
+        from .sandbox import SandboxLauncher
+    except ModuleNotFoundError as exc:
+        raise ConfigError(
+            "the sandboxed run needs the Docker backend: pip install 'zu-runtime[docker]'"
+        ) from exc
+
+    image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:latest")
+    launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
+    typer.echo(f"zu run --sandboxed: {task_file} in {image} (egress via proxy)")
+    result, events = asyncio.run(
+        launcher.run(task, config_doc, allowlist=_egress_allowlist(cfg))
+    )
+    typer.echo(f"status : {result.status.value}")
+    if result.value is not None:
+        typer.echo(f"value  : {result.value}")
+    if result.reason is not None:
+        typer.echo(f"reason : {result.reason}")
+    typer.echo(f"events : {len(events)} recorded (contained)")
     return result
 
 
@@ -109,6 +180,11 @@ def run(
         True, "--stream/--no-stream",
         help="Print a live trace of the run (train of thought, tools, escalations) as it happens.",
     ),
+    sandboxed: bool = typer.Option(
+        False, "--sandboxed",
+        help="Run the WHOLE agent inside a hardened container behind an egress proxy "
+             "(needs Docker + the zu image). The real boundary for containment='required'.",
+    ),
 ) -> None:
     """Run a task wired by a config file — once, or on a schedule with --every.
 
@@ -120,19 +196,23 @@ def run(
     # shell. Scheduled: loop and keep going regardless of any single outcome.
     if not every:
         try:
-            result = _execute_once(task_file, config, stream=stream)
+            result = (
+                _execute_sandboxed(task_file, config)
+                if sandboxed
+                else _execute_once(task_file, config, stream=stream)
+            )
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
-            raise typer.Exit(code=2)
+            raise typer.Exit(code=2) from None
         if result.status is not Status.SUCCESS:
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         return
 
     try:
         interval = _parse_duration(every)
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     typer.echo(f"scheduling every {every} (max_runs={max_runs or '∞'}) — Ctrl-C to stop")
     n = 0
@@ -144,7 +224,7 @@ def run(
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)
-            raise typer.Exit(code=2)
+            raise typer.Exit(code=2) from None
         if max_runs and n >= max_runs:
             break
         time.sleep(interval)
@@ -170,7 +250,7 @@ def serve(
         load_config(config)  # fail fast on a bad config before binding a port
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     # An exposed bind with no token would let anyone who can reach the port run
     # the agent (spending your model budget) and read the cross-run event feed.
@@ -183,7 +263,7 @@ def serve(
             "for local-only access.",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
     try:
         import uvicorn
 
@@ -193,7 +273,7 @@ def serve(
             "the HTTP server needs FastAPI + uvicorn; install with: pip install 'zu-runtime[serve]'",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     typer.echo(
         f"zu serve: http://{host}:{port}  (dashboard at / · POST /run · "
@@ -242,7 +322,7 @@ def demo(
         typer.echo(
             f"unknown demo type {type!r}; choose one of: {', '.join(_demo.DEMO_TYPES)}", err=True
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     # A real run is the point: require a provider AND a model unless self-testing
     # the wiring. There is no default provider — an agent must say what it runs on.
@@ -259,7 +339,7 @@ def demo(
             "Or self-test the wiring offline (no key): zu demo --offline",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     # Fail fast with the install hint if this demo needs the web tools.
     if _demo.DEMOS[type]["needs_web"]:
@@ -267,7 +347,7 @@ def demo(
             _demo.ensure_web_tools()
         except RuntimeError as exc:
             typer.echo(str(exc), err=True)
-            raise typer.Exit(code=2)
+            raise typer.Exit(code=2) from None
 
     try:
         prov, label = _demo.build_provider(
@@ -275,7 +355,7 @@ def demo(
         )
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
     raise typer.Exit(code=_asyncio.run(_demo.run_demo(prov, label, kind=type, offline=offline)))
 
 
@@ -295,12 +375,12 @@ def init(
 
     if template not in TEMPLATE_NAMES:
         typer.echo(f"unknown template {template!r}; choose: {', '.join(TEMPLATE_NAMES)}", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
     try:
         paths = write_template(directory, template, force=force)
     except FileExistsError as exc:
         typer.echo(f"refusing to overwrite: {exc} (use --force)", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     for p in paths:
         typer.echo(f"created {p}")
@@ -332,12 +412,12 @@ def deploy(
 
     if target not in _deploy.TARGETS:
         typer.echo(f"unknown target {target!r}; choose: {', '.join(_deploy.TARGETS)}", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
     try:
         cfg = load_config(config)  # fail fast on a bad/missing config before building
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     # Pin the image to the installed zu-runtime so a rebuild is reproducible, and
     # pass through exactly the env vars THIS config's provider(s) name (plus the
@@ -369,15 +449,15 @@ def deploy(
         return
     if shutil.which("docker") is None:
         typer.echo("docker not found — install Docker, or use a manifest target (compose/fly/render).", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
     typer.echo("building image…")
     if subprocess.run(build).returncode != 0:
         typer.echo("docker build failed", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)  # replace any prior
     if subprocess.run(run).returncode != 0:
         typer.echo("docker run failed", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     typer.echo(
         f"\n✅ {name} running → http://localhost:{port}\n"
         f"  POST /run · POST /run/stream (live)\n"
@@ -401,7 +481,7 @@ def mcp() -> None:
         typer.echo(
             "zu mcp needs the MCP SDK; install it with: pip install 'zu-runtime[mcp]'", err=True
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
     build_server().run(transport="stdio")
 
 
@@ -459,7 +539,7 @@ def test_plugin(
         from zu_redteam import run_gate
     except ModuleNotFoundError:
         typer.echo("zu test-plugin needs the gate: pip install zu-redteam", err=True)
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     plugins_, notes = _resolve_package_plugins(package)
     for n in notes:
@@ -470,7 +550,7 @@ def test_plugin(
             "zu.* entry points?",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     on_event = None
     if watch:

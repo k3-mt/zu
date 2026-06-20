@@ -7,7 +7,6 @@ import pytest
 
 from zu_core.ports import Finish, ModelResponse
 from zu_providers.scripted import ScriptedProvider
-
 from zu_redteam.attacker import (
     FLEET,
     OBJECTIVES,

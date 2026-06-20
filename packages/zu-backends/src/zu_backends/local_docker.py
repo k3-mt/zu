@@ -110,23 +110,35 @@ class LocalDockerBackend:
         is unchanged."""
         image = spec["image"]
         client = self._docker()
-        run_kwargs: dict = dict(
+        # Privilege hardening with a FLOOR the spec can tighten but not loosen:
+        # this container runs untrusted, model-chosen work. ``cap_drop`` always
+        # includes ALL and ``security_opt`` always includes no-new-privileges, even
+        # if the spec omits them or passes an empty list — a caller cannot silently
+        # remove the baseline. A browser image that needs a cap still opts back in
+        # via ``cap_add`` (the standard drop-ALL-then-add pattern); ``pids_limit``
+        # is forced to a positive value so a fork bomb is always capped.
+        cap_drop = list(spec.get("cap_drop") or ["ALL"])
+        if "ALL" not in cap_drop:
+            cap_drop = ["ALL", *cap_drop]
+        security_opt = list(spec.get("security_opt") or ["no-new-privileges"])
+        if "no-new-privileges" not in security_opt:
+            security_opt = [*security_opt, "no-new-privileges"]
+        pids_limit = spec.get("pids_limit", 256)
+        if not isinstance(pids_limit, int) or pids_limit <= 0:
+            pids_limit = 256
+        run_kwargs: dict = dict(  # noqa: C408 - keyword form keeps the inline hardening notes readable
             detach=True,
             # DNS pin: map the validated target host -> validated IP in the
             # container's /etc/hosts, so the browser cannot be rebound to an
             # internal address at connect time.
             extra_hosts=spec.get("extra_hosts") or {},
             mem_limit=spec.get("mem_limit", "1g"),
-            # Privilege hardening, secure by default: this container runs an
-            # untrusted, model-chosen URL. Drop all Linux capabilities and forbid
-            # privilege escalation; a browser image that genuinely needs a cap
-            # (e.g. SYS_ADMIN for Chromium's sandbox) opts back in via cap_add,
-            # and pids_limit caps a fork bomb. read_only is opt-in (a browser
-            # needs a writable /tmp), exposed so a locked-down image can set it.
-            cap_drop=spec.get("cap_drop", ["ALL"]),
+            cap_drop=cap_drop,
             cap_add=spec.get("cap_add", []),
-            security_opt=spec.get("security_opt", ["no-new-privileges"]),
-            pids_limit=spec.get("pids_limit", 256),
+            security_opt=security_opt,
+            pids_limit=pids_limit,
+            # read_only is opt-in (a browser needs a writable /tmp), exposed so a
+            # locked-down image can set it — a tightening, so left to the spec.
             read_only=spec.get("read_only", False),
             # Don't keep the container around after it stops; we also destroy
             # explicitly, but this is the backstop against a leak on crash.
@@ -139,12 +151,20 @@ class LocalDockerBackend:
             run_kwargs["network_disabled"] = False
         else:
             run_kwargs["network_disabled"] = not network
-        # Optional seccomp profile (P3 host-effect audit): the shipped
-        # redteam-audit.json LOGs process-creation/ptrace/mount/namespace syscalls
-        # so the SeccompAuditMonitor can observe them. Appended to security_opt.
+        # Optional seccomp profile: the audit profile (redteam-audit.json) LOGs
+        # sensitive syscalls; the blocking profile (redteam-block.json) ERRNOs the
+        # escape primitives. Appended to security_opt. NOTE: the docker SDK passes
+        # the value to the daemon verbatim — unlike the CLI it does NOT read a file
+        # — so a path must be inlined to its JSON content here, or the daemon fails
+        # with "Decoding seccomp profile failed". A profile given as JSON (starts
+        # with '{') or the special value "unconfined" is passed through as-is.
         seccomp = spec.get("seccomp")
         if seccomp:
-            run_kwargs["security_opt"] = [*run_kwargs.get("security_opt", []), f"seccomp={seccomp}"]
+            profile = str(seccomp)
+            if profile != "unconfined" and not profile.lstrip().startswith("{"):
+                with open(profile, encoding="utf-8") as fh:
+                    profile = fh.read()
+            run_kwargs["security_opt"] = [*run_kwargs.get("security_opt", []), f"seccomp={profile}"]
         environment = dict(spec.get("environment") or {})
         proxy = spec.get("proxy")
         if proxy:
@@ -266,7 +286,7 @@ class LocalDockerBackend:
                 asyncio.to_thread(sandbox.container.exec_run, argv, demux=True),
                 timeout=self.exec_timeout_s,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"status": 504, "html": "",
                     "error": f"render timed out after {self.exec_timeout_s}s"}
         stdout, stderr = streams if isinstance(streams, tuple) else (streams, None)
@@ -308,7 +328,7 @@ class LocalDockerBackend:
                 ),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return 504, "", f"exec timed out after {timeout}s"
         stdout, stderr = streams if isinstance(streams, tuple) else (streams, None)
         out = stdout.decode("utf-8", "replace") if isinstance(stdout, bytes) else str(stdout or "")

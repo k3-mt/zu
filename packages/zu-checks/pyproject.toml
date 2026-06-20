@@ -1,0 +1,41 @@
+[project]
+name = "zu-checks"
+version = "0.1.0"
+description = "Zu built-in checks: detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+# The built-in checks are pure-stdlib (+ jsonschema for the schema validator) and
+# always ship with the base runtime — they have no heavy/optional deps, which is
+# why detectors and validators live together here rather than as two packages.
+dependencies = ["zu-core==0.1.0", "jsonschema>=4"]
+
+[project.entry-points."zu.detectors"]
+empty = "zu_checks.detectors.empty:EmptyDetector"
+error = "zu_checks.detectors.error:ErrorDetector"
+js-shell = "zu_checks.detectors.js_shell:JsShellDetector"
+bot-wall = "zu_checks.detectors.bot_wall:BotWallDetector"
+
+[project.entry-points."zu.validators"]
+schema = "zu_checks.validators.schema:SchemaValidator"
+grounding = "zu_checks.validators.grounding:GroundingValidator"
+
+[project.urls]
+Homepage = "https://github.com/k3-mt/zu"
+Repository = "https://github.com/k3-mt/zu"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zu_checks"]

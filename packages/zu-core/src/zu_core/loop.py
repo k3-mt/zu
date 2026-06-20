@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import logging
+import re
 import time
-from collections.abc import Mapping, Sequence
-from typing import Any, Iterable
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
+from uuid import UUID
 
 from . import events as ev
 from .bus import EventBus
@@ -47,7 +48,7 @@ from .ports import (
     declared_envelope,
 )
 from .registry import REGISTRY, Registry
-from .security import SecurityBlock
+from .security import SecurityBlock, enforce_containment
 
 log = logging.getLogger("zu.loop")
 
@@ -178,7 +179,7 @@ class _EventsView(Sequence):
     def __init__(self, events: list) -> None:
         self._events = events
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: Any) -> Any:
         return self._events[index]
 
     def __len__(self) -> int:
@@ -190,7 +191,8 @@ def _safe_inspect(detector: Any, ctx: RunContext) -> Verdict | None:
     skipped, never allowed to crash the run — the same isolation the bus gives
     its subscribers and the loop gives its tools."""
     try:
-        return detector.inspect(ctx)
+        verdict: Verdict | None = detector.inspect(ctx)
+        return verdict
     except Exception as exc:  # noqa: BLE001 - a broken detector must not halt the run
         log.warning(
             "detector %r raised %s: %s — skipping it",
@@ -203,7 +205,8 @@ def _safe_check(validator: Any, result: Result, ctx: RunContext) -> Verdict | No
     """Run a validator in isolation: a raising validator is logged and skipped,
     so a buggy third-party validator cannot take down every run."""
     try:
-        return validator.check(result, ctx)
+        verdict: Verdict | None = validator.check(result, ctx)
+        return verdict
     except Exception as exc:  # noqa: BLE001 - a broken validator must not halt the run
         log.warning(
             "validator %r raised %s: %s — skipping it",
@@ -267,9 +270,12 @@ class _Run:
         self.events: list[Event] = []
         self._ctx = RunContext(spec=spec, observation=None, events=[])
         self._ctx.events = _EventsView(self.events)
-        self.root = None  # event_id of TASK_STARTED; parent of terminal events
+        self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
 
-    async def emit(self, type_: str, payload: dict | None = None, *, parent=None, source="loop"):
+    async def emit(
+        self, type_: str, payload: dict | None = None, *,
+        parent: UUID | None = None, source: str = "loop",
+    ) -> UUID:
         event = Event(
             trace_id=self.trace_id,
             task_id=self.task_id,
@@ -309,6 +315,7 @@ async def run_task(
     bus: EventBus | None = None,
     *,
     providers: Mapping[int, ModelProvider] | None = None,
+    containment: str = "audit",
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -327,6 +334,12 @@ async def run_task(
     overrun the deadline. The token budget remains soft — a single turn may
     overshoot ``max_tokens`` before the run is ended — until the real providers
     pass a remaining-token limit into the call (build step 7).
+
+    ``containment`` is the fail-closed floor (see ``zu_core.security``): with
+    ``"required"``, a tool with off-box reach is refused unless the run is inside
+    the Zu sandbox; ``"audit"`` (default) runs in-process and logs declarations.
+    The check runs *before* any tool is built or dispatched, so an uncontained
+    capability tool never executes even once.
     """
     by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
@@ -337,6 +350,11 @@ async def run_task(
     tools = {name: _materialize(registry.get("tools", name)) for name in registry.names("tools")}
     detectors = [_materialize(registry.get("detectors", n)) for n in registry.names("detectors")]
     validators = [_materialize(registry.get("validators", n)) for n in registry.names("validators")]
+
+    # Fail-closed containment floor: refuse before anything runs if a tool needs a
+    # sandbox we're not inside. Raised (not a Result) — a misconfigured posture is
+    # an operator error, surfaced loudly like a bad config, not a task outcome.
+    enforce_containment(containment, tools)
 
     # The tier ladder gates which tools the model sees; the run starts at tier 1.
     ladder = _Ladder(tools, spec.max_tier)
@@ -388,7 +406,7 @@ async def run_task(
                 turn_provider.complete(ModelRequest(messages=messages, tools=tool_schemas)),
                 timeout=remaining,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return await run.terminal("budget:wall_time_s")
         tokens += _usage_tokens(resp.usage)
         # Record this call's usage, tier, and model into the log so cost is
@@ -437,7 +455,12 @@ async def run_task(
             messages.append(assistant_msg)
             halting: Verdict | None = None
             for call in resp.tool_calls:
-                obs = await _invoke(run, turn, active, call.name, call.args)
+                # Bound each tool call by the run's remaining wall-time, so a hung
+                # tool cannot overrun the deadline the way a hung provider can't.
+                tool_remaining = max(0.0, budget.wall_time_s - (time.monotonic() - start))
+                obs = await _invoke(
+                    run, turn, active, call.name, call.args, timeout=tool_remaining
+                )
                 messages.append(
                     {"role": "tool", "name": call.name, "content": json.dumps(obs, default=str)}
                 )
@@ -513,7 +536,9 @@ def _initial_messages(spec: TaskSpec, tools: Iterable[Any]) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
+async def _invoke(
+    run: _Run, turn: UUID, tools: dict, name: str, args: dict, *, timeout: float | None = None
+) -> dict:
     """Dispatch one tool call to an observation. A missing tool or a raising
     tool (e.g. an SSRF block) becomes an error observation, never a crash —
     the same isolation principle the bus applies to subscribers. Unexpected
@@ -521,14 +546,31 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
 
     ``tools`` is the *active* set for the current tier, so a call to a tool
     that hasn't been unlocked yet falls into the unknown-tool branch — the
-    ladder is enforced on dispatch, not just on what the model is shown."""
+    ladder is enforced on dispatch, not just on what the model is shown.
+
+    ``timeout`` bounds the tool call (the run's remaining wall-time): tools are
+    the untrusted/3rd-party surface, and without this a tool hung on a dead
+    socket would block forever and defeat ``wall_time_s`` (which is otherwise
+    only re-checked between turns). A timeout becomes an error observation — the
+    same isolation a raise gets — and the next budget checkpoint ends the run."""
     await run.emit(ev.TOOL_INVOKED, {"tool": name, "args": args}, parent=turn, source=name)
     tool = tools.get(name)
     if tool is None:
         obs: dict = {"error": f"unknown tool: {name}"}
     else:
         try:
-            obs = await tool(run.ctx(), **args)
+            call = tool(run.ctx(), **args)
+            obs = await (asyncio.wait_for(call, timeout) if timeout is not None else call)
+        except TimeoutError:
+            log.warning("tool %r exceeded its %.3fs deadline; rejecting it", name, timeout or 0.0)
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": "tool_timeout", "tool": name,
+                 "detail": "tool call exceeded the run's remaining wall-time and was cancelled"},
+                parent=turn,
+                source=name,
+            )
+            obs = {"error": "tool call timed out", "blocked": "tool_timeout"}
         except SecurityBlock as block:
             # A guard contained the action (e.g. an SSRF/egress refusal). Record
             # it as a defense so the blocked attempt is on the log, then surface
@@ -572,7 +614,7 @@ async def _invoke(run: _Run, turn, tools: dict, name: str, args: dict) -> dict:
 
 
 async def _detector_checkpoint(
-    run: _Run, turn, detectors: list, observation: Any, scopes: set[Scope]
+    run: _Run, turn: UUID, detectors: list, observation: Any, scopes: set[Scope]
 ) -> Verdict | None:
     """Run every in-scope detector, emit DETECTOR_FIRED for each verdict, and
     return the *worst* halting verdict (ESCALATE or TERMINAL) for the caller to

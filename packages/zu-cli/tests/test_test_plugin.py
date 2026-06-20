@@ -18,9 +18,10 @@ def test_unknown_package_exits_2() -> None:
 
 
 def test_resolves_a_real_packages_plugins() -> None:
-    plugins, _notes = main._resolve_package_plugins("zu-detectors")
+    # zu-checks ships both built-in detectors and validators.
+    plugins, _notes = main._resolve_package_plugins("zu-checks")
     names = {n for _k, n, _o in plugins}
-    assert {"empty", "error", "js-shell", "bot-wall"} <= names
+    assert {"empty", "error", "js-shell", "bot-wall", "schema", "grounding"} <= names
 
 
 def test_passes_a_safe_plugin(monkeypatch) -> None:
