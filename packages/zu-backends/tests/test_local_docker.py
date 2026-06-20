@@ -35,6 +35,11 @@ def test_render_argv_minimal_is_just_url() -> None:
     # No wait/actions -> a plain render, unchanged from before the capability.
     assert _render_argv({"url": "https://x/"}) == ["zu-render", "https://x/"]
 
+
+def test_render_argv_capture_network_flag() -> None:
+    assert "--capture-network" in _render_argv({"url": "https://x/", "capture_network": True})
+    assert "--capture-network" not in _render_argv({"url": "https://x/"})
+
 _RENDERED = "<html><body><h1>Rendered</h1></body></html>"
 
 

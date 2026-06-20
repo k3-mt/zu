@@ -75,6 +75,8 @@ def _render_argv(args: dict) -> list[str]:
         argv += ["--wait-ms", str(int(args["wait_ms"]))]
     if args.get("actions"):
         argv += ["--actions", json.dumps(args["actions"])]
+    if args.get("capture_network"):
+        argv.append("--capture-network")
     return argv
 
 

@@ -81,6 +81,12 @@ class RenderDom:
                     ),
                     "items": {"type": "object"},
                 },
+                "capture_network": {
+                    "type": "boolean",
+                    "description": "also capture the page's XHR/JSON responses (the data a "
+                                   "widget fetches — e.g. availability) into `network` + content. "
+                                   "More robust than scraping a reactive grid.",
+                },
             },
             "required": ["url"],
         },
@@ -125,6 +131,7 @@ class RenderDom:
         self, ctx: Any, url: str, width: int | None = None, height: int | None = None,
         wait_until: str | None = None, wait_for: str | None = None,
         wait_ms: int | None = None, actions: list | None = None,
+        capture_network: bool = False,
     ) -> dict:
         # Apply the same host-level SSRF backstop tier-1 http_fetch uses, *before*
         # leasing a browser: escalating to tier 2 must not become a way to fetch
@@ -170,6 +177,8 @@ class RenderDom:
             args["wait_ms"] = int(wait_ms)
         if actions:
             args["actions"] = actions
+        if capture_network:
+            args["capture_network"] = True
         try:
             obs = await backend.exec(sandbox, ToolCall(name=self.name, args=args))
         finally:
@@ -187,6 +196,10 @@ class RenderDom:
         }
         if obs.get("text"):
             out["text"] = obs["text"]
+        if obs.get("content"):
+            out["content"] = obs["content"]  # captured network bodies (groundable)
+        if obs.get("network"):
+            out["network"] = obs["network"]
         if obs.get("action_error"):
             out["action_error"] = obs["action_error"]
         return out

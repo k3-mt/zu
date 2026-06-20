@@ -106,6 +106,28 @@ async def test_render_forwards_wait_and_actions_to_the_backend() -> None:
     assert call.args["actions"] == actions
 
 
+async def test_render_capture_network_forwarded_and_surfaced() -> None:
+    # capture_network reaches the backend, and the captured JSON bodies come back
+    # as a groundable `content` key + structured `network` — the event-driven,
+    # robust way to read a widget's data instead of scraping the DOM.
+    class _Net(FakeSandboxBackend):
+        async def exec(self, sandbox, call: ToolCall) -> dict:
+            assert call.args.get("capture_network") is True
+            return {
+                "status": 200, "html": "<p>x</p>", "url": call.args["url"], "text": "visible",
+                "content": '# https://api/slots (200)\n{"available_dates":["2026-06-24"]}',
+                "network": [{"url": "https://api/slots", "status": 200,
+                             "content_type": "application/json", "body": '{"available_dates":["2026-06-24"]}'}],
+            }
+
+    out = await RenderDom(backend=_Net(rendered="x"), allow_private=True).__call__(
+        ctx=None, url="http://spa.test/", capture_network=True
+    )
+    assert "2026-06-24" in out["content"]                 # groundable captured data
+    assert out["network"][0]["url"] == "https://api/slots"
+    assert out["text"] == "visible"
+
+
 def test_render_dom_is_tier_2() -> None:
     # The attribute the loop's ladder reads to withhold it until escalation.
     assert RenderDom().tier == 2

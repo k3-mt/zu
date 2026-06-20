@@ -30,6 +30,36 @@ _ACTION_TIMEOUT_MS = 10_000
 _MAX_ACTIONS = 10
 _WAIT_UNTIL = ("load", "domcontentloaded", "networkidle", "commit")
 
+# Bounds for --capture-network: a widget loads its DATA over the network (an
+# availability JSON), so capturing the responses is more robust than scraping the
+# reactive DOM. Capped so a chatty page can't flood the observation.
+_MAX_RESPONSES = 40
+_MAX_RESPONSE_BODY = 60_000
+_MAX_RESPONSE_TOTAL = 600_000
+
+
+def _attach_network_capture(page, captured: list) -> None:
+    """Listen for XHR/fetch (and JSON) responses and collect their bodies. The
+    event-driven way to read a widget's data: it fetches availability/results over
+    the network, so we respond to those events instead of timing a DOM scrape.
+    Generic — it keys on response TYPE (xhr/fetch/json), never on any site."""
+    total = {"n": 0}
+
+    def on_response(resp) -> None:
+        if len(captured) >= _MAX_RESPONSES or total["n"] >= _MAX_RESPONSE_TOTAL:
+            return
+        try:
+            ct = resp.headers.get("content-type", "")
+            if resp.request.resource_type not in ("xhr", "fetch") and "json" not in ct:
+                return
+            body = resp.text()[:_MAX_RESPONSE_BODY]
+        except Exception:  # noqa: BLE001 - an unreadable/streamed body is just skipped
+            return
+        total["n"] += len(body)
+        captured.append({"url": resp.url, "status": resp.status, "content_type": ct, "body": body})
+
+    page.on("response", on_response)
+
 
 def _visible_text(page) -> str:
     """The rendered, human-visible text across the main document AND every child
@@ -87,6 +117,7 @@ def main() -> int:
     parser.add_argument("--wait-for", default=None)          # a selector to await
     parser.add_argument("--wait-ms", type=int, default=0)    # extra settle time
     parser.add_argument("--actions", default=None)           # JSON list of actions
+    parser.add_argument("--capture-network", action="store_true")  # collect XHR/JSON responses
     args = parser.parse_args(sys.argv[1:])
     url = args.url
     if not url:
@@ -107,6 +138,9 @@ def main() -> int:
             action_error = None
             try:
                 page = browser.new_page(viewport={"width": args.width, "height": args.height})
+                captured: list = []
+                if args.capture_network:
+                    _attach_network_capture(page, captured)
                 # wait_until default "load" — NOT "networkidle": a DOM scraper wants
                 # the document loaded, and "networkidle" never settles on pages with
                 # long-polling/websockets/analytics. But a caller chasing a widget
@@ -125,6 +159,14 @@ def main() -> int:
             finally:
                 browser.close()
         out = {"status": status, "html": html, "text": text, "url": url}
+        if captured:
+            out["network"] = captured
+            # Fold the captured bodies into a content key too, so the loop stores
+            # them as retrieved provenance (grounding reads them) and the model
+            # sees the structured data the widget fetched.
+            out["content"] = "\n\n".join(
+                f"# {c['url']} ({c['status']})\n{c['body']}" for c in captured
+            )
         if action_error:
             out["action_error"] = action_error  # partial reveal: DOM returned + the failure
         print(json.dumps(out))
