@@ -158,6 +158,20 @@ class RunConfig(BaseModel):
     # a context-fit measure, not a provenance loss. A large-context model leaves
     # it unset and keeps everything.
     max_observation_chars: int | None = None
+    # How an over-cap observation is shaped for the model (only when
+    # ``max_observation_chars`` is set):
+    #   * ``truncate`` (default) — keep the head, drop the rest. Cheap, no calls.
+    #   * ``extract`` — map-reduce: scan the WHOLE page in chunks and pull the
+    #     task-relevant parts (one utility model call per chunk). Costs calls but
+    #     loses nothing important when the wanted data is past a truncation point.
+    observation_strategy: str = "truncate"
+
+    @field_validator("observation_strategy")
+    @classmethod
+    def _known_strategy(cls, v: str) -> str:
+        if v not in ("truncate", "extract"):
+            raise ValueError(f"observation_strategy must be 'truncate' or 'extract', got {v!r}")
+        return v
     # The agent's task, embedded so a single ``agent.yaml`` is the whole agent
     # (what + how in one file). The task block — query, target, output_schema,
     # max_tier — is split out into a TaskSpec by ``load_agent``. Optional: a config

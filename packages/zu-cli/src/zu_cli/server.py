@@ -182,7 +182,8 @@ def create_app(
         try:
             result = await run_task(spec, provider, registry, bus, providers=providers,
                                     containment=default_cfg.containment,
-                                    max_observation_chars=default_cfg.max_observation_chars)
+                                    max_observation_chars=default_cfg.max_observation_chars,
+                                    observation_strategy=default_cfg.observation_strategy)
             body: dict = {"result": result.model_dump(mode="json")}
             if req.include_events:
                 events = await bus.query()
@@ -226,7 +227,8 @@ def create_app(
             try:
                 result = await run_task(spec, provider, registry, bus, providers=providers,
                                         containment=default_cfg.containment,
-                                        max_observation_chars=default_cfg.max_observation_chars)
+                                        max_observation_chars=default_cfg.max_observation_chars,
+                                        observation_strategy=default_cfg.observation_strategy)
                 await queue.put(("result", result))
             except asyncio.CancelledError:
                 raise

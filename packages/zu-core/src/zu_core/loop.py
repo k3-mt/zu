@@ -149,6 +149,75 @@ def _summarize_observation(obs: dict) -> dict:
     return summary
 
 
+# Map-reduce extraction over a too-big page. A blunt cap keeps the first N chars
+# and drops the rest — if the wanted data is past the cap it is lost. The extract
+# strategy instead scans the WHOLE page in context-sized chunks, pulling the parts
+# relevant to the task out of each (the map), and feeds the combined extract to the
+# loop (the reduce). Costs one utility model call per chunk, bounded below.
+_MAX_EXTRACT_CHUNKS = 16  # ceiling on map calls per field, so a huge page can't run away
+
+_EXTRACT_PROMPT = (
+    "You are extracting the relevant parts of ONE fragment of a larger web page, "
+    "to help with this task:\n{query}\n\n"
+    "Fragment (part {i} of {n}):\n{chunk}\n\n"
+    "Copy out — verbatim — only the parts of THIS fragment relevant to the task: "
+    "keep exact values (dates, times, prices, names, URLs) and the text around them; "
+    "drop navigation, ads, scripts, and boilerplate. If nothing in this fragment is "
+    "relevant, reply with exactly: NOTHING"
+)
+
+
+async def _extract_relevant(
+    content: str, query: str, provider: ModelProvider, max_chars: int
+) -> str:
+    """Map-reduce a too-big ``content`` down to what matters for ``query``.
+
+    Split into ``max_chars``-sized chunks, ask ``provider`` to pull the relevant
+    text from each (concise, verbatim), and join the non-empty results. The full
+    original is untouched on the event log, so grounding still verifies the final
+    answer against the real page — the extract only shapes what the model reads."""
+    chunks = [content[i : i + max_chars] for i in range(0, len(content), max_chars)]
+    dropped = max(0, len(chunks) - _MAX_EXTRACT_CHUNKS)
+    chunks = chunks[:_MAX_EXTRACT_CHUNKS]
+    extracts: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        prompt = _EXTRACT_PROMPT.format(query=query or "(no specific task)", i=i, n=len(chunks), chunk=chunk)
+        try:
+            resp = await provider.complete(
+                ModelRequest(messages=[{"role": "user", "content": prompt}], tools=[])
+            )
+            text = (resp.text or "").strip()
+        except Exception:  # noqa: BLE001 - a failed map call drops that chunk, never crashes the run
+            text = ""
+        if text and text.upper() != "NOTHING":
+            extracts.append(text)
+    combined = "\n\n".join(extracts) if extracts else "(no content relevant to the task was found on the page)"
+    if dropped:
+        combined += f"\n…[{dropped} further chunk(s) of the page were not scanned]"
+    if len(combined) > max_chars:  # backstop: the extract itself must fit the budget
+        combined = combined[:max_chars] + "\n…[extract truncated]"
+    return combined
+
+
+async def _shrink_for_model(
+    obs: Any, *, max_chars: int | None, strategy: str, provider: ModelProvider, query: str
+) -> Any:
+    """Shape a tool observation to fit the model's context, per the configured
+    strategy. ``truncate`` (cheap, no calls) keeps the head; ``extract`` map-reduces
+    the whole page to the task-relevant parts (costs model calls). Off (``max_chars``
+    None) returns the observation untouched. Only content fields are shaped."""
+    if max_chars is None or not isinstance(obs, dict):
+        return obs
+    if strategy != "extract":
+        return _observation_for_model(obs, max_chars)
+    capped = dict(obs)
+    for k in _CONTENT_KEYS:
+        v = capped.get(k)
+        if isinstance(v, str) and len(v) > max_chars:
+            capped[k] = await _extract_relevant(v, query, provider, max_chars)
+    return capped
+
+
 def _observation_for_model(obs: Any, max_chars: int | None) -> Any:
     """Optionally cap large content fields of an observation before it enters the
     model's message history.
@@ -351,6 +420,7 @@ async def run_task(
     containment: str = "audit",
     trace_id: UUID | None = None,
     max_observation_chars: int | None = None,
+    observation_strategy: str = "truncate",
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -496,10 +566,13 @@ async def run_task(
                 obs = await _invoke(
                     run, turn, active, call.name, call.args, timeout=tool_remaining
                 )
+                model_obs = await _shrink_for_model(
+                    obs, max_chars=max_observation_chars, strategy=observation_strategy,
+                    provider=provider, query=spec.query,
+                )
                 messages.append(
                     {"role": "tool", "name": call.name,
-                     "content": json.dumps(
-                         _observation_for_model(obs, max_observation_chars), default=str)}
+                     "content": json.dumps(model_obs, default=str)}
                 )
                 halting = await _detector_checkpoint(run, turn, detectors, obs, {Scope.PER_OBSERVATION})
                 if halting is not None:

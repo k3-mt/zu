@@ -17,7 +17,7 @@ import pytest
 from zu_core.bus import EventBus
 from zu_core.contracts import Budget, Status, TaskSpec
 from zu_core.loop import _observation_for_model, run_task
-from zu_core.ports import Finish, ModelResponse, Scope, Severity, ToolCall, Verdict
+from zu_core.ports import Capabilities, Finish, ModelResponse, Scope, Severity, ToolCall, Verdict
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
 from zu_testing import FakeSandboxBackend, fetch_tool
@@ -773,3 +773,83 @@ def test_observation_for_model_caps_only_content_fields_when_set() -> None:
 def test_observation_for_model_leaves_small_content_alone() -> None:
     obs = {"html": "<p>small</p>", "status": 200}
     assert _observation_for_model(obs, 1000) == obs
+
+
+# --- extract strategy: map-reduce a big page to the task-relevant parts --------
+
+
+class _ExtractStubProvider:
+    """A stub ModelProvider that returns a canned extract per chunk and records
+    the prompts it saw — for testing the map-reduce reducer with no network."""
+
+    capabilities = Capabilities()
+    model = None
+
+    def __init__(self, reply: str = "RELEVANT") -> None:
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    async def complete(self, req):  # noqa: ANN001 - matches the ModelProvider port
+        self.prompts.append(req.messages[-1]["content"])
+        return ModelResponse(text=self.reply, tool_calls=[], finish=Finish.STOP, usage={})
+
+
+async def test_extract_maps_over_chunks_and_combines() -> None:
+    from zu_core.loop import _extract_relevant
+
+    prov = _ExtractStubProvider(reply="kept-bit")
+    content = "x" * 250  # > max_chars below, so it splits into chunks
+    out = await _extract_relevant(content, "find the bit", prov, max_chars=100)
+    assert len(prov.prompts) == 3                      # 250/100 -> 3 chunks, one call each
+    assert out.count("kept-bit") == 3                  # each chunk's extract is combined
+    assert "find the bit" in prov.prompts[0]           # the task drives extraction
+
+
+async def test_extract_drops_nothing_replies() -> None:
+    from zu_core.loop import _extract_relevant
+
+    prov = _ExtractStubProvider(reply="NOTHING")
+    out = await _extract_relevant("y" * 250, "q", prov, max_chars=100)
+    assert "no content relevant" in out               # all chunks irrelevant -> a clear note
+
+
+async def test_extract_caps_chunk_count() -> None:
+    from zu_core.loop import _MAX_EXTRACT_CHUNKS, _extract_relevant
+
+    prov = _ExtractStubProvider(reply="r")
+    await _extract_relevant("z" * (100 * (_MAX_EXTRACT_CHUNKS + 5)), "q", prov, max_chars=100)
+    assert len(prov.prompts) == _MAX_EXTRACT_CHUNKS    # runaway pages are bounded
+
+
+async def test_extract_map_call_failure_is_survived() -> None:
+    from zu_core.loop import _extract_relevant
+
+    class _Boom:
+        capabilities = Capabilities()
+        model = None
+
+        async def complete(self, req):  # noqa: ANN001
+            raise RuntimeError("provider down")
+
+    out = await _extract_relevant("a" * 250, "q", _Boom(), max_chars=100)
+    assert "no content relevant" in out               # failures drop chunks, never crash
+
+
+async def test_shrink_extract_only_touches_big_content_fields() -> None:
+    from zu_core.loop import _shrink_for_model
+
+    prov = _ExtractStubProvider(reply="E")
+    obs = {"html": "h" * 250, "url": "https://e/", "status": 200, "small": "ok"}
+    out = await _shrink_for_model(obs, max_chars=100, strategy="extract", provider=prov, query="q")
+    assert "E" in out["html"] and prov.prompts                  # big content was extracted
+    assert out["url"] == "https://e/" and out["status"] == 200  # non-content untouched
+
+
+async def test_shrink_truncate_strategy_makes_no_model_calls() -> None:
+    from zu_core.loop import _shrink_for_model
+
+    prov = _ExtractStubProvider()
+    obs = {"html": "h" * 250}
+    out = await _shrink_for_model(obs, max_chars=100, strategy="truncate", provider=prov, query="q")
+    assert prov.prompts == []                          # truncate never calls the model
+    assert "truncated" in out["html"]
