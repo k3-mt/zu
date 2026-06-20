@@ -89,8 +89,15 @@ def run_contained_from_env(argv: list[str] | None = None) -> int:
     # to sys.path explicitly too, so the bundle's tools/ import-refs resolve even
     # if PYTHONPATH wasn't honored by the exec environment.
     bundle = os.environ.get("ZU_BUNDLE")
-    if bundle and bundle not in sys.path:
-        sys.path.insert(0, bundle)
+    if bundle:
+        # The mounted bundle carries its own gitignored .env (e.g. EXA_API_KEY);
+        # load it so the agent's tools find their keys inside the box, then put the
+        # bundle on the path so its tools/ import-refs resolve.
+        from .config import load_dotenv
+
+        load_dotenv(Path(bundle) / ".env")
+        if bundle not in sys.path:
+            sys.path.insert(0, bundle)
     task = json.loads(os.environ.get("ZU_TASK") or "{}")
     config = json.loads(os.environ.get("ZU_CONFIG") or "{}")
     result, events = asyncio.run(_run_in_process(task, config))

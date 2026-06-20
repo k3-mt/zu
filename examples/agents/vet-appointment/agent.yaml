@@ -1,0 +1,61 @@
+# Vet-appointment finder — search the web for a practice's booking page, read it,
+# and return the next 3 soonest available appointment slots (grounded: every slot
+# and the booking_url must actually appear on the page — nothing invented).
+#
+# A whole agent in one file: what (task) + how (model, tier ladder, checks).
+#   zu run examples/agents/vet-appointment/              # needs keys in .env
+#   zu run examples/agents/vet-appointment/ --sandboxed  # contained on Docker
+#
+# Secrets live in a gitignored .env next to this file (see .env.example):
+#   EXA_API_KEY        — for web_search (the Exa connector)
+#   ANTHROPIC_API_KEY  — for the model
+# The .env is loaded for the run (and mounted with the bundle when --sandboxed),
+# so config names the env var, never the key itself.
+
+provider:
+  name: anthropic
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+
+tiers:                                  # the escalation ladder — tools per tier
+  1: [web_search, http_fetch, html_parse]   # search, then fetch the static page
+  2: [render_dom]                           # unlocked if the page needs JavaScript
+
+plugins:
+  # Detectors decide when tier 1 isn't enough and the loop must escalate to the
+  # tier-2 browser: an empty/erroring fetch, a JS shell, or a bot wall.
+  detectors: [empty, error, js-shell, bot-wall]
+  # Shape the result, then prove every reported value is on the page.
+  validators: [schema, grounding]
+
+budget: { max_steps: 16, max_tokens: 150000, wall_time_s: 120 }
+
+# audit: runs on a bare host (web_search's egress is scoped to api.exa.ai; the
+# fetch tools carry their own SSRF guard). Run it --sandboxed to enforce the
+# container boundary; because the page URL is discovered at run time, the fetch
+# tools declare open (but fully logged) egress.
+containment: audit
+
+task:
+  query: >
+    Find the online booking page for Park Vets in Chislehurst, then read it and
+    return the next 3 soonest available appointment slots. Use web_search first
+    to find the booking page, then http_fetch it (escalate to render_dom only if
+    the page needs JavaScript). Report ONLY slots and a booking_url that actually
+    appear on the page — do not guess or fill in plausible times.
+  max_tier: 2
+  output_schema:
+    type: object
+    properties:
+      slots:
+        type: array
+        minItems: 3
+        maxItems: 3
+        items:
+          type: object
+          properties:
+            date: { type: string }   # e.g. 2026-06-24
+            time: { type: string }   # e.g. 09:20
+          required: [date, time]
+      booking_url: { type: string }
+    required: [slots, booking_url]

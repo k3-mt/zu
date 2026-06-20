@@ -25,6 +25,7 @@ from .factories import (
     registry_with,
     scripted_config,
     scripted_provider,
+    search_tool,
 )
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "FakeSink",
     "mock_transport",
     "fetch_tool",
+    "search_tool",
     "registry_with",
     "scripted_config",
     "scripted_provider",

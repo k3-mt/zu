@@ -238,6 +238,42 @@ def load_task(path: str, *, default_budget: Budget | None = None) -> TaskSpec:
 AGENT_FILE = "agent.yaml"
 
 
+def load_dotenv(path: Path) -> list[str]:
+    """Load ``KEY=VALUE`` lines from a bundle's ``.env`` into ``os.environ`` and
+    return the names loaded. This is how a bundle carries its **secrets** — a
+    gitignored ``.env`` next to ``agent.yaml`` holding ``EXA_API_KEY=…``,
+    ``ANTHROPIC_API_KEY=…`` — without committing them: config still names the
+    *variable* (``api_key_env``), and the value is supplied here at load time, for
+    both a local run and (the file being mounted with the bundle) a contained one.
+
+    An already-set variable is never overwritten, so an explicit environment wins
+    over the file. Minimal and dependency-free: blank lines and ``#`` comments are
+    skipped, an ``export`` prefix is tolerated, and surrounding quotes are stripped.
+    """
+    import os
+
+    if not path.is_file():
+        return []
+    loaded: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, sep, val = line.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if key not in os.environ:
+            os.environ[key] = val
+            loaded.append(key)
+    return loaded
+
+
 def load_agent(source: Any) -> tuple[TaskSpec, RunConfig]:
     """Load a single self-contained agent → ``(task, config)``.
 
@@ -255,7 +291,10 @@ def load_agent(source: Any) -> tuple[TaskSpec, RunConfig]:
         p = Path(source)
         if p.is_dir():
             _add_bundle_to_path(p)
+            load_dotenv(p / ".env")  # the bundle's gitignored secrets
             p = p / AGENT_FILE
+        else:
+            load_dotenv(p.parent / ".env")
         cfg = load_config(str(p))
     elif isinstance(source, dict):
         cfg = coerce_config(source)
@@ -633,6 +672,8 @@ __all__ = [
     "ConfigError",
     "load_config",
     "load_task",
+    "load_agent",
+    "load_dotenv",
     "coerce_config",
     "coerce_task",
     "build_provider",

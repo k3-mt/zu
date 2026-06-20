@@ -40,6 +40,22 @@ def fetch_tool(*, text: str = "", status: int = 200, allow_private: bool = True)
     return HttpFetch(allow_private=allow_private, transport=mock_transport(text=text, status=status))
 
 
+def search_tool(results: list[dict] | None = None) -> Any:
+    """The real ``web_search`` tool served canned results off a mock transport — its
+    connector/result-parsing/grounding-content logic runs for real, only the search
+    API is faked. ``results`` is a list of ``{"title", "url"}`` (defaults to one)."""
+    import httpx
+
+    from zu_tools.search import WebSearch
+
+    items = results if results is not None else [{"title": "Result", "url": "https://example/"}]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": items})
+
+    return WebSearch(api_key="test-key", transport=httpx.MockTransport(handler))
+
+
 def scripted_config(
     moves: list[dict],
     *,

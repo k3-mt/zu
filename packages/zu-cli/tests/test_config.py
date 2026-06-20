@@ -180,6 +180,53 @@ def test_load_agent_without_task_is_an_error(tmp_path):
         load_agent(str(tmp_path / "agent.yaml"))
 
 
+# --- a bundle's .env: secrets that load for the run, never committed ----------
+
+
+def test_load_dotenv_loads_keys_without_overwriting(monkeypatch):
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from zu_cli.config import load_dotenv
+
+    with tempfile.TemporaryDirectory() as d:
+        env = Path(d) / ".env"
+        env.write_text(
+            "# a comment\n"
+            "export EXA_API_KEY='abc-123'\n"
+            'ANTHROPIC_API_KEY="sk-xyz"\n'
+            "ALREADY_SET=from-file\n"
+            "blank-without-equals\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ALREADY_SET", "from-env")
+        monkeypatch.delenv("EXA_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        loaded = load_dotenv(env)
+    assert os.environ["EXA_API_KEY"] == "abc-123"        # quotes + export stripped
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-xyz"
+    assert os.environ["ALREADY_SET"] == "from-env"       # explicit env wins
+    assert set(loaded) == {"EXA_API_KEY", "ANTHROPIC_API_KEY"}
+
+
+def test_load_agent_loads_a_bundles_dotenv(tmp_path, monkeypatch):
+    import os
+
+    from zu_cli.config import load_agent
+
+    (tmp_path / ".env").write_text("EXA_API_KEY=from-bundle-env\n", encoding="utf-8")
+    (tmp_path / "agent.yaml").write_text(
+        "provider: {name: scripted}\n"
+        "plugins: {validators: []}\n"
+        "task: {query: q}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    load_agent(str(tmp_path))                            # loading the bundle loads its .env
+    assert os.environ["EXA_API_KEY"] == "from-bundle-env"
+
+
 # --- config-owned tiers: the agent author composes the escalation ladder -----
 
 
