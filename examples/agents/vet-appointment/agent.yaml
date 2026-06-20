@@ -7,15 +7,17 @@
 #   zu run examples/agents/vet-appointment/ --sandboxed  # contained on Docker
 #
 # Secrets live in a gitignored .env next to this file (see .env.example):
-#   EXA_API_KEY        — for web_search (the Exa connector)
-#   ANTHROPIC_API_KEY  — for the model
+#   EXA_API_KEY         — for web_search (the Exa connector)
+#   OPENROUTER_API_KEY  — for the model (via OpenRouter)
+#   OPENROUTER_BASE_URL — https://openrouter.ai/api/v1
 # The .env is loaded for the run (and mounted with the bundle when --sandboxed),
 # so config names the env var, never the key itself.
 
 provider:
-  name: anthropic
-  model: claude-sonnet-4-6
-  api_key_env: ANTHROPIC_API_KEY
+  name: openai-compatible            # OpenRouter is an OpenAI-compatible endpoint
+  model: anthropic/claude-sonnet-4.5
+  base_url_env: OPENROUTER_BASE_URL  # https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY    # the env var NAME — never the key itself
 
 tiers:                                  # the escalation ladder — tools per tier
   1: [web_search, http_fetch, html_parse]   # search, then fetch the static page

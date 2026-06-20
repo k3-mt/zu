@@ -29,7 +29,7 @@ COPY . .
 # against the local sources) plus the `serve` extra for the HTTP server.
 RUN uv pip install --system \
     ./packages/zu-core \
-    ./packages/zu-providers \
+    "./packages/zu-providers[anthropic,openai]" \
     ./packages/zu-tools \
     ./packages/zu-checks \
     "./packages/zu-backends[encryption]" \
