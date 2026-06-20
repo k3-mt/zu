@@ -37,22 +37,18 @@ def test_every_with_max_runs_stops(tmp_path):
     # A scheduled run that stops after N iterations (so it's testable) and does
     # not sleep meaningfully between them.
     answer = json.dumps({"name": "Acme", "price": "$9"})
-    cfg = _write(
+    agent = _write(
         tmp_path,
-        "zu.yaml",
+        "agent.yaml",
         "provider:\n  name: scripted\n"
         f"  script: [{{ text: '{answer}', finish: stop }}]\n"
-        "plugins:\n  validators: [schema]\n",
-    )
-    task = _write(
-        tmp_path,
-        "task.yaml",
-        "query: extract\noutput_schema:\n  type: object\n"
-        "  properties: { name: { type: string }, price: { type: string } }\n"
-        "  required: [name, price]\n",
+        "plugins:\n  validators: [schema]\n"
+        "task:\n  query: extract\n  output_schema:\n    type: object\n"
+        "    properties: { name: { type: string }, price: { type: string } }\n"
+        "    required: [name, price]\n",
     )
     result = runner.invoke(
-        app, ["run", task, "--config", cfg, "--every", "0.01s", "--max-runs", "2"]
+        app, ["run", agent, "--every", "0.01s", "--max-runs", "2"]
     )
     assert result.exit_code == 0, result.output
     assert "--- run 1 ---" in result.output

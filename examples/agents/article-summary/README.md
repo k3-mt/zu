@@ -6,7 +6,7 @@ grounding contract: every heading must actually appear on the page.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-zu run task.yaml -c zu.yaml          # real model, tier 1
+zu run agent.yaml          # real model, tier 1
 ```
 
 Runs offline in the test suite against `fixtures/article.html` (real tools +

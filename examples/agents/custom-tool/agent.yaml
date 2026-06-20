@@ -1,0 +1,26 @@
+# A BUNDLE: this directory IS the agent — agent.yaml + a tools/ package.
+# Your own tool (tools/greet.py) is placed on the tier ladder by import-ref;
+# loading the bundle puts tools/ on the path so it just resolves. Run the whole
+# bundle (offline, no key):
+#
+#   zu run examples/agents/custom-tool/
+#
+# Swap `provider` to anthropic + api_key_env for a real model.
+provider:
+  name: scripted                      # offline demo provider
+  script:
+    - { tool: greet, args: { name: "World" } }
+    - { text: '{"greeting": "Hello, World!"}', finish: stop }
+
+tiers:
+  1: ["tools.greet:Greet"]            # YOUR tool, at the tier YOU choose
+
+plugins:
+  validators: [schema]
+
+task:
+  query: "Greet the world."
+  output_schema:
+    type: object
+    properties: { greeting: { type: string } }
+    required: [greeting]

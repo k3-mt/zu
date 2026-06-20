@@ -19,7 +19,7 @@ from zu_core.contracts import Result, Status
 from zu_core.loop import run_task
 from zu_core.registry import GROUPS, REGISTRY
 
-from .config import ConfigError, assemble, load_config, load_task
+from .config import ConfigError, assemble, load_agent, load_config
 
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
@@ -51,16 +51,16 @@ def _parse_duration(text: str) -> float:
     return seconds
 
 
-def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result:
-    """Assemble from config and drive one task to a Result, printing a summary.
-    Shared by the one-shot and scheduled paths. Raises ConfigError for a bad
-    config/task; turns a model/infra failure into a printed terminal Result.
+def _execute_once(agent: str, *, stream: bool = True) -> Result:
+    """Load a single ``agent.yaml`` (or bundle dir) and drive its task to a Result,
+    printing a summary. Shared by the one-shot and scheduled paths. Raises
+    ConfigError for a bad agent file; turns a model/infra failure into a printed
+    terminal Result.
 
     With ``stream`` (the default), a live trace of the run — the model's train of
     thought, every tool call and result, detectors, escalations — prints as it
     happens, so the loop is never a black box."""
-    cfg = load_config(config)
-    spec = load_task(task_file, default_budget=cfg.budget)
+    spec, cfg = load_agent(agent)
     provider, registry, bus, providers = assemble(cfg)
 
     # The uniform observability hook: a live trace (when streaming) AND the defense
@@ -75,7 +75,7 @@ def _execute_once(task_file: str, config: str, *, stream: bool = True) -> Result
     # ``scripted`` has no model, and printing ``model=scripted`` conflates them.
     model = getattr(provider, "model", None)
     suffix = f" model={model}" if model else ""
-    typer.echo(f"zu run: {task_file} · provider={cfg.provider.name}{suffix}")
+    typer.echo(f"zu run: {agent} · provider={cfg.provider.name}{suffix}")
 
     async def _drive() -> tuple[Result, int]:
         # Run, count, and release the bus on a *single* event loop: a second
@@ -130,16 +130,21 @@ def _egress_allowlist(cfg) -> list[str]:
     return sorted(allow)
 
 
-def _execute_sandboxed(task_file: str, config: str) -> Result:
+def _execute_sandboxed(agent: str) -> Result:
     """Run the whole agent inside a hardened container behind an egress proxy — the
     real boundary for ``containment='required'``. Needs Docker, the zu image, and
     zu-backends installed; the in-container agent runs as contained, so a
     capability tool the bare-host floor would refuse runs here behind the proxy."""
-    from .config import _read_doc, load_config
+    from pathlib import Path
 
-    cfg = load_config(config)  # validate + read the egress allowlist from it
-    task = _read_doc(task_file)
-    config_doc = _read_doc(config)
+    from .config import AGENT_FILE, _read_doc
+
+    spec, cfg = load_agent(agent)  # validate; read the egress allowlist from it
+    # Raw task/config dicts to ship into the container (it assembles inside the box).
+    p = Path(agent)
+    doc = _read_doc(str(p / AGENT_FILE if p.is_dir() else p))
+    task_doc = doc.get("task", {})
+    config_doc = {k: v for k, v in doc.items() if k != "task"}
     try:
         from zu_backends.local_docker import LocalDockerBackend
 
@@ -151,9 +156,9 @@ def _execute_sandboxed(task_file: str, config: str) -> Result:
 
     image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:latest")
     launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
-    typer.echo(f"zu run --sandboxed: {task_file} in {image} (egress via proxy)")
+    typer.echo(f"zu run --sandboxed: {agent} in {image} (egress via proxy)")
     result, events = asyncio.run(
-        launcher.run(task, config_doc, allowlist=_egress_allowlist(cfg))
+        launcher.run(task_doc, config_doc, allowlist=_egress_allowlist(cfg))
     )
     typer.echo(f"status : {result.status.value}")
     if result.value is not None:
@@ -166,9 +171,9 @@ def _execute_sandboxed(task_file: str, config: str) -> Result:
 
 @app.command()
 def run(
-    task_file: str = typer.Argument(..., help="Task spec (YAML/JSON): the query, target, schema."),
-    config: str = typer.Option(
-        "zu.yaml", "--config", "-c", help="Run config: the model, plugins, sink, budget."
+    agent: str = typer.Argument(
+        "agent.yaml", help="The agent: an agent.yaml file, or a bundle directory "
+                           "(agent.yaml + a tools/ package)."
     ),
     every: str = typer.Option(
         None, "--every", help="Re-run on an interval (e.g. '5m', '30s', '1h') — a scheduled worker."
@@ -186,20 +191,19 @@ def run(
              "(needs Docker + the zu image). The real boundary for containment='required'.",
     ),
 ) -> None:
-    """Run a task wired by a config file — once, or on a schedule with --every.
+    """Run a self-contained agent (one ``agent.yaml`` or a bundle dir) — once, or
+    on a schedule with --every.
 
     A live trace streams to the console as the loop runs (disable with
-    --no-stream). Swapping the model is a one-line edit to the config's
-    ``provider`` block — the loop only ever speaks to the provider port.
+    --no-stream). The whole agent — task, model(s), the tier ladder of tools — is
+    one file; a bundle dir adds its own ``tools/`` so custom tools just resolve.
     """
     # One-shot: run, exit non-zero on a non-success result so it composes in a
     # shell. Scheduled: loop and keep going regardless of any single outcome.
     if not every:
         try:
             result = (
-                _execute_sandboxed(task_file, config)
-                if sandboxed
-                else _execute_once(task_file, config, stream=stream)
+                _execute_sandboxed(agent) if sandboxed else _execute_once(agent, stream=stream)
             )
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
@@ -220,7 +224,7 @@ def run(
         n += 1
         typer.echo(f"--- run {n} ---")
         try:
-            _execute_once(task_file, config, stream=stream)
+            _execute_once(agent, stream=stream)
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)
@@ -233,7 +237,7 @@ def run(
 @app.command()
 def serve(
     config: str = typer.Option(
-        "zu.yaml", "--config", "-c", help="Default run config for the service."
+        "agent.yaml", "--config", "-c", help="Agent/config file for the service (task block ignored; tasks arrive per request)."
     ),
     host: str = typer.Option("127.0.0.1", help="Bind host."),
     port: int = typer.Option(8000, help="Bind port."),
@@ -367,9 +371,10 @@ def init(
     ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing files."),
 ) -> None:
-    """Scaffold a new Zu agent — a starter zu.yaml + task.yaml you can run at once.
+    """Scaffold a new Zu agent — a single starter ``agent.yaml`` you can run at once.
 
-    Edit the provider block to choose your model, then `zu run task.yaml`.
+    Edit the provider block to choose your model, then `zu run`. Drop your own
+    tools in a ``tools/`` dir beside it and list them in ``tiers``.
     """
     from .scaffold import TEMPLATE_NAMES, write_template
 
@@ -386,16 +391,16 @@ def init(
         typer.echo(f"created {p}")
     typer.echo(
         "\nnext:\n"
-        "  1. edit zu.yaml — set the provider/model and export its API key\n"
-        "  2. zu run task.yaml -c zu.yaml        # runs with a live trace\n"
-        "  3. zu demo --offline                  # or self-test the wiring first"
+        "  1. edit agent.yaml — set the provider/model and export its API key\n"
+        "  2. zu run                             # runs agent.yaml with a live trace\n"
+        "     (add your own tools: drop a tools/ package beside it, list them in tiers)"
     )
 
 
 @app.command()
 def deploy(
     target: str = typer.Argument("local", help="local | dockerfile | compose | fly | render"),
-    config: str = typer.Option("zu.yaml", "--config", "-c", help="The run config to deploy."),
+    config: str = typer.Option("agent.yaml", "--config", "-c", help="The agent/config file to deploy."),
     name: str = typer.Option("zu-agent", "--name", help="Image / app / container name."),
     port: int = typer.Option(8000, "--port", help="Service port."),
     extras: str = typer.Option("all", "--extras", help="zu-runtime extras to install in the image."),

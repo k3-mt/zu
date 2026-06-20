@@ -12,7 +12,8 @@ runner = CliRunner()
 
 
 def _seed_config(tmp_path):
-    (tmp_path / "zu.yaml").write_text(
+    # The deploy default config is now agent.yaml (the merged single-file form).
+    (tmp_path / "agent.yaml").write_text(
         "provider: { name: scripted }\nplugins: { validators: [schema] }\n", encoding="utf-8"
     )
 
@@ -85,6 +86,6 @@ def test_zu_deploy_unknown_target_and_missing_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "..") if False else None
     # missing config
     import os
-    os.remove(tmp_path / "zu.yaml")
+    os.remove(tmp_path / "agent.yaml")
     bad = runner.invoke(app, ["deploy", "compose"])
     assert bad.exit_code == 2 and "config error" in bad.output

@@ -11,10 +11,10 @@ This package registers **no plugins**; it consumes them.
 
 | Command | What it does |
 |---------|--------------|
-| `zu run task.yaml -c zu.yaml` | Run one task; streams a live trace. `--every 5m` for a scheduled worker, `--no-stream` for CI. |
+| `zu run agent.yaml` | Run one task; streams a live trace. `--every 5m` for a scheduled worker, `--no-stream` for CI. |
 | `zu demo` | Prove a real run end to end (`--offline` for a scripted self-test). |
-| `zu init --template web` | Scaffold a starter `zu.yaml` + `task.yaml` (`minimal` / `web` / `research`). |
-| `zu serve -c zu.yaml` | HTTP service: `POST /run`, `POST /run/stream` (SSE), `GET /healthz`. Needs `[serve]`. |
+| `zu init --template web` | Scaffold a starter `agent.yaml` (`minimal` / `web` / `research`). |
+| `zu serve -c agent.yaml` | HTTP service: `POST /run`, `POST /run/stream` (SSE), `GET /healthz`. Needs `[serve]`. |
 | `zu deploy local\|compose\|fly\|render\|dockerfile` | Turn a config into a running/deployable service. |
 | `zu mcp` | An MCP stdio server so coding agents (Claude Code, Cursor, Codex) drive Zu. Needs `[mcp]`. |
 | `zu plugins` | List every plugin the runtime discovered. |

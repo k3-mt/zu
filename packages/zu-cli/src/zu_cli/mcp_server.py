@@ -56,7 +56,7 @@ def build_server() -> FastMCP:
 
     @mcp.tool()
     async def zu_scaffold(directory: str = ".", template: str = "web", force: bool = False) -> dict:
-        """Create a starter zu.yaml + task.yaml in ``directory``. Templates:
+        """Create a starter agent.yaml in ``directory``. Templates:
         'web' (tier-1/2 web extraction), 'minimal' (no tools), 'research'
         (multi-field article extraction)."""
         from .scaffold import TEMPLATE_NAMES, write_template

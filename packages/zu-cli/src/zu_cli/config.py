@@ -1,6 +1,6 @@
 """The config system (build step 8).
 
-One declarative file (`zu.yaml`) wires a run: which model the provider calls,
+One declarative file (`agent.yaml`) wires a run: which model the provider calls,
 which plugins are active, where events are stored, and the default budget. The
 headline promise is that **swapping the model is a one-line edit** — point the
 ``provider`` block at Anthropic, OpenRouter, or a local server and nothing in
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -117,7 +118,7 @@ class ObservabilityConfig(BaseModel):
 
 
 class RunConfig(BaseModel):
-    """A whole `zu.yaml`, parsed and validated."""
+    """A whole `agent.yaml` (or `zu.yaml`-style config), parsed and validated."""
 
     # The agent's GLOBAL provider — required. An agent with no provider cannot
     # operate, so there is deliberately no default: a config that omits it fails
@@ -131,6 +132,13 @@ class RunConfig(BaseModel):
     # on escalation to tier 2 — e.g. ``providers: {2: {name: anthropic, model: ...}}``.
     providers: dict[int, ProviderConfig] = Field(default_factory=dict)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    # The escalation ladder, OWNED BY THE AGENT AUTHOR: tier number -> the tools
+    # offered at that tier (by built-in name or ``module:Attr`` import-ref). This
+    # is where you mix Zu's tools and your own and decide which sits at which tier —
+    # the config's choice OVERRIDES a tool class's own default ``tier``. Tools also
+    # listed in ``plugins.tools`` (without a tier here) keep their class default.
+    # ``max_tier`` on the task still caps how high the loop climbs.
+    tiers: dict[int, list[str]] = Field(default_factory=dict)
     backend: str | None = None
     # The canonical store (the single source of truth for the run).
     event_sink: EventSinkConfig | None = None
@@ -142,6 +150,12 @@ class RunConfig(BaseModel):
     # how a run emits to local files or cloud storage for observability.
     trace_sinks: list[EventSinkConfig] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
+    # The agent's task, embedded so a single ``agent.yaml`` is the whole agent
+    # (what + how in one file). The task block — query, target, output_schema,
+    # max_tier — is split out into a TaskSpec by ``load_agent``. Optional: a config
+    # used as a *service* default (``zu serve``) has no task (tasks arrive per
+    # request); a runnable agent file carries one.
+    task: dict | None = None
     # The containment posture for tool execution (see zu_core.security):
     #   * ``audit``    (default) — tools run in-process; each declared envelope and
     #     every contained block is recorded on the event log. Tier-1 tools carry
@@ -221,13 +235,61 @@ def load_task(path: str, *, default_budget: Budget | None = None) -> TaskSpec:
 # being re-implemented (and drifting) in each caller.
 
 
+AGENT_FILE = "agent.yaml"
+
+
+def load_agent(source: Any) -> tuple[TaskSpec, RunConfig]:
+    """Load a single self-contained agent → ``(task, config)``.
+
+    ``source`` is a path to an ``agent.yaml``, a **bundle directory** (containing
+    ``agent.yaml`` + optionally a ``tools/`` package), a dict, or None (``./agent.yaml``
+    or ``./`` as a bundle). A bundle dir is put on ``sys.path`` so the agent's own
+    tools — referenced in ``tiers`` as ``tools.x:MyTool`` — import, whether they
+    were written in the owner's codebase or a fresh repo dropped in the bundle.
+
+    The merged file is parsed into one RunConfig; its ``task:`` block is split out
+    into a TaskSpec. A file with no ``task:`` is an error (it's not runnable)."""
+    if source is None:
+        source = AGENT_FILE if Path(AGENT_FILE).is_file() else "."
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        if p.is_dir():
+            _add_bundle_to_path(p)
+            p = p / AGENT_FILE
+        cfg = load_config(str(p))
+    elif isinstance(source, dict):
+        cfg = coerce_config(source)
+    elif isinstance(source, RunConfig):
+        cfg = source
+    else:
+        raise ConfigError(f"unsupported agent source: {type(source).__name__}")
+
+    if cfg.task is None:
+        raise ConfigError(
+            "agent has no `task:` block — a runnable agent file must include one "
+            "(query/target/output_schema). See `zu init`."
+        )
+    spec = coerce_task(cfg.task, cfg.budget, allow_paths=False)
+    return spec, cfg
+
+
+def _add_bundle_to_path(directory: Path) -> None:
+    """Put a bundle directory on ``sys.path`` (front) so its own ``tools/`` package
+    is importable by the ``module:Attr`` refs in the agent's ``tiers``."""
+    import sys
+
+    resolved = str(directory.resolve())
+    if resolved not in sys.path:
+        sys.path.insert(0, resolved)
+
+
 def coerce_config(source: Any) -> RunConfig:
     """A RunConfig from a path (str), a dict, an existing RunConfig, or None
-    (meaning ``./zu.yaml``). A malformed *dict* raises ``ConfigError`` like a
+    (meaning ``./agent.yaml``). A malformed *dict* raises ``ConfigError`` like a
     malformed *file* does — so callers that ``except ConfigError`` get a clean
     message for either, never a raw pydantic ``ValidationError`` escaping."""
     if source is None:
-        return load_config("zu.yaml")
+        return load_config("agent.yaml")
     if isinstance(source, RunConfig):
         return source
     if isinstance(source, str):
@@ -411,7 +473,26 @@ def build_registry(
         backend_obj = backend_obj() if isinstance(backend_obj, type) else backend_obj
 
     extra = {"backend": backend_obj} if backend_obj is not None else {}
-    for kind in ("tools", "detectors", "validators"):
+
+    # Tools: from the config-owned escalation ladder (``tiers``) and/or the flat
+    # ``plugins.tools`` list. A name in ``tiers`` is registered with its effective
+    # tier STAMPED on the instance (the agent author's choice overrides the tool's
+    # own default); a name only in ``plugins.tools`` keeps its class-default tier.
+    tier_of: dict[str, int] = {}
+    for tier, names in cfg.tiers.items():
+        for name in names:
+            tier_of[name] = tier
+    tool_names = list(cfg.plugins.tools) + [n for n in tier_of if n not in cfg.plugins.tools]
+    for name in tool_names:
+        obj = _resolve_plugin("tools", name, catalog, extra, allow_imports=allow_imports)
+        if name in tier_of:
+            # Need an instance to stamp the tier; a class is materialised here
+            # (the loop would otherwise instantiate it with no args anyway).
+            obj = obj() if isinstance(obj, type) else obj
+            obj.tier = tier_of[name]
+        reg.register("tools", getattr(obj, "name", name), obj)
+
+    for kind in ("detectors", "validators"):
         for name in getattr(cfg.plugins, kind):
             obj = _resolve_plugin(kind, name, catalog, extra, allow_imports=allow_imports)
             reg.register(kind, getattr(obj, "name", name), obj)

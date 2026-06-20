@@ -1,0 +1,28 @@
+# A whole agent in one file. Run it:  zu run agent.yaml   (needs ANTHROPIC_API_KEY)
+provider:
+  name: anthropic
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+
+tiers:
+  1: [http_fetch, html_parse]
+  2: [render_dom]                     # escalate to a browser if the page is JS-only
+
+plugins:
+  detectors: [empty, error, js-shell, bot-wall]   # what triggers the climb
+  validators: [schema, grounding]
+
+budget: { max_steps: 12, max_tokens: 100000, wall_time_s: 60 }
+
+task:
+  query: "Extract the article title and the text of each section heading."
+  target: "https://blog.example/posts/event-sourcing-for-agents"
+  max_tier: 2
+  output_schema:
+    type: object
+    properties:
+      title: { type: string }
+      headings:
+        type: array
+        items: { type: string }
+    required: [title, headings]

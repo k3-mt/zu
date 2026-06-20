@@ -6,7 +6,7 @@ in the fetched content (a fabricated price is refused, not returned).
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-zu run task.yaml -c zu.yaml          # real model, tier 1 (network, no Docker)
+zu run agent.yaml          # real model, tier 1 (network, no Docker)
 ```
 
 Tier 1 only — needs network for `http_fetch`, no Docker. The repo's test suite

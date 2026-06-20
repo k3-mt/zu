@@ -7,10 +7,10 @@ three.
 
     import zu
 
-    # one-shot, from files
-    result = zu.run("task.yaml", config="zu.yaml")
+    # a self-contained agent: one agent.yaml, or a bundle dir (agent.yaml + tools/)
+    result = zu.run_agent("agent.yaml")        # or zu.run_agent("my-agent/")
 
-    # or from plain dicts — no files needed
+    # the programmatic form — a config plus a task (config + many tasks):
     result = zu.run(
         {"query": "Extract the title and price.", "target": "https://example.com",
          "output_schema": {"type": "object", "properties": {"title": {"type": "string"}}}},
@@ -66,6 +66,8 @@ __all__ = [
     "Zu",
     "Pipeline",
     "PipelineResult",
+    "run_agent",
+    "run_agent_with_events",
     "run",
     "arun",
     "run_with_events",
@@ -90,7 +92,7 @@ __all__ = [
 # Config/task coercion is shared with the CLI surfaces (see zu_cli.config). The
 # embed facade accepts a str task as a *path* (``allow_paths=True``): you're
 # running in-process on your own host, so reading a task file you point at — the
-# same affordance as ``zu run task.yaml`` — is intended.
+# same affordance as ``zu run`` — is intended.
 
 
 class Zu:
@@ -139,9 +141,41 @@ class Zu:
         return asyncio.run(self.arun(task))
 
 
+def run_agent(source: Any = None) -> Result:
+    """Run a self-contained agent to a Result — the embed equivalent of
+    ``zu run``. ``source`` is an ``agent.yaml`` path, a **bundle directory**
+    (agent.yaml + a tools/ package, auto-loaded), a dict, or None (``./agent.yaml``
+    or ``./``)."""
+    result, _ = run_agent_with_events(source)
+    return result
+
+
+def run_agent_with_events(source: Any = None) -> tuple[Result, list[Event]]:
+    """Run a self-contained agent, returning the Result *and* its event log."""
+    return asyncio.run(_arun_agent(source))
+
+
+async def _arun_agent(source: Any) -> tuple[Result, list[Event]]:
+    from zu_cli.config import load_agent
+    from zu_cli.observe import attach_observability
+
+    spec, cfg = load_agent(source)
+    provider, registry, bus, providers = assemble(cfg)
+    attach_observability(bus, cfg.observability)
+    try:
+        result = await run_task(
+            spec, provider, registry, bus,
+            providers=providers, containment=cfg.containment,
+        )
+        return result, await bus.query()
+    finally:
+        await bus.aclose()
+
+
 def run(task: Any, config: Any = None) -> Result:
-    """Run one task to a Result. ``task`` and ``config`` may each be a path, a
-    dict, the typed object, or None (config → ``./zu.yaml``)."""
+    """Run one task against a config — the programmatic form (config + many tasks).
+    ``task`` and ``config`` may each be a path, a dict, the typed object, or None.
+    For a single self-contained ``agent.yaml``/bundle, use :func:`run_agent`."""
     return Zu(config).run(task)
 
 

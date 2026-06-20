@@ -15,11 +15,11 @@ proves it works offline (no key, no network).
 | [`agents/research-pipeline`](agents/research-pipeline/) | `extract → summarize` chained as one event-sourced run | **multi-phase** (`zu.Pipeline`) |
 
 ```bash
-cd agents/price-extractor && zu run task.yaml -c zu.yaml      # real model (needs a key)
+cd agents/price-extractor && zu run agent.yaml      # real model (needs a key)
 python agents/research-pipeline/pipeline.py                   # multi-phase, offline, no key
 ```
 
-Scaffold your own starter pair (task.yaml + zu.yaml) with `zu init`. The full
+Scaffold your own starter `agent.yaml` with `zu init`. The full
 build-an-agent guide — designing escalation, per-tier models, testing,
 red-teaming, deploy — is in the published documentation.
 

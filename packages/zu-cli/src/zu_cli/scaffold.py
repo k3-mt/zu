@@ -1,10 +1,12 @@
-"""Project scaffolding — the starter files behind `zu init` and the MCP
+"""Project scaffolding — the starter `agent.yaml` behind `zu init` and the MCP
 `zu_scaffold` tool. One source of truth so the CLI and the coding-agent
 integration always write the same thing.
 
-A template is a set of files (a `zu.yaml` run config + a `task.yaml`) that gets a
-developer from nothing to a runnable agent. Edit the `provider` block to swap
-models; the rest is a sensible default for that agent shape.
+A template is a single self-contained `agent.yaml`: the model, the escalation
+ladder (`tiers:` — the tools at each tier, yours or built-in), the checks, and
+the task — what + how in one file. Edit the `provider` block to swap models; drop
+your own tools in a `tools/` dir beside it and list them in `tiers` as
+`tools.my_module:MyTool`.
 """
 
 from __future__ import annotations
@@ -17,67 +19,73 @@ _PROVIDER = (
     "  model: claude-sonnet-4-6\n"
     "  api_key_env: ANTHROPIC_API_KEY  # the env var NAME — never the key itself\n"
 )
-
-_BUDGET = "budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }\n"
 _SINK = "event_sink: { driver: sqlite, path: ./zu.db }\n"
+_BUDGET = "budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }\n"
+
+# A tier-1/2 web-extraction agent: fetch, fall back to a browser on JS, validate.
+_WEB = (
+    _PROVIDER
+    + "tiers:                            # the escalation ladder — tools at each tier\n"
+    "  1: [http_fetch, html_parse]     # cheap: fetch + parse (your own tools go here too)\n"
+    "  2: [render_dom]                 # escalate to a real browser when a detector says so\n"
+    "plugins:\n"
+    "  detectors: [empty, error, js-shell, bot-wall]   # what makes a tier give up\n"
+    "  validators: [schema, grounding]\n"
+    + _SINK
+    + _BUDGET
+    + "task:\n"
+    "  query: \"Extract the product name and price.\"\n"
+    "  target: \"https://example.com/product/123\"\n"
+    "  max_tier: 2\n"
+    "  output_schema:\n"
+    "    type: object\n"
+    "    properties:\n"
+    "      name: { type: string }\n"
+    "      price: { type: string }\n"
+    "    required: [name, price]\n"
+)
+
+# The smallest agent: a model answers, schema-validated. No tools, no network.
+_MINIMAL = (
+    _PROVIDER
+    + "plugins:\n  validators: [schema]\n"
+    + _SINK
+    + "task:\n"
+    "  query: \"Answer the question as JSON: {\\\"answer\\\": ...}.\"\n"
+    "  output_schema:\n"
+    "    type: object\n"
+    "    properties: { answer: { type: string } }\n"
+    "    required: [answer]\n"
+)
+
+# A web-research agent: extract several fields from an article page.
+_RESEARCH = (
+    _PROVIDER
+    + "tiers:\n"
+    "  1: [http_fetch, html_parse]\n"
+    "  2: [render_dom]\n"
+    "plugins:\n"
+    "  detectors: [empty, error, js-shell, bot-wall]\n"
+    "  validators: [schema, grounding]\n"
+    + _SINK
+    + _BUDGET
+    + "task:\n"
+    "  query: \"Extract the article's title, author, and publication date.\"\n"
+    "  target: \"https://example.com/article\"\n"
+    "  max_tier: 2\n"
+    "  output_schema:\n"
+    "    type: object\n"
+    "    properties:\n"
+    "      title: { type: string }\n"
+    "      author: { type: string }\n"
+    "      published: { type: string }\n"
+    "    required: [title]\n"
+)
 
 TEMPLATES: dict[str, dict[str, str]] = {
-    # A tier-1/2 web-extraction agent: fetch, fall back to a browser on JS, validate.
-    "web": {
-        "zu.yaml": (
-            _PROVIDER
-            + "plugins:\n"
-            "  tools: [http_fetch, html_parse, render_dom]\n"
-            "  detectors: [empty, error, js-shell, bot-wall]\n"
-            "  validators: [schema, grounding]\n"
-            + _SINK
-            + _BUDGET
-        ),
-        "task.yaml": (
-            "query: \"Extract the product name and price.\"\n"
-            "target: \"https://example.com/product/123\"\n"
-            "output_schema:\n"
-            "  type: object\n"
-            "  properties:\n"
-            "    name: { type: string }\n"
-            "    price: { type: string }\n"
-            "  required: [name, price]\n"
-        ),
-    },
-    # The smallest agent: a model answers, schema-validated. No tools, no network.
-    "minimal": {
-        "zu.yaml": _PROVIDER + "plugins:\n  validators: [schema]\n" + _SINK,
-        "task.yaml": (
-            "query: \"Answer the question as JSON: {\\\"answer\\\": ...}.\"\n"
-            "output_schema:\n"
-            "  type: object\n"
-            "  properties: { answer: { type: string } }\n"
-            "  required: [answer]\n"
-        ),
-    },
-    # A web-research agent: extract several fields from an article page.
-    "research": {
-        "zu.yaml": (
-            _PROVIDER
-            + "plugins:\n"
-            "  tools: [http_fetch, html_parse, render_dom]\n"
-            "  detectors: [empty, error, js-shell, bot-wall]\n"
-            "  validators: [schema, grounding]\n"
-            + _SINK
-            + _BUDGET
-        ),
-        "task.yaml": (
-            "query: \"Extract the article's title, author, and publication date.\"\n"
-            "target: \"https://example.com/article\"\n"
-            "output_schema:\n"
-            "  type: object\n"
-            "  properties:\n"
-            "    title: { type: string }\n"
-            "    author: { type: string }\n"
-            "    published: { type: string }\n"
-            "  required: [title]\n"
-        ),
-    },
+    "web": {"agent.yaml": _WEB},
+    "minimal": {"agent.yaml": _MINIMAL},
+    "research": {"agent.yaml": _RESEARCH},
 }
 
 TEMPLATE_NAMES = tuple(TEMPLATES)

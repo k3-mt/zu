@@ -41,14 +41,14 @@ async def test_zu_plugins_reports_discovered_plugins():
 async def test_zu_scaffold_writes_starter_files(tmp_path):
     srv = build_server()
     res = _result(await srv.call_tool("zu_scaffold", {"directory": str(tmp_path), "template": "web"}))
-    assert res["ok"] and len(res["files"]) == 2
-    assert (tmp_path / "zu.yaml").exists() and (tmp_path / "task.yaml").exists()
+    assert res["ok"] and len(res["files"]) == 1
+    assert (tmp_path / "agent.yaml").exists()
 
 
 async def test_zu_validate_ok_and_error(tmp_path):
     srv = build_server()
     await srv.call_tool("zu_scaffold", {"directory": str(tmp_path), "template": "web"})
-    ok = _result(await srv.call_tool("zu_validate", {"config": str(tmp_path / "zu.yaml")}))
+    ok = _result(await srv.call_tool("zu_validate", {"config": str(tmp_path / "agent.yaml")}))
     assert ok["ok"] and ok["provider"] == "anthropic"
     assert "http_fetch" in ok["active_plugins"]["tools"]
 

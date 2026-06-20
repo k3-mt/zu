@@ -106,7 +106,108 @@ def test_provider_accepts_a_direct_api_key(monkeypatch):
     assert provider.api_key == "sk-test-123"
 
 
-# --- only the named plugins are active ---------------------------------------
+# --- the merged agent.yaml + bundle directory --------------------------------
+
+
+def test_load_agent_merged_file_splits_task_and_config(tmp_path):
+    from zu_cli.config import load_agent
+
+    (tmp_path / "agent.yaml").write_text(
+        "provider: {name: scripted, script: [{text: '{\"ok\": true}', finish: stop}]}\n"
+        "plugins: {validators: []}\n"
+        "tiers: {1: [http_fetch], 2: [render_dom]}\n"
+        "task:\n"
+        "  query: \"extract it\"\n"
+        "  output_schema: {type: object, properties: {ok: {type: boolean}}}\n",
+        encoding="utf-8",
+    )
+    spec, cfg = load_agent(str(tmp_path / "agent.yaml"))
+    assert spec.query == "extract it"                 # task split out of the one file
+    assert cfg.provider.name == "scripted"            # config too
+    reg = build_registry(cfg)
+    assert reg.get("tools", "http_fetch").tier == 1 and reg.get("tools", "render_dom").tier == 2
+
+
+def test_load_agent_bundle_dir_loads_its_own_tools(tmp_path):
+    # A bundle directory: agent.yaml + a tools/ package. The agent references its
+    # OWN tool by import-ref in tiers; loading the dir puts it on the path so it
+    # resolves and lands at the chosen tier — no packaging, no install.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "tools" / "mine.py").write_text(
+        "class MyTool:\n"
+        "    name = 'my_tool'\n"
+        "    tier = 1\n"
+        "    schema = {'name': 'my_tool', 'parameters': {'type': 'object', 'properties': {}}}\n"
+        "    prompt_fragment = 'my_tool(): does the thing'\n"
+        "    capabilities = frozenset()\n"
+        "    egress = frozenset()\n"
+        "    async def __call__(self, ctx):\n"
+        "        return {'text': 'hi'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "agent.yaml").write_text(
+        "provider: {name: scripted, script: [{text: '{}', finish: stop}]}\n"
+        "plugins: {validators: []}\n"
+        "tiers: {2: [\"tools.mine:MyTool\"]}\n"
+        "task: {query: q}\n",
+        encoding="utf-8",
+    )
+    import sys
+
+    from zu_cli.config import load_agent
+
+    # Isolate the generic `tools` package across bundle tests (one bundle/process
+    # in real use; pytest shares a process).
+    for m in [k for k in sys.modules if k == "tools" or k.startswith("tools.")]:
+        del sys.modules[m]
+    try:
+        spec, cfg = load_agent(str(tmp_path))            # a DIRECTORY → a bundle
+        assert spec.query == "q"
+        reg = build_registry(cfg)                          # the bundle's own tool resolves
+        assert reg.get("tools", "my_tool").tier == 2       # at the author's chosen tier
+    finally:
+        for m in [k for k in sys.modules if k == "tools" or k.startswith("tools.")]:
+            del sys.modules[m]
+
+
+def test_load_agent_without_task_is_an_error(tmp_path):
+    from zu_cli.config import ConfigError, load_agent
+
+    (tmp_path / "agent.yaml").write_text(
+        "provider: {name: scripted}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="no `task:` block"):
+        load_agent(str(tmp_path / "agent.yaml"))
+
+
+# --- config-owned tiers: the agent author composes the escalation ladder -----
+
+
+def test_tiers_assign_tools_to_tiers_overriding_the_tool_default():
+    # The agent author places tools at tiers — built-in OR by import-ref — and the
+    # config's choice overrides the tool class's own default tier.
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        tiers={1: ["html_parse"], 2: ["http_fetch", "zu_tools.parse:HtmlParse"]},
+    )
+    reg = build_registry(cfg)
+    # http_fetch defaults to tier 1 in code; config puts it at tier 2.
+    assert reg.get("tools", "http_fetch").tier == 2
+    # html_parse appears once; the LAST tier assignment wins (tier 2 via import-ref).
+    assert reg.get("tools", "html_parse").tier == 2
+    assert set(reg.names("tools")) == {"http_fetch", "html_parse"}
+
+
+def test_tiers_and_flat_tool_list_coexist():
+    # A tool in plugins.tools (no explicit tier) keeps its class-default tier.
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=["html_parse"]),   # default tier 1
+        tiers={2: ["http_fetch"]},                       # placed at tier 2
+    )
+    reg = build_registry(cfg)
+    assert reg.get("tools", "html_parse").tier == 1
+    assert reg.get("tools", "http_fetch").tier == 2
 
 
 def test_registry_contains_exactly_the_configured_plugins():
@@ -356,50 +457,46 @@ def test_non_mapping_top_level_is_rejected(tmp_path):
 # --- the whole thing: `zu run` end to end, fully offline ---------------------
 
 
-def _offline_config(tmp_path, db_path: str) -> str:
-    """A config whose `scripted` provider finalises a JSON answer on turn one —
-    no tools, no network, no live model — validated by the schema validator.
-    This is the deterministic end-to-end proof that config drives a real run."""
+_TASK_BLOCK = (
+    "task:\n"
+    "  query: extract the product\n"
+    "  output_schema:\n"
+    "    type: object\n"
+    "    properties: { name: { type: string }, price: { type: string } }\n"
+    "    required: [name, price]\n"
+)
+
+
+def _offline_agent(tmp_path, db_path: str) -> str:
+    """A whole agent.yaml whose `scripted` provider finalises a JSON answer on
+    turn one — no tools, no network, no live model — validated by schema. The
+    deterministic end-to-end proof that one file drives a real run."""
     answer = json.dumps({"name": "Acme", "price": "$9"})
     moves = json.dumps([{"text": answer, "finish": "stop"}])
     return _write(
         tmp_path,
-        "zu.yaml",
+        "agent.yaml",
         "provider:\n"
         "  name: scripted\n"
         f"  script: {moves}\n"
         "plugins:\n"
         "  validators: [schema]\n"
         f"event_sink: {{ driver: sqlite, path: {db_path} }}\n"
-        "budget: { max_steps: 5, max_tokens: 1000, wall_time_s: 30 }\n",
-    )
-
-
-def _task_file(tmp_path) -> str:
-    return _write(
-        tmp_path,
-        "task.yaml",
-        "query: extract the product\n"
-        "output_schema:\n"
-        "  type: object\n"
-        "  properties: { name: { type: string }, price: { type: string } }\n"
-        "  required: [name, price]\n",
+        "budget: { max_steps: 5, max_tokens: 1000, wall_time_s: 30 }\n"
+        + _TASK_BLOCK,
     )
 
 
 def test_zu_run_executes_offline_and_succeeds(tmp_path):
-    db = str(tmp_path / "run.db")
-    cfg = _offline_config(tmp_path, db)
-    task = _task_file(tmp_path)
+    agent = _offline_agent(tmp_path, str(tmp_path / "run.db"))
 
-    result = runner.invoke(app, ["run", task, "--config", cfg])
+    result = runner.invoke(app, ["run", agent])
 
     assert result.exit_code == 0, result.output
     assert "status : success" in result.output
     assert "Acme" in result.output
     assert "provider=scripted" in result.output
-    # Events were persisted to the configured sqlite sink.
-    assert "events :" in result.output
+    assert "events :" in result.output            # persisted to the configured sink
 
 
 def test_zu_run_swap_to_a_real_provider_is_one_edit(tmp_path):
@@ -407,34 +504,28 @@ def test_zu_run_swap_to_a_real_provider_is_one_edit(tmp_path):
     provider block only; the run then *attempts* a live call and fails fast on
     the missing key — proving the wiring reached the real adapter, no code
     change. The CLI reports the failure cleanly (no traceback) and exits 1."""
-    db = str(tmp_path / "run.db")
-    cfg_text = (
+    agent = _write(
+        tmp_path,
+        "agent.yaml",
         "provider:\n"
         "  name: anthropic\n"          # <- the one-line swap
         "  model: claude-sonnet-4-6\n"
         "  api_key_env: ZU_TEST_ABSENT_KEY\n"
         "plugins:\n"
         "  validators: [schema]\n"
-        f"event_sink: {{ driver: sqlite, path: {db} }}\n"
+        + _TASK_BLOCK,
     )
-    cfg = _write(tmp_path, "zu.yaml", cfg_text)
-    task = _task_file(tmp_path)
 
-    result = runner.invoke(app, ["run", task, "--config", cfg])
+    result = runner.invoke(app, ["run", agent])
 
-    # The run reached the real adapter (provider=anthropic) and failed fast on
-    # the missing key — reported as a clean message, not a traceback, exit 1.
     assert "provider=anthropic" in result.output
     assert result.exit_code == 1
-    # A clean SystemExit from the CLI's handler — not the adapter's RuntimeError
-    # escaping as an unhandled crash.
     assert isinstance(result.exception, SystemExit)
     assert "run failed" in result.output
     assert "ZU_TEST_ABSENT_KEY" in result.output  # the adapter named the env var
 
 
 def test_zu_run_reports_config_errors_without_a_traceback(tmp_path):
-    task = _task_file(tmp_path)
-    result = runner.invoke(app, ["run", task, "--config", "/no/such.yaml"])
+    result = runner.invoke(app, ["run", "/no/such.yaml"])
     assert result.exit_code == 2
     assert "config error" in result.output

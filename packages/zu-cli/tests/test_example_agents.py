@@ -1,8 +1,7 @@
 """The example agents (examples/agents/) are real, runnable, and tested two ways:
 
-* **validity** — the shipped ``task.yaml`` / ``zu.yaml`` parse and their named
-  plugins resolve, so a copy-pasted example never greets a user with a config
-  error.
+* **validity** — the shipped ``agent.yaml`` parses and its tier tools + plugins
+  resolve, so a copy-pasted example never greets a user with a config error.
 * **behaviour** — each agent runs OFFLINE through the real interpreter loop with
   the real tools + validators (``http_fetch``/``html_parse`` + ``schema``/
   ``grounding``) over its saved fixture page and a scripted model, proving the
@@ -23,7 +22,7 @@ import pytest
 
 from zu_checks.validators.grounding import GroundingValidator
 from zu_checks.validators.schema import SchemaValidator
-from zu_cli.config import build_registry, load_config, load_task
+from zu_cli.config import build_registry, load_agent
 from zu_core.contracts import Status
 from zu_testing import fetch_tool
 from zu_tools.parse import HtmlParse
@@ -47,15 +46,14 @@ _AGENTS = [
 
 
 @pytest.mark.parametrize("name, fixture, answer", _AGENTS)
-def test_shipped_config_is_valid(name, fixture, answer) -> None:
-    # The files a user copies must parse and reference real, installed plugins.
+def test_shipped_agent_is_valid(name, fixture, answer) -> None:
+    # The agent.yaml a user copies must parse and reference real, installed plugins.
     d = _AGENTS_DIR / name
-    cfg = load_config(str(d / "zu.yaml"))
-    spec = load_task(str(d / "task.yaml"))
-    assert spec.query and spec.output_schema  # the task is complete
-    reg = build_registry(cfg)                  # every named plugin resolves
-    for tool in cfg.plugins.tools:
-        assert tool in reg.names("tools")
+    spec, cfg = load_agent(str(d / "agent.yaml"))
+    assert spec.query and spec.output_schema   # the task is complete
+    assert cfg.tiers                            # the agent declares a tier ladder
+    reg = build_registry(cfg)                   # raises on any unknown tier tool / validator
+    assert reg.names("tools")                   # the ladder produced tools
     for val in cfg.plugins.validators:
         assert val in reg.names("validators")
     assert (d / "fixtures" / fixture).is_file()
@@ -64,7 +62,7 @@ def test_shipped_config_is_valid(name, fixture, answer) -> None:
 @pytest.mark.parametrize("name, fixture, answer", _AGENTS)
 async def test_agent_runs_offline_and_grounds(agent_runner, name, fixture, answer) -> None:
     d = _AGENTS_DIR / name
-    spec = load_task(str(d / "task.yaml"))
+    spec, _cfg = load_agent(str(d / "agent.yaml"))
     html = (d / "fixtures" / fixture).read_text(encoding="utf-8")
 
     result, events = await agent_runner(
@@ -85,7 +83,7 @@ async def test_agent_runs_offline_and_grounds(agent_runner, name, fixture, answe
 async def test_fabricated_value_is_refused(agent_runner, name, fixture, answer) -> None:
     # A value NOT on the page must fail grounding — the run does not succeed.
     d = _AGENTS_DIR / name
-    spec = load_task(str(d / "task.yaml"))
+    spec, _cfg = load_agent(str(d / "agent.yaml"))
     html = (d / "fixtures" / fixture).read_text(encoding="utf-8")
     bogus = dict(answer)
     first = next(iter(bogus))
@@ -99,6 +97,31 @@ async def test_fabricated_value_is_refused(agent_runner, name, fixture, answer) 
         spec=spec,
     )
     assert result.status is not Status.SUCCESS
+
+
+def test_custom_tool_bundle_runs_via_cli() -> None:
+    # The bundle example (examples/agents/custom-tool): a directory with agent.yaml
+    # + a tools/ package. Running the DIR loads its own tool (placed at a tier by
+    # import-ref) and the scripted agent succeeds — offline, no key.
+    import sys
+
+    from typer.testing import CliRunner
+
+    from zu_cli.main import app
+
+    # A bundle's generic `tools` package is cached in sys.modules; drop any stale
+    # one so this bundle's tools/ resolves (normal usage is one bundle per process).
+    for m in [k for k in sys.modules if k == "tools" or k.startswith("tools.")]:
+        del sys.modules[m]
+    bundle = _AGENTS_DIR / "custom-tool"
+    try:
+        result = CliRunner().invoke(app, ["run", str(bundle)])
+        assert result.exit_code == 0, result.output
+        assert "status : success" in result.output
+        assert "greeting" in result.output
+    finally:
+        for m in [k for k in sys.modules if k == "tools" or k.startswith("tools.")]:
+            del sys.modules[m]
 
 
 def test_research_pipeline_example_runs_offline() -> None:

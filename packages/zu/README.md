@@ -46,9 +46,9 @@ variable (`api_key_env`), never passed in code or config.
 ## Run it from the command line, or as a service
 
 ```bash
-zu run task.yaml -c zu.yaml             # one-shot
-zu run task.yaml -c zu.yaml --every 5m  # scheduled worker
-zu serve -c zu.yaml                     # HTTP: POST /run  (needs the [serve] extra)
+zu run agent.yaml             # one-shot
+zu run agent.yaml --every 5m  # scheduled worker
+zu serve -c agent.yaml                     # HTTP: POST /run  (needs the [serve] extra)
 ```
 
 ## What it is
