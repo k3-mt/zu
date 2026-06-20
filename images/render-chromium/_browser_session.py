@@ -74,10 +74,44 @@ def _visible_text(page: Any) -> str:
     return "\n\n".join(parts)
 
 
+def _frame_for(page: Any, selector: str) -> Any:
+    """The frame an action should target: the first frame (main OR a child) that
+    actually contains ``selector``. Modern widgets render inside a cross-origin
+    iframe, and ``page.click`` only sees the TOP frame — so without this, a button
+    a user clicks (and that we can READ via every frame) can't be acted on. We
+    resolve across ``page.frames`` and return the one holding the element; falling
+    back to the main frame, whose action then raises a clear 'not found' error.
+    Generic — it asks each frame whether it has the selector, nothing site-specific."""
+    fallback = None
+    for frame in getattr(page, "frames", []):
+        try:
+            loc = frame.locator(selector)
+            if loc.filter(visible=True).count() > 0:   # prefer the frame with a VISIBLE match
+                return frame
+            if fallback is None and loc.count() > 0:
+                fallback = frame
+        except Exception:  # noqa: BLE001 - a frame that can't be queried just isn't the target
+            continue
+    if fallback is not None:
+        return fallback
+    frames = getattr(page, "frames", None)
+    return frames[0] if frames else page
+
+
+def _target(frame: Any, selector: str) -> Any:
+    """The first VISIBLE match of ``selector`` in ``frame``. Visibility matters:
+    consent banners and responsive UIs render hidden duplicates (a mobile + a
+    desktop copy), and acting on the first DOM match clicks a hidden one ('exists
+    but not visible'); the first visible one is what a user would actually click."""
+    return frame.locator(selector).filter(visible=True).first
+
+
 def _run_actions(page: Any, actions: list) -> str | None:
     """Apply read-surfacing actions in order; return an error string on the first
     failure (DOM so far is kept), else None. Each Playwright op auto-waits for the
-    target to be actionable — event-driven, not a fixed sleep.
+    target to be actionable — event-driven, not a fixed sleep. Actions are
+    FRAME-AWARE: the selector is resolved into whichever frame (main or an embedded
+    iframe) actually holds it, so a widget inside a cross-origin frame is driveable.
 
     Supported: ``click``/``fill``/``select`` (a CSS or ``text=`` selector;
     ``fill``/``select`` also take ``value``), ``wait_for`` (selector), ``wait_ms``."""
@@ -85,14 +119,20 @@ def _run_actions(page: Any, actions: list) -> str | None:
         if not isinstance(raw, dict):
             return f"bad action (not an object): {raw!r}"
         try:
+            # ``.first`` makes a selector FORGIVING: a text selector the model
+            # picked from what it saw often matches more than one node (a nav link
+            # AND the control), which would be a strict-mode error; acting on the
+            # first match keeps the model moving instead of thrashing on selectors.
             if "click" in raw:
-                page.click(raw["click"], timeout=_ACTION_TIMEOUT_MS)
+                _target(_frame_for(page, raw["click"]), raw["click"]).click(timeout=_ACTION_TIMEOUT_MS)
             elif "fill" in raw:
-                page.fill(raw["fill"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
+                sel = raw["fill"]
+                _target(_frame_for(page, sel), sel).fill(str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
             elif "select" in raw:
-                page.select_option(raw["select"], str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
+                sel = raw["select"]
+                _target(_frame_for(page, sel), sel).select_option(str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
             elif "wait_for" in raw:
-                page.wait_for_selector(raw["wait_for"], timeout=_ACTION_TIMEOUT_MS)
+                _frame_for(page, raw["wait_for"]).wait_for_selector(raw["wait_for"], timeout=_ACTION_TIMEOUT_MS)
             elif "wait_ms" in raw:
                 page.wait_for_timeout(min(int(raw["wait_ms"]), _ACTION_TIMEOUT_MS))
             else:

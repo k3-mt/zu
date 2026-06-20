@@ -892,3 +892,68 @@ def test_bounded_history_stops_once_under_budget() -> None:
     total = sum(len(m["content"]) for m in out)
     assert total <= 70_000
     assert out[-1]["content"] == "x" * 30_000   # the most recent is never elided
+
+
+async def test_mid_turn_halt_leaves_a_balanced_message_history() -> None:
+    # A detector that halts AFTER the first of two tool calls must not leave the
+    # second call without a result — the resent history would be malformed for the
+    # provider adapters (assistant tool_call with no matching tool result). The
+    # loop appends a stub result for the skipped call so pairing holds.
+    from zu_core.ports import Capabilities
+    from zu_providers._messages import to_openai_messages
+
+    class _T:
+        name = "t"
+        tier = 1
+        schema = {"name": "t", "parameters": {"type": "object", "properties": {}}}
+        prompt_fragment = "t()"
+        capabilities: frozenset[str] = frozenset()
+        egress: frozenset[str] = frozenset()
+
+        async def __call__(self, ctx) -> dict:
+            return {"html": "<p>x</p>"}
+
+    class _T2(_T):
+        name = "t2"
+        tier = 2
+
+    class _EscalateOnce:
+        name = "esc"
+        scope = Scope.PER_OBSERVATION
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def inspect(self, ctx):
+            self.n += 1
+            return Verdict(severity=Severity.ESCALATE, detector="esc", detail="x") if self.n == 1 else None
+
+    class _TwoThenFinalize:
+        capabilities = Capabilities()
+        model = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last: list | None = None
+
+        async def complete(self, req):
+            self.calls += 1
+            if self.calls == 1:  # two tool calls in ONE turn
+                return ModelResponse(text="plan", tool_calls=[ToolCall(name="t", args={}), ToolCall(name="t", args={})],
+                                     finish=Finish.STOP, usage={})
+            self.last = list(req.messages)
+            return ModelResponse(text='{"ok": true}', tool_calls=[], finish=Finish.STOP, usage={})
+
+    reg = Registry()
+    reg.register("tools", "t", _T())
+    reg.register("tools", "t2", _T2())
+    reg.register("detectors", "esc", _EscalateOnce())
+    prov = _TwoThenFinalize()
+    result = await run_task(TaskSpec(query="q", max_tier=2), prov, reg, EventBus())
+
+    assert result.status == Status.SUCCESS                 # the run completed cleanly
+    assert prov.last is not None
+    to_openai_messages(prov.last)                          # raises if a tool_call lacks a result
+    asst = next(m for m in prov.last if m.get("role") == "assistant" and m.get("tool_calls"))
+    n_results = sum(1 for m in prov.last if m.get("role") == "tool")
+    assert len(asst["tool_calls"]) == 2 and n_results == 2  # 1 real + 1 stub result

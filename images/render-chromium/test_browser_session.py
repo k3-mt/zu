@@ -21,31 +21,91 @@ import _browser_session as bs  # noqa: E402
 # --- fakes -------------------------------------------------------------------
 
 
+class _Loc:
+    """A fake Playwright locator: count() for frame resolution; .first.click/etc
+    route the action back to the owning frame/page (matches loc.first.click())."""
+
+    def __init__(self, owner, sel: str, n: int) -> None:
+        self._owner = owner
+        self._sel = sel
+        self._n = n
+
+    def count(self) -> int:
+        return self._n
+
+    def filter(self, **_kw):
+        return self          # the fake doesn't model visibility (a Playwright behavior)
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, timeout=None):
+        self._owner._act("click", self._sel)
+
+    def fill(self, value, timeout=None):
+        self._owner._act("fill", self._sel, value)
+
+    def select_option(self, value, timeout=None):
+        self._owner._act("select", self._sel, value)
+
+
 class _FakeFrame:
-    def __init__(self, text: str) -> None:
+    """A frame that 'contains' a fixed set of selectors. Actions raise if the
+    selector isn't present here — so _frame_for must route to the frame that has
+    it (the iframe-piercing behavior)."""
+
+    def __init__(self, text: str = "", present=None) -> None:
         self._text = text
+        self.present = present  # None => every selector present
+        self.calls: list[tuple] = []
+
+    def _has(self, sel) -> bool:
+        return self.present is None or sel in self.present
 
     def inner_text(self, _sel: str) -> str:
         return self._text
 
+    def locator(self, sel):
+        return _Loc(self, sel, 1 if self._has(sel) else 0)
+
+    def _act(self, kind, sel, *extra):
+        self.calls.append((kind, sel, *extra))
+        if not self._has(sel):
+            raise RuntimeError(f"no element {sel!r} in this frame")
+
+    def wait_for_selector(self, sel, timeout=None):
+        self._act("wait_for", sel)
+
 
 class _FakePage:
-    def __init__(self, text: str = "hello", url: str = "https://x/") -> None:
+    """A page that is its own single main frame by default; pass ``frames`` for a
+    multi-frame (iframe) page. ``present`` limits which selectors the main frame
+    has (None => all)."""
+
+    def __init__(self, text: str = "hello", url: str = "https://x/",
+                 present=None, frames=None) -> None:
         self.url = url
         self._text = text
         self.calls: list[tuple] = []
         self.handlers: dict[str, object] = {}
         self.fail_on: str | None = None
+        self.present = present
+        self._frames = frames
 
-    # observe()
     @property
     def frames(self):
-        return [_FakeFrame(self._text)]
+        return self._frames if self._frames is not None else [self]
+
+    def locator(self, sel):
+        return _Loc(self, sel, 1 if (self.present is None or sel in self.present) else 0)
+
+    def inner_text(self, _sel: str) -> str:
+        return self._text
 
     def content(self) -> str:
         return f"<html>{self._text}</html>"
 
-    # navigation / events
     def goto(self, url, wait_until=None, timeout=None):
         self.url = url
         self.calls.append(("goto", url, wait_until))
@@ -54,26 +114,16 @@ class _FakePage:
     def on(self, event, handler):
         self.handlers[event] = handler
 
-    # actions
     def _maybe_fail(self, sel):
         if self.fail_on is not None and sel == self.fail_on:
             raise RuntimeError("not found")
 
-    def click(self, sel, timeout=None):
-        self.calls.append(("click", sel))
-        self._maybe_fail(sel)
-
-    def fill(self, sel, value, timeout=None):
-        self.calls.append(("fill", sel, value))
-        self._maybe_fail(sel)
-
-    def select_option(self, sel, value, timeout=None):
-        self.calls.append(("select", sel, value))
+    def _act(self, kind, sel, *extra):
+        self.calls.append((kind, sel, *extra))
         self._maybe_fail(sel)
 
     def wait_for_selector(self, sel, timeout=None):
-        self.calls.append(("wait_for", sel))
-        self._maybe_fail(sel)
+        self._act("wait_for", sel)
 
     def wait_for_timeout(self, ms):
         self.calls.append(("wait_ms", ms))
@@ -116,6 +166,17 @@ def test_run_actions_fire_in_order_and_report_failure() -> None:
     err = bs._run_actions(page, [{"click": "text=X"}, {"click": "text=Y"}])
     assert err is not None and "text=X" in err
     assert ("click", "text=Y") not in page.calls
+
+
+def test_run_actions_pierces_into_a_child_iframe() -> None:
+    # The widget's button lives in a cross-origin iframe, not the top frame. The
+    # action must be routed into the frame that actually has the selector.
+    main = _FakeFrame(text="page chrome", present=set())           # no Next here
+    child = _FakeFrame(text="Step 1 of 4 Next", present={"text=Next"})  # the widget iframe
+    page = _FakePage(frames=[main, child])
+    assert bs._run_actions(page, [{"click": "text=Next"}]) is None
+    assert ("click", "text=Next") in child.calls                  # clicked INSIDE the iframe
+    assert ("click", "text=Next") not in main.calls               # not the top frame
 
 
 def test_run_actions_capped() -> None:

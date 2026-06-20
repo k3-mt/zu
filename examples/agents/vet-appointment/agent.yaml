@@ -51,8 +51,9 @@ observation_strategy: truncate   # cheap per-read; the model uses `recall` to pu
 # Driving the booking widget takes many browser steps; bound the TOTAL running
 # conversation (not just each step) so a long multi-step session never overflows
 # the model's context window — old tool observations are elided (recall reaches
-# them), recent ones kept.
-max_context_chars: 120000
+# them), recent ones kept. Kept lean (~9k tokens/call) so all 40 steps fit inside
+# the token budget; recall pulls back anything elided.
+max_context_chars: 35000
 
 # audit: runs on a bare host (web_search's egress is scoped to api.exa.ai; the
 # fetch tools carry their own SSRF guard). Run it --sandboxed to enforce the
@@ -71,8 +72,12 @@ task:
     consultation appointment type, then Next) until the calendar of times appears;
     open it with capture_network so the availability data is captured. Read the
     page after each step and react — if action_error comes back, the selector
-    missed, so look at the returned text and try another. Report ONLY slots and a
-    booking_url that actually appear in what you retrieved — never guess a time.
+    missed, so look at the returned text and try another. If a cookie/consent
+    dialog appears and blocks interaction, dismiss it FIRST (click its
+    accept/agree/got-it button) before continuing. Stay in ONE browser session —
+    do NOT close and reopen it (reopening resets cookies and wastes steps); keep
+    acting/reading in the same session until you reach the times. Report ONLY slots
+    and a booking_url that actually appear in what you retrieved — never guess a time.
   max_tier: 2
   output_schema:
     type: object

@@ -597,6 +597,7 @@ async def run_task(
                 assistant_msg["content"] = resp.text
             messages.append(assistant_msg)
             halting: Verdict | None = None
+            dispatched = 0
             for call in resp.tool_calls:
                 # Bound each tool call by the run's remaining wall-time, so a hung
                 # tool cannot overrun the deadline the way a hung provider can't.
@@ -612,9 +613,21 @@ async def run_task(
                     {"role": "tool", "name": call.name,
                      "content": json.dumps(model_obs, default=str)}
                 )
+                dispatched += 1
                 halting = await _detector_checkpoint(run, turn, detectors, obs, {Scope.PER_OBSERVATION})
                 if halting is not None:
                     break  # stop dispatching this turn's remaining calls; act on it
+            # A detector that halted mid-turn left the rest of THIS turn's tool
+            # calls un-dispatched. Each still needs a tool-result message, or the
+            # resent history has an assistant tool_call with no matching result —
+            # malformed for the provider adapters (the loop continues on ESCALATE).
+            for skipped in resp.tool_calls[dispatched:]:
+                messages.append(
+                    {"role": "tool", "name": skipped.name,
+                     "content": json.dumps(
+                         {"skipped": f"not run: {halting.detector} ({halting.severity.value})"}
+                         if halting else {"skipped": "not run"})}
+                )
             if halting is None:
                 halting = await _detector_checkpoint(run, turn, detectors, None, {Scope.PER_TURN})
             if halting is not None:
