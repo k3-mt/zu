@@ -159,6 +159,22 @@ async def test_containment_audit_is_the_permissive_default() -> None:
     assert result.status == Status.SUCCESS
 
 
+async def test_run_task_uses_an_explicit_trace_id() -> None:
+    # A pipeline passes a shared trace_id so phases fold into one lineage; the
+    # per-phase task_id stays distinct (and queryable on its own).
+    from uuid import uuid4
+    trace = uuid4()
+    provider = ScriptedProvider.from_moves([{"text": "{}", "finish": "stop"}])
+    bus = EventBus()
+    spec = TaskSpec(query="q")
+    await run_task(spec, provider, Registry(), bus, trace_id=trace)
+    events = await bus.query()
+    assert events
+    assert all(e.trace_id == trace for e in events)        # correlated under the pipeline id
+    assert all(e.task_id == spec.task_id for e in events)   # task_id distinct from trace
+    assert spec.task_id != trace
+
+
 async def test_hung_tool_is_bounded_by_wall_time() -> None:
     # Tools are the untrusted surface: one hung on a dead socket must not block
     # the run forever. The tool call is bounded by the run's remaining wall-time,

@@ -35,7 +35,7 @@ trusts), decrypts the target's HTTPS, and records the URL/body.
 docker build -t zu-redteam:live .
 
 # 2. run the live enforcement proofs
-examples/redteam_live/live_gate.sh zu-redteam:live
+validation/redteam/live_gate.sh zu-redteam:live
 
 # or as an opt-in test (skipped unless the flag is set)
 ZU_REDTEAM_LIVE_DOCKER=1 pytest packages/zu-redteam/tests/test_live_docker.py

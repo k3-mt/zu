@@ -61,6 +61,17 @@ DEFENSE_BLOCKED = "harness.defense.blocked"
 EGRESS_OBSERVED = "harness.egress.observed"
 HOST_EFFECT_OBSERVED = "harness.host_effect.observed"
 
+# --- harness.pipeline.* — multi-phase orchestration (zu.Pipeline) ------------
+# A pipeline chains runs under ONE shared trace_id; these record its boundaries
+# so the whole multi-phase run is itself lossless and replayable. ``phase.skipped``
+# is the resume signal — a phase already complete on the log is not re-executed.
+PIPELINE_STARTED = "harness.pipeline.started"
+PIPELINE_PHASE_STARTED = "harness.pipeline.phase.started"
+PIPELINE_PHASE_COMPLETED = "harness.pipeline.phase.completed"
+PIPELINE_PHASE_SKIPPED = "harness.pipeline.phase.skipped"
+PIPELINE_COMPLETED = "harness.pipeline.completed"
+PIPELINE_FAILED = "harness.pipeline.failed"
+
 # --- data.* — what the agent read and produced -------------------------------
 SOURCE_FETCHED = "data.source.fetched"
 RECORD_EXTRACTED = "data.record.extracted"
@@ -81,6 +92,12 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         DEFENSE_BLOCKED,
         EGRESS_OBSERVED,
         HOST_EFFECT_OBSERVED,
+        PIPELINE_STARTED,
+        PIPELINE_PHASE_STARTED,
+        PIPELINE_PHASE_COMPLETED,
+        PIPELINE_PHASE_SKIPPED,
+        PIPELINE_COMPLETED,
+        PIPELINE_FAILED,
     }
 )
 DATA_TYPES: frozenset[str] = frozenset({SOURCE_FETCHED, RECORD_EXTRACTED})

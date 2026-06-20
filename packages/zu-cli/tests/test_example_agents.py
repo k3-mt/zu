@@ -9,12 +9,14 @@
   task + schema + grounding contract holds with no key and no network.
 
 This is the unit/integration lane for shipped agents; the docker lane
-(examples/containment) runs one inside the container.
+(validation/containment) runs one inside the container.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -97,3 +99,13 @@ async def test_fabricated_value_is_refused(agent_runner, name, fixture, answer) 
         spec=spec,
     )
     assert result.status is not Status.SUCCESS
+
+
+def test_research_pipeline_example_runs_offline() -> None:
+    # The multi-phase example (examples/agents/research-pipeline) runs end to end
+    # with the scripted model — gated transitions, one replayable trace, no key.
+    script = _AGENTS_DIR / "research-pipeline" / "pipeline.py"
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "status : success" in proc.stdout
+    assert "one replayable log" in proc.stdout      # the whole pipeline is one trace

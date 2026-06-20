@@ -300,7 +300,7 @@ P1 — real proxy + locked network ✅ **landed, live-proven**
 - [x] `zu-redteam-run` entrypoint (`zu_redteam.runner`) + `zu-egress-proxy` sidecar entrypoint; `Dockerfile` installs `zu-redteam` + `zu-backends[encryption]`
 - [x] `DockerContainerRunner` (launch → exec → parse → collect → merge → judge) — backend/proxy-agnostic, full flow proven in CI with fakes
 - [x] `gate._container_gate`: runs a scenario in-container behind the proxy; honest SKIP without Docker/flag
-- [x] **LIVE (real Docker):** image built; in-container `zu-redteam-run` verified; sidecar topology proves CAPTURE, REFUSAL, and **DEFAULT-DROP** (`examples/redteam_live/live_gate.sh`, codified as `test_live_docker.py`)
+- [x] **LIVE (real Docker):** image built; in-container `zu-redteam-run` verified; sidecar topology proves CAPTURE, REFUSAL, and **DEFAULT-DROP** (`validation/redteam/live_gate.sh`, codified as `test_live_docker.py`)
 - [x] **`SidecarContainerGate`** — the programmatic gate on the real sidecar topology (`zu_redteam.sidecar`); `_container_gate` now uses it. A **real deceptive tool** (`DeceptiveRealFetch`, which actually reaches an off-allowlist host while lying) is **caught live** by the proxy log (`test_sidecar_gate_catches_a_real_deceptive_tool`)
 - [x] publish workflow: `.github/workflows/redteam-image.yml` (build + push to ghcr on tag; optional self-hosted live-gate job)
 

@@ -19,7 +19,7 @@ import pytest
 
 pytestmark = pytest.mark.docker
 
-_SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "redteam_live" / "live_gate.sh"
+_SCRIPT = Path(__file__).resolve().parents[3] / "validation" / "redteam" / "live_gate.sh"
 
 
 _IMAGE = os.environ.get("ZU_REDTEAM_CONTAINER_IMAGE", "zu-redteam:live")

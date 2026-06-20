@@ -1,35 +1,49 @@
 # Examples
 
-Runnable demos.
+Runnable, copy-paste examples — purely examples. (The end-to-end *proof suites*
+that build images and assert containment live in [`../validation/`](../validation/),
+not here.)
 
-## The killer demo
+## Agent examples — [`agents/`](agents/)
 
-[`killer_demo.py`](killer_demo.py) — the whole arc in one run: an agent extracts
-structured product data from a JS-heavy page that defeats a naive scraper. Watch
-it fetch the page, **fail on JavaScript**, **escalate to a browser** (a decision
-the harness makes via a detector, never the model), return the product, and have
-that answer **validated against what the run actually fetched** — with the entire
-run queryable afterward as an event log. One arc, all three pillars.
+Real agents you can run with one command; each ships a fixture so the test suite
+proves it works offline (no key, no network).
 
-```bash
-uv run python examples/killer_demo.py          # zero setup: fake model, fixtures
-```
-
-No API key, no network, no Docker — fully deterministic. Point it at a **real
-model** to watch a live model make the same escalation decision (still no Docker;
-the page is fixtured, so all you need is one key):
+| Agent | Does | Shape |
+|---|---|---|
+| [`agents/price-extractor`](agents/price-extractor/) | fetch a product page → name + price, grounded | single run, tier 1 |
+| [`agents/article-summary`](agents/article-summary/) | fetch an article → title + section headings (array), grounded | single run, tier 1 |
+| [`agents/research-pipeline`](agents/research-pipeline/) | `extract → summarize` chained as one event-sourced run | **multi-phase** (`zu.Pipeline`) |
 
 ```bash
-export ANTHROPIC_API_KEY=...
-uv run python examples/killer_demo.py --provider anthropic --model claude-sonnet-4-6
+cd agents/price-extractor && zu run task.yaml -c zu.yaml      # real model (needs a key)
+python agents/research-pipeline/pipeline.py                   # multi-phase, offline, no key
 ```
 
-## Also here
+See [`../docs/BUILD_AN_AGENT.md`](../docs/BUILD_AN_AGENT.md) for the full guide
+(designing escalation, per-tier models, testing, red-teaming, deploy).
 
-- [`zu.example.yaml`](zu.example.yaml) — a sample run config (the any-model
-  seam: one `provider` block is the whole model swap). Wired by `zu run` —
-  copy it to `zu.yaml`, fill a key, and `zu run task.yaml`.
-- [`task.example.yaml`](task.example.yaml) — a sample task spec.
-- [`scripted_demo.py`](scripted_demo.py) — a tiny, fully-offline tour of plugin
-  discovery and the interpreter loop driving a fake model to a validated Result.
-  Run it with `uv run python examples/scripted_demo.py`.
+## Demos
+
+- [`killer_demo.py`](killer_demo.py) — the whole arc in one run: fetch → **fail on
+  JavaScript → escalate to a browser** → return a **validated** result, then print
+  the queryable event log. Zero setup (fake model, fixtures); add
+  `--provider anthropic --model …` (with a key) to watch a real model decide.
+- [`scripted_demo.py`](scripted_demo.py) — a tiny offline tour of plugin discovery
+  and the interpreter loop driving a fake model to a validated Result.
+
+```bash
+python killer_demo.py            # no key, no network, no Docker
+```
+
+## Starter configs
+
+- [`task.example.yaml`](task.example.yaml) — a sample task (what you want).
+- [`zu.example.yaml`](zu.example.yaml) — a sample run config (the one-line model
+  swap). Copy to `zu.yaml`, set a key, `zu run task.yaml`. Or scaffold a pair
+  with `zu init`.
+
+## Integrations — [`integrations/`](integrations/)
+
+Sample configs to drive Zu from a coding agent over MCP (Claude Code, Cursor,
+Codex). Copy the one for your client; see QUICKSTART §9.

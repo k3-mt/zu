@@ -16,7 +16,7 @@
 #       ├── target            ── HTTP_PROXY ──▶ proxy ──────────┘
 #       └── proxy sidecar  ◀──────────────────────┘ (only the proxy bridges out)
 #
-# Usage:  examples/redteam_live/live_gate.sh [IMAGE]
+# Usage:  validation/redteam/live_gate.sh [IMAGE]
 #         IMAGE defaults to zu-redteam:live  (build: docker build -t zu-redteam:live .)
 set -uo pipefail
 

@@ -237,7 +237,7 @@ unguarded); the launcher establishes the boundary and the full in-container even
 log still surfaces back to you. Prove the boundary holds end to end:
 
 ```bash
-cd examples/containment && ./run_all.sh   # build · floor · agent-in-box · egress · proxy
+cd validation/containment && ./run_all.sh   # build · floor · agent-in-box · egress · proxy
 ```
 
 Background: [`RED_TEAM.md`](RED_TEAM.md) · [`RED_TEAM_CONTAINER.md`](RED_TEAM_CONTAINER.md)
@@ -281,6 +281,41 @@ zu run task.yaml -c zu.yaml --every 5m       # built-in interval worker
 
 Watch live at `http://localhost:8000/` (the dashboard) — train of thought, tools,
 escalations, and a **Defenses** panel of any contained attack.
+
+## Multi-phase agents — chaining runs robustly
+
+One run produces one *validated, replayable* Result. A multi-phase agent — extract,
+then summarize, then decide — is a **sequence of runs**, and the robust way to
+chain them is `zu.Pipeline`, which lifts a single run's guarantees to the whole
+sequence: every phase shares one `trace_id` and one event log, a phase advances
+only on the previous one's validated success, and a re-run **resumes from the log**
+instead of repeating finished work.
+
+```python
+import zu
+
+pipe = zu.Pipeline(config="zu.yaml")                 # one trace, one shared log
+pipe.phase("extract",   {"query": "Extract the topic and one key point.",
+                         "output_schema": {...}})
+pipe.phase("summarize", lambda prev: {               # consumes phase 1's value
+    "query": f"Summarise: {prev.value}", "output_schema": {...}})
+
+result = pipe.run()           # PipelineResult: status, value, phases, events, id
+```
+
+- **Gate** — `summarize` runs only if `extract` finished `SUCCESS` (the validators
+  decide "satisfied"); on failure the pipeline stops with the log intact.
+- **One lineage** — `result.events` is the whole pipeline under `result.id`, so it
+  replays as a unit; each phase is still queryable on its own `task_id`.
+- **Resume** — give the config a durable `event_sink` and a stable `pipeline_id`;
+  re-running skips phases already on the log and reuses their values.
+
+Pipelines are *code* (not a `task.yaml`) on purpose — each phase stays
+independently validated, budgeted, and auditable, so you get staging without
+giving up provenance. Runnable example:
+[`examples/agents/research-pipeline`](../examples/agents/research-pipeline)
+(`python pipeline.py` — offline, no key). For *model-driven* branching (the model
+chooses the next phase), make each phase a **tool** it calls inside one run.
 
 ---
 

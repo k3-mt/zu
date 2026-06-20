@@ -52,4 +52,4 @@ jobs:
       - name: Tier 3 — containment proof suite
         env:
           ZU_IMAGE: zu:ci
-        run: bash examples/containment/run_all.sh --no-build
+        run: bash validation/containment/run_all.sh --no-build

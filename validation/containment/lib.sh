@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the containment validation suite (examples/containment/).
+# Shared helpers for the containment validation suite (validation/containment/).
 #
 # Every script sources this. It fixes the knobs so each run is identical and
 # self-cleaning: the image under test, the host Python that drives the launcher,
@@ -11,7 +11,7 @@
 #   ZU_PYTHON   host python that imports zu  [default: <repo>/.venv/bin/python]
 set -euo pipefail
 
-# Repo root = two levels up from this file (examples/containment/lib.sh).
+# Repo root = two levels up from this file (validation/containment/lib.sh).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Exported so the inline Python drivers (heredocs in 02/03) see the same image.

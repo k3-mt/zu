@@ -19,6 +19,6 @@ How they're tested (the test tiers):
 - **unit lane** — `tests/test_example_agents.py` runs each agent offline against
   its fixture (the real `http_fetch`/`html_parse` + `schema`/`grounding`, a
   scripted model) and asserts the shipped `task.yaml`/`zu.yaml` parse and resolve.
-- **docker lane** — `examples/containment/` runs the whole agent **inside the
+- **docker lane** — `validation/containment/` runs the whole agent **inside the
   hardened container** behind the egress proxy, surfacing the in-container event
   log across the boundary.

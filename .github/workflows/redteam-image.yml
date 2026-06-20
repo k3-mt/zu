@@ -58,6 +58,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t zu-redteam:live .
-      - run: examples/redteam_live/live_gate.sh zu-redteam:live
+      - run: validation/redteam/live_gate.sh zu-redteam:live
       - uses: astral-sh/setup-uv@v4
       - run: ZU_REDTEAM_LIVE_DOCKER=1 uv run pytest packages/zu-redteam/tests/test_live_docker.py

@@ -7,7 +7,7 @@ They turn the ad-hoc Docker validation into a fixed, re-runnable battery.
 ## Run it
 
 ```bash
-cd examples/containment
+cd validation/containment
 ./run_all.sh                 # build the image, then run every proof, print a summary
 ./run_all.sh --no-build      # reuse an existing image (skip the build)
 ZU_IMAGE=zu:ci ./run_all.sh  # validate a different image tag
@@ -31,7 +31,7 @@ Or run any proof on its own:
 | `01_floor_failclosed.sh` | host (no Docker) | `containment: required` **refuses** a tool with off-box reach on a bare host; `audit` runs it; inside the sandbox (`ZU_SANDBOXED=1`) `required` permits it. |
 | `02_agent_in_container.sh` | launcher | The whole agent runs inside the hardened container and returns its Result + event log. The config carries a capability tool a bare host would refuse — its success here means it genuinely ran contained. |
 | `03_egress_allowlist.sh` | egress (core) | A contained agent fetching an **allowlisted** host gets HTTP 200; a **disallowed** host is refused by the proxy (403) and recorded as a `harness.defense.blocked` event. |
-| `04_proxy_enforcement.sh` | boundary | The raw proxy proofs (delegates to `../redteam_live/live_gate.sh`): capture, refusal, default-DROP, and MITM HTTPS body capture. |
+| `04_proxy_enforcement.sh` | boundary | The raw proxy proofs (delegates to `../redteam/live_gate.sh`): capture, refusal, default-DROP, and MITM HTTPS body capture. |
 
 ## Prerequisites
 

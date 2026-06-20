@@ -53,6 +53,8 @@ from zu_core.registry import (
     validator,
 )
 
+from .pipeline import Pipeline, PipelineResult
+
 __version__ = "0.1.0"
 
 # In-process plugin registration decorators, re-exported from the core registry
@@ -62,6 +64,8 @@ __version__ = "0.1.0"
 # registered plugin is visible to ``zu.run`` and ``zu plugins`` alike.
 __all__ = [
     "Zu",
+    "Pipeline",
+    "PipelineResult",
     "run",
     "arun",
     "run_with_events",

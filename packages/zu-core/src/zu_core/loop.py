@@ -256,10 +256,14 @@ class _Ladder:
 class _Run:
     """Per-run state: one trace id, the growing event list, and the emitter."""
 
-    def __init__(self, spec: TaskSpec, bus: EventBus) -> None:
+    def __init__(self, spec: TaskSpec, bus: EventBus, trace_id: UUID | None = None) -> None:
         self.spec = spec
         self.bus = bus
-        self.trace_id = spec.task_id  # one trace per task in the v1 runtime
+        # ``trace_id`` correlates a run's events. It defaults to the task id (one
+        # trace per task), but a multi-phase pipeline passes a shared id so every
+        # phase's events fold into one replayable lineage (see zu.Pipeline). The
+        # per-phase ``task_id`` stays distinct, so a phase is still queryable alone.
+        self.trace_id = trace_id if trace_id is not None else spec.task_id
         self.task_id = spec.task_id
         # One RunContext reused for the whole run: ``observation`` is updated
         # per checkpoint — so a checkpoint is O(1), not an O(n) copy of the log.
@@ -316,6 +320,7 @@ async def run_task(
     *,
     providers: Mapping[int, ModelProvider] | None = None,
     containment: str = "audit",
+    trace_id: UUID | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -344,7 +349,7 @@ async def run_task(
     by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
-    run = _Run(spec, bus)
+    run = _Run(spec, bus, trace_id=trace_id)
     budget = spec.budget
 
     tools = {name: _materialize(registry.get("tools", name)) for name in registry.names("tools")}
