@@ -150,6 +150,14 @@ class RunConfig(BaseModel):
     # how a run emits to local files or cloud storage for observability.
     trace_sinks: list[EventSinkConfig] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
+    # Optional cap (chars per content field) on how much of a tool observation the
+    # MODEL sees — OFF by default (the model gets the full page). Set it when an
+    # agent fetches big pages on a small-context model: a tier-2 rendered DOM can
+    # be hundreds of KB and a few pages overflow the context window. The full
+    # content always stays on the event log (grounding reads that), so the cap is
+    # a context-fit measure, not a provenance loss. A large-context model leaves
+    # it unset and keeps everything.
+    max_observation_chars: int | None = None
     # The agent's task, embedded so a single ``agent.yaml`` is the whole agent
     # (what + how in one file). The task block — query, target, output_schema,
     # max_tier — is split out into a TaskSpec by ``load_agent``. Optional: a config

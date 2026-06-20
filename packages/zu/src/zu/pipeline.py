@@ -67,6 +67,7 @@ class Pipeline:
             return await run_pipeline(
                 phases, provider, registry, bus,
                 providers=providers, containment=cfg.containment, pipeline_id=self._id,
+                max_observation_chars=cfg.max_observation_chars,
             )
         finally:
             # ``assemble`` built the bus + its sink(s); release them after the run.

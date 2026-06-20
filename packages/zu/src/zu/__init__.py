@@ -118,6 +118,7 @@ class Zu:
             result = await run_task(
                 spec, provider, registry, bus,
                 providers=providers, containment=self.config.containment,
+                max_observation_chars=self.config.max_observation_chars,
             )
             events = await bus.query()
             return result, events
@@ -166,6 +167,7 @@ async def _arun_agent(source: Any) -> tuple[Result, list[Event]]:
         result = await run_task(
             spec, provider, registry, bus,
             providers=providers, containment=cfg.containment,
+            max_observation_chars=cfg.max_observation_chars,
         )
         return result, await bus.query()
     finally:

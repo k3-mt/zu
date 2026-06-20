@@ -59,6 +59,7 @@ async def run_pipeline(
     providers: Mapping[int, ModelProvider] | None = None,
     containment: str = "audit",
     pipeline_id: UUID | None = None,
+    max_observation_chars: int | None = None,
 ) -> PipelineResult:
     """Drive ``phases`` to a ``PipelineResult`` under one shared trace.
 
@@ -91,6 +92,7 @@ async def run_pipeline(
         result = await run_task(
             spec, provider, registry, bus,
             providers=providers, containment=containment, trace_id=trace,
+            max_observation_chars=max_observation_chars,
         )
         results[phase.name] = result
         await _emit(bus, trace, ev.PIPELINE_PHASE_COMPLETED,

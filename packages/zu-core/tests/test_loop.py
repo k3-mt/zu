@@ -16,7 +16,7 @@ import pytest
 
 from zu_core.bus import EventBus
 from zu_core.contracts import Budget, Status, TaskSpec
-from zu_core.loop import run_task
+from zu_core.loop import _observation_for_model, run_task
 from zu_core.ports import Finish, ModelResponse, Scope, Severity, ToolCall, Verdict
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
@@ -750,3 +750,26 @@ async def test_escalation_exhausted_when_no_higher_tier() -> None:
     escalated = next(e for e in await bus.query() if e.type == "harness.task.escalated")
     assert escalated.payload["exhausted"] is True
     assert backend.launched == []  # never climbed, so tier 2 was never leased
+
+
+# --- opt-in cap on what the model sees of a big observation -------------------
+
+
+def test_observation_for_model_off_by_default() -> None:
+    # max_chars=None (the default) leaves the observation untouched — a large-
+    # context model keeps the full page.
+    big = {"html": "x" * 500_000, "status": 200}
+    assert _observation_for_model(big, None) is big
+
+
+def test_observation_for_model_caps_only_content_fields_when_set() -> None:
+    big = {"html": "x" * 500_000, "url": "https://e/", "status": 200}
+    out = _observation_for_model(big, 1000)
+    assert len(out["html"]) < 2000 and "truncated" in out["html"]  # content capped + marker
+    assert out["url"] == "https://e/" and out["status"] == 200      # non-content untouched
+    assert big["html"] == "x" * 500_000                            # original not mutated
+
+
+def test_observation_for_model_leaves_small_content_alone() -> None:
+    obs = {"html": "<p>small</p>", "status": 200}
+    assert _observation_for_model(obs, 1000) == obs

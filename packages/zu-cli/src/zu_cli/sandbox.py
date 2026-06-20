@@ -75,6 +75,7 @@ async def _run_in_process(task: dict, config: dict) -> tuple[Result, list]:
         result = await run_task(
             spec, provider, registry, bus,
             providers=providers, containment=cfg.containment,
+            max_observation_chars=cfg.max_observation_chars,
         )
         return result, await bus.query()
     finally:

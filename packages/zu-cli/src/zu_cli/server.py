@@ -180,7 +180,9 @@ def create_app(
         bus.subscribe(_tee)  # feed the dashboard + review queue
 
         try:
-            result = await run_task(spec, provider, registry, bus, providers=providers, containment=default_cfg.containment)
+            result = await run_task(spec, provider, registry, bus, providers=providers,
+                                    containment=default_cfg.containment,
+                                    max_observation_chars=default_cfg.max_observation_chars)
             body: dict = {"result": result.model_dump(mode="json")}
             if req.include_events:
                 events = await bus.query()
@@ -222,7 +224,9 @@ def create_app(
 
         async def runner() -> None:
             try:
-                result = await run_task(spec, provider, registry, bus, providers=providers, containment=default_cfg.containment)
+                result = await run_task(spec, provider, registry, bus, providers=providers,
+                                        containment=default_cfg.containment,
+                                        max_observation_chars=default_cfg.max_observation_chars)
                 await queue.put(("result", result))
             except asyncio.CancelledError:
                 raise

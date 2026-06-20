@@ -34,6 +34,12 @@ plugins:
 
 budget: { max_steps: 16, max_tokens: 150000, wall_time_s: 120 }
 
+# The booking page is JS-heavy; a tier-2 rendered DOM can be hundreds of KB. Cap
+# how much of each fetched/rendered page the MODEL sees so a few pages don't
+# overflow its context window — the full content still lands on the event log
+# (grounding reads that). Raise/remove it for a large-context model.
+max_observation_chars: 40000
+
 # audit: runs on a bare host (web_search's egress is scoped to api.exa.ai; the
 # fetch tools carry their own SSRF guard). Run it --sandboxed to enforce the
 # container boundary; because the page URL is discovered at run time, the fetch

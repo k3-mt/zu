@@ -149,6 +149,35 @@ def _summarize_observation(obs: dict) -> dict:
     return summary
 
 
+def _observation_for_model(obs: Any, max_chars: int | None) -> Any:
+    """Optionally cap large content fields of an observation before it enters the
+    model's message history.
+
+    OFF by default (``max_chars`` None) — the model sees the full observation, so
+    a large-context model keeps everything. It is an OPT-IN policy (config
+    ``max_observation_chars``) for agents that fetch big pages on a small-context
+    model: a fetched/rendered page (a tier-2 DOM can be hundreds of KB) is fed
+    back as the tool result, and a few such pages can overflow the context window.
+    When set, only the model-facing copy is capped — the FULL content stays on the
+    event log (``data.source.fetched``, which grounding reads), so the cap costs no
+    provenance; the model can re-fetch with html_parse / a narrower selector to
+    target what was dropped. Non-dict observations pass through unchanged."""
+    if max_chars is None or not isinstance(obs, dict):
+        return obs
+    capped = dict(obs)
+    for k in _CONTENT_KEYS:
+        v = capped.get(k)
+        if isinstance(v, str) and len(v) > max_chars:
+            dropped = len(v) - max_chars
+            capped[k] = (
+                v[:max_chars]
+                + f"\n…[truncated {dropped} of {len(v)} chars to fit the model context; "
+                "the full content is on the event log. Use html_parse or a narrower "
+                "selector/url to target what you need.]"
+            )
+    return capped
+
+
 def _worst(verdicts: list[Verdict]) -> Verdict | None:
     return max(verdicts, key=lambda v: _RANK[v.severity], default=None)
 
@@ -321,6 +350,7 @@ async def run_task(
     providers: Mapping[int, ModelProvider] | None = None,
     containment: str = "audit",
     trace_id: UUID | None = None,
+    max_observation_chars: int | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -467,7 +497,9 @@ async def run_task(
                     run, turn, active, call.name, call.args, timeout=tool_remaining
                 )
                 messages.append(
-                    {"role": "tool", "name": call.name, "content": json.dumps(obs, default=str)}
+                    {"role": "tool", "name": call.name,
+                     "content": json.dumps(
+                         _observation_for_model(obs, max_observation_chars), default=str)}
                 )
                 halting = await _detector_checkpoint(run, turn, detectors, obs, {Scope.PER_OBSERVATION})
                 if halting is not None:

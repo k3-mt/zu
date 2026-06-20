@@ -87,6 +87,7 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
             result = await run_task(
                 spec, provider, registry, bus,
                 providers=providers, containment=cfg.containment,
+                max_observation_chars=cfg.max_observation_chars,
             )
             return result, await bus.count()
         finally:
