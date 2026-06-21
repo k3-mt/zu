@@ -187,7 +187,8 @@ def test_custom_tool_bundle_runs_via_cli() -> None:
         del sys.modules[m]
     bundle = _AGENTS_DIR / "custom-tool"
     try:
-        result = CliRunner().invoke(app, ["run", str(bundle)])
+        # --no-track: don't write a learned track.json into the source tree.
+        result = CliRunner().invoke(app, ["run", str(bundle), "--no-track"])
         assert result.exit_code == 0, result.output
         assert "status : success" in result.output
         assert "greeting" in result.output

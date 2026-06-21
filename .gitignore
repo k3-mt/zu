@@ -23,6 +23,9 @@ zu.db
 zu.yaml.local
 zu_review.jsonl
 *.review.jsonl
+# A recorded replay path is learned per-run and machine-local — regenerated on
+# every successful run, not source. The agent ships; its track does not.
+track.json
 
 # Editor / OS
 .idea/

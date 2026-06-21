@@ -51,7 +51,7 @@ def _parse_duration(text: str) -> float:
     return seconds
 
 
-def _execute_once(agent: str, *, stream: bool = True) -> Result:
+def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) -> Result:
     """Load a single ``agent.yaml`` (or bundle dir) and drive its task to a Result,
     printing a summary. Shared by the one-shot and scheduled paths. Raises
     ConfigError for a bad agent file; turns a model/infra failure into a printed
@@ -59,9 +59,27 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
 
     With ``stream`` (the default), a live trace of the run — the model's train of
     thought, every tool call and result, detectors, escalations — prints as it
-    happens, so the loop is never a black box."""
+    happens, so the loop is never a black box.
+
+    With ``use_track`` (the default), a recorded path next to the agent
+    (``track.json``) is REPLAYED deterministically (no model calls) before the model
+    takes over at the frontier, and a successful run re-records it — so a task done
+    once runs cheaply forever after. ``--no-track`` disables both."""
+    from pathlib import Path
+
+    from zu_core.track import Track, record_track
+
     spec, cfg = load_agent(agent)
     provider, registry, bus, providers = assemble(cfg)
+
+    p = Path(agent)
+    track_path = str((p if p.is_dir() else p.parent) / "track.json")
+    track = Track.load(track_path) if use_track else None
+    if track is not None and track.matches(spec.query):
+        typer.echo(f"track  : replaying {len(track.steps)} recorded steps "
+                   "(deterministic; model only at the frontier)")
+    else:
+        track = None
 
     # The uniform observability hook: a live trace (when streaming) AND the defense
     # review queue — so a blocked attempt during `zu run` is queued exactly as it
@@ -77,8 +95,8 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
     suffix = f" model={model}" if model else ""
     typer.echo(f"zu run: {agent} · provider={cfg.provider.name}{suffix}")
 
-    async def _drive() -> tuple[Result, int]:
-        # Run, count, and release the bus on a *single* event loop: a second
+    async def _drive() -> tuple[Result, list]:
+        # Run, query, and release the bus on a *single* event loop: a second
         # ``asyncio.run`` would count on a different loop than the run used, which
         # breaks sinks holding loop-bound resources. ``aclose`` in the finally
         # releases the sink so the scheduled-worker path (``--every``) doesn't
@@ -90,25 +108,36 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
                 max_observation_chars=cfg.max_observation_chars,
                 observation_strategy=cfg.observation_strategy,
                 max_context_chars=cfg.max_context_chars,
+                track=track,
             )
-            return result, await bus.count()
+            return result, await bus.query()
         finally:
             await bus.aclose()
 
     try:
-        result, event_count = asyncio.run(_drive())
+        result, events = asyncio.run(_drive())
     except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
         # A model-call failure (unset key, unreachable endpoint) propagates here;
         # report it as a terminal outcome rather than a traceback.
         typer.echo(f"run failed: {type(exc).__name__}: {exc}", err=True)
         return Result(status=Status.TERMINAL, reason=f"{type(exc).__name__}: {exc}")
 
+    # Record the path on success so the next run replays it (captures any reroute
+    # the model just built). Best-effort: a save failure never fails the run.
+    if use_track and result.status is Status.SUCCESS:
+        try:
+            recorded = record_track(events, task=spec.query)
+            recorded.save(track_path)
+            typer.echo(f"track  : recorded {len(recorded.steps)} steps → {track_path}")
+        except OSError:
+            pass
+
     typer.echo(f"status : {result.status.value}")
     if result.value is not None:
         typer.echo(f"value  : {result.value}")
     if result.reason is not None:
         typer.echo(f"reason : {result.reason}")
-    typer.echo(f"events : {event_count} recorded")
+    typer.echo(f"events : {len(events)} recorded")
     return result
 
 
@@ -196,6 +225,11 @@ def run(
         help="Run the WHOLE agent inside a hardened container behind an egress proxy "
              "(needs Docker + the zu image). The real boundary for containment='required'.",
     ),
+    track: bool = typer.Option(
+        True, "--track/--no-track",
+        help="Replay a recorded path (track.json) deterministically — model only at "
+             "the frontier — and re-record it on success. --no-track always uses the model.",
+    ),
 ) -> None:
     """Run a self-contained agent (one ``agent.yaml`` or a bundle dir) — once, or
     on a schedule with --every.
@@ -209,7 +243,8 @@ def run(
     if not every:
         try:
             result = (
-                _execute_sandboxed(agent) if sandboxed else _execute_once(agent, stream=stream)
+                _execute_sandboxed(agent) if sandboxed
+                else _execute_once(agent, stream=stream, use_track=track)
             )
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
@@ -230,7 +265,7 @@ def run(
         n += 1
         typer.echo(f"--- run {n} ---")
         try:
-            _execute_once(agent, stream=stream)
+            _execute_once(agent, stream=stream, use_track=track)
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)
