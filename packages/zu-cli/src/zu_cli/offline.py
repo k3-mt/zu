@@ -219,6 +219,8 @@ def rebind_offline(registry: Any, bundle: Bundle) -> Any:
     agent declares, re-register a fixture double bound to that tool's recorded
     observations (all ``allow_private=True`` — the offline host is non-resolvable, as in
     the offline demo). Detectors, validators and the sink are left untouched."""
+    import logging
+
     from zu_providers.scripted import ScriptedProvider
 
     obs = bundle.observations
@@ -229,7 +231,15 @@ def rebind_offline(registry: Any, bundle: Bundle) -> Any:
         # agent declared (which may differ from the tool's class default), and the
         # ladder gates tools by it — the double must sit at the same rung.
         double.tier = getattr(registry.get("tools", name), "tier", double.tier)
-        registry.register("tools", name, double)
+        # Replacing the real tool with its fixture double is the WHOLE point here, so
+        # silence the registry's shadow-collision warning for this deliberate swap.
+        reg_log = logging.getLogger("zu.registry")
+        prev = reg_log.level
+        reg_log.setLevel(logging.ERROR)
+        try:
+            registry.register("tools", name, double)
+        finally:
+            reg_log.setLevel(prev)
 
     if "http_fetch" in present:
         from zu_tools.fetch import HttpFetch
@@ -294,3 +304,32 @@ def project_capture(events: list[Any], result: Any, *, task: str, model: str | N
     if value is not None:
         moves.append({"text": json.dumps(value), "finish": "stop"})
     return Bundle(task=task, moves=moves, observations=observations, model=model)
+
+
+# --- the reusable offline runner ---------------------------------------------
+
+
+async def replay_offline(spec: Any, cfg: Any, bundle: Bundle) -> tuple[Any, list]:
+    """Run an agent offline against ``bundle`` and return ``(result, events)``. Builds a
+    fresh registry, rebinds it to the bundle, and drives the real loop on a sink-free
+    bus — no model, no network, no filesystem writes. The reusable core behind
+    ``zu run --offline`` (the keystone) and ``zu harden`` (replaying perturbed bundles)."""
+    from zu_core.bus import EventBus
+    from zu_core.loop import run_task
+
+    from .config import build_registry
+
+    registry = build_registry(cfg)
+    provider = rebind_offline(registry, bundle)
+    bus = EventBus()
+    try:
+        result = await run_task(
+            spec, provider, registry, bus,
+            containment=cfg.containment,
+            max_observation_chars=cfg.max_observation_chars,
+            observation_strategy=cfg.observation_strategy,
+            max_context_chars=cfg.max_context_chars,
+        )
+        return result, await bus.query()
+    finally:
+        await bus.aclose()

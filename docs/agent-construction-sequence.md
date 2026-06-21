@@ -35,7 +35,7 @@ for, live, every time. Close that and the inner loop becomes free.
  2 Capture (live) zu capture          BUILT    ← the ONLY live spend; event log → fixtures/
  3 Build offline  zu run --offline    BUILT    ← THE KEYSTONE; ~$0/iter, deterministic
  4 Record track   track.json          EXISTS   record_track / loop._replay_track
- 5 Harden (chaos) resilience score    SPEC     reuse zu-redteam verdict-observer
+ 5 Harden (chaos) zu harden           BUILT    offline brittleness audit + resilience score
  6 Live canary    one live run        SPEC     assemble from the existing run path
  7 Promote        zu pack / zu deploy EXISTS   deploy.py
    META-AGENT     --sandboxed + zu mcp loop   SPEC + skeleton — cheap ONLY because it wraps stage 3
@@ -79,9 +79,13 @@ Detectors, validators, and the event sink stay real, so the loop, track recordin
 
 ### Stages 5–7
 
-- **Harden (5)** — perturb the fixtures (rename/drop selectors, inject a consent banner,
-  reorder steps, AB-swap variants), replay `track.json` against each variant, score the
-  pass rate, and flag brittle single-selector steps. *Specced below.*
+- **Harden (5)** — `zu harden` (in `zu_cli/harden.py`). *Built, offline-$0:* a static
+  brittleness audit names single points of failure (single-selector steps, single-
+  occurrence grounded values), and perturbation replay scores resilience — cosmetic page
+  noise the path should absorb, with value-deletion variants as a control that must fail
+  (proving grounding gates). *What remains (live lane):* adaptive-recovery hardening
+  (re-pathfinding around a renamed selector or an injected interstitial) needs a live
+  model and is the next increment — see below.
 - **Canary (6)** — one live validation run before promotion, guarding fixture drift.
   *Specced: assemble from the existing live `run` path.*
 - **Promote (7)** — `zu pack` / `zu deploy` → a production bundle + the resilient track.
@@ -107,11 +111,13 @@ against fixtures is what makes its token budget tractable. Hence A lands before 
 **Built here (the gap):**
 
 - `zu_cli/offline.py` — the bundle format + loader, `FixtureSessionBackend` (new seam),
-  `FixtureRenderBackend`, the `http_fetch` mock-transport double, `rebind_offline`, and
-  `project_capture`.
+  `FixtureRenderBackend`, the `http_fetch` mock-transport double, `rebind_offline`,
+  `project_capture`, and the reusable `replay_offline`.
+- `zu_cli/harden.py` — the stage-5 brittleness audit + perturbation-replay resilience
+  score; the `zu harden` command.
 - `zu run --offline` wired through `_execute_once`; the `zu capture` command.
 - `examples/agents/browser-widget/` — a minimal tier-2 example that runs fully offline.
-- `packages/zu-cli/tests/test_offline.py`.
+- `packages/zu-cli/tests/{test_offline,test_harden}.py`.
 
 **Reused (cited):** `zu_core/loop.py` (`_replay_track`, `_is_challenge`/`_is_soft_miss`,
 escalation), `zu_core/track.py` (`record_track`), `zu_core/cost.py` (`summarize_cost`,
@@ -130,30 +136,39 @@ escalation), `zu_core/track.py` (`record_track`), `zu_core/cost.py` (`summarize_
   --offline`);
 - a short browser fixture fails **loudly** (overrun → challenge, not a silent pass);
 - a recorded soft miss replays as a soft miss;
-- `project_capture` round-trips a synthetic event log → bundle → reproduced result.
+- `project_capture` round-trips a synthetic event log → bundle → reproduced result;
+- `zu harden` audits the captured path, scores 100% resilience on cosmetic noise, and
+  fails every value-deletion control (`test_harden.py`).
 
 **Out of scope here (each needs one live run — keys + network):** a real `zu capture`,
 the stage-6 canary, and a real meta-agent build. `zu.db` is empty locally; do not
 hand-fake a captured bundle for a real site and claim it passes.
 
+## Stage 5 — chaos hardening (built; `zu_cli/harden.py`)
+
+`zu harden <agent>` reports two honest, $0 signals over the captured bundle, modelled on
+`zu-redteam`'s out-of-band verdict pattern (inspect a finished run from outside its trust
+boundary, `packages/zu-redteam/src/zu_redteam/verdict.py`):
+
+- **Static brittleness audit** (`audit_brittleness`) — no run required: flags
+  single-selector steps (a `click`/`fill`/`select` with no `near` fallback) and
+  single-occurrence grounded values (present in exactly one fixture observation, so one
+  wording change loses them).
+- **Perturbation replay** (`perturb_variants` + `replay_offline`) — generate variant
+  bundles that keep the observation sequence aligned and vary only the page text, then
+  re-run them through the offline keystone. The **resilience score** is the fraction of
+  *value-preserving* (cosmetic-noise) variants the path still succeeds on;
+  *value-corrupting* variants are a control that **must** fail, so the score reflects
+  real grounding, not a rubber stamp. `--min-score` gates promotion.
+
+**Honest boundary:** the replay drives the *captured* moves — a frozen model — so it
+measures the path's tolerance to cosmetic drift, **not** adaptive recovery. A
+perturbation that needs a new decision (re-pathfind around a renamed selector, dismiss an
+unexpected interstitial) cannot be absorbed offline; measuring that needs a live model
+and is the next increment (a live hardening lane), deliberately out of this $0 scope
+rather than silently conflated with what is measured.
+
 ## Specced behind seams
-
-### Stage 5 — chaos hardening (reuse the verdict-observer pattern)
-
-Model it on `zu-redteam`'s out-of-band gate (`packages/zu-redteam/src/zu_redteam/
-verdict.py`): a `VerdictObserver.inspect(run) -> Breach | None` panel scored by
-`render_verdict`. The hardening analogue:
-
-- `perturb_bundle(bundle) -> list[Bundle]` — generate variants: rename/drop a selector
-  in a `browser` `act`, inject a consent banner observation before a step, reorder two
-  independent steps, swap an AB variant of the page text.
-- Replay `track.json` against each variant offline (stage 3 machinery); a `ResilienceObserver`
-  reads each `ObservedRun` and scores pass/fail; the **resilience score** is the pass
-  rate, with brittle single-selector steps named.
-- Surface as `zu harden`, gating promotion on a threshold.
-
-Seam: this is pure offline replay over the same `capture.json` format — no new live
-dependency.
 
 ### The meta-agent / container-CLI builder
 

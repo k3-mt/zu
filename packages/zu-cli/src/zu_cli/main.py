@@ -427,6 +427,67 @@ def capture(
 
 
 @app.command()
+def harden(
+    agent: str = typer.Argument(
+        "agent.yaml", help="The agent to harden: an agent.yaml file, or a bundle directory."
+    ),
+    min_score: float = typer.Option(
+        1.0, "--min-score",
+        help="Fail (exit 1) if the resilience score is below this (0.0–1.0).",
+    ),
+) -> None:
+    """Stage 5 — chaos hardening. Score how brittle a captured path is, offline and free.
+
+    Audits the captured ``fixtures/capture.json`` for single points of failure
+    (single-selector steps, single-occurrence grounded values), then replays perturbed
+    variants through the offline keystone: cosmetic page noise it SHOULD absorb (the
+    resilience score) and value-deletions it MUST fail (proving grounding gates). Needs
+    a captured bundle (run ``zu capture`` once); spends nothing — no model, no network.
+    """
+    from pathlib import Path
+
+    from .harden import harden as run_harden
+    from .offline import Bundle, OfflineError, bundle_path
+
+    try:
+        spec, cfg = load_agent(agent)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    p = Path(agent)
+    try:
+        bundle = Bundle.load(bundle_path(p if p.is_dir() else p.parent))
+    except OfflineError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    typer.echo(f"zu harden: {agent} (offline — no model, no network)")
+    report = asyncio.run(run_harden(spec, cfg, bundle))
+
+    if report.findings:
+        typer.echo(f"brittle: {len(report.findings)} single point(s) of failure")
+        for f in report.findings:
+            typer.echo(f"  · [{f.kind}] {f.where}: {f.detail}")
+    else:
+        typer.echo("brittle: none found (no single-selector or single-occurrence steps)")
+
+    for v in report.variants:
+        mark = "ok " if v.ok else "!! "
+        verdict = "passed" if v.passed else "failed"
+        typer.echo(f"  {mark}{v.name}: {verdict} (expected {'pass' if v.expect_pass else 'fail'})")
+
+    score = report.resilience
+    typer.echo(f"resilience: {score:.0%} of cosmetic perturbations absorbed")
+    if not report.grounding_load_bearing:
+        typer.echo("warning: a value-deletion variant still passed — grounding is NOT "
+                   "gating this path; the score is unreliable.", err=True)
+    if score < min_score:
+        typer.echo(f"harden: resilience {score:.0%} below --min-score {min_score:.0%}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo("harden: resilient enough to promote.")
+
+
+@app.command()
 def serve(
     config: str = typer.Option(
         "agent.yaml", "--config", "-c", help="Agent/config file for the service (task block ignored; tasks arrive per request)."
