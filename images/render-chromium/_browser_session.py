@@ -440,9 +440,12 @@ def observe(page: Any, captured: list, *, include_html: bool = False,
     track it for the next diff). The model gets what it needs to act — not the
     whole page re-sent each turn:
 
-    * ``text`` — when ``prev_text`` is given (an ``act``), only what CHANGED (the
-      new step / a validation error); otherwise (open/read) the full current text.
-    * ``controls`` — the visible interactive controls (the menu to act on).
+    * ``text`` — what CHANGED on an ``act`` (the new step / a validation error),
+      else the full current text; PLUS the current interactive controls appended as
+      a menu. Appending them serves two ends: the model always sees what it can act
+      on, and the controls carry the clean, normalized label (e.g. "Wed Jun 24 —
+      Wednesday June 24th is available") so a value the model reports — like a date
+      the page only renders split across cells — is GROUNDABLE in retrieved content.
     * ``network`` — METADATA of captured responses; ``content`` — their full bodies
       (kept for the event log → recall + grounding; the loop elides this from the
       model's copy, so the data is recall-able, not dumped every turn)."""
@@ -452,7 +455,10 @@ def observe(page: Any, captured: list, *, include_html: bool = False,
     else:
         diff = _new_lines(prev_text, cur)
         text = diff if diff.strip() else "(no visible change since the last action)"
-    out: dict[str, Any] = {"url": page.url, "text": text, "controls": _visible_controls(page)}
+    controls = _visible_controls(page)
+    if controls:
+        text = text + "\n\n— controls (clickable now) —\n" + "\n".join(controls)
+    out: dict[str, Any] = {"url": page.url, "text": text}
     if include_html:
         out["html"] = page.content()
     if captured:

@@ -267,9 +267,9 @@ def test_run_actions_capped() -> None:
 def test_observe_returns_focused_view_and_current_text() -> None:
     page = _FakePage(text="visible slots 10:15", url="https://x/book")
     obs, cur = bs.observe(page, [], include_html=True)
-    assert obs["text"] == "visible slots 10:15" and obs["url"] == "https://x/book"
+    assert obs["text"].startswith("visible slots 10:15") and obs["url"] == "https://x/book"
     assert cur == "visible slots 10:15" and obs["html"].startswith("<html>")
-    assert "controls" in obs                                    # the actionable menu
+    # controls are folded into the grounded text (the fake returns none, so no menu)
     captured = [{"url": "https://api/slots", "status": 200, "body": '{"d":["2026-06-24"]}'}]
     obs2, _ = bs.observe(page, captured)
     # bodies fold into `content` (groundable); `network` is metadata only (no body)
