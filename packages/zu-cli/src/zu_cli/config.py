@@ -117,6 +117,24 @@ class ObservabilityConfig(BaseModel):
     scope: str = "render"
 
 
+class ReplayConfig(BaseModel):
+    """Maturity settings for a recorded-track replay — how a run behaves once it has
+    a deterministic path and the model is reserved for the frontier. All optional:
+    omit the block and replay uses the normal budget and the global provider.
+
+    * ``budget`` — REPLACES the run budget when a matching track replays. The
+      navigation is solved, so it can be tight; a broken track then fails fast and
+      cheap (a tripwire to re-record) instead of silently re-pathfinding at full
+      cost. (The top-level ``budget`` still governs a fresh / --no-track run.)
+    * ``finish_model`` — a cheap model id for the post-replay frontier (usually just
+      the final extraction). It REUSES the global provider's endpoint/key, swapping
+      only the model. Used solely when replay reaches the frontier without diverging;
+      a divergence keeps the strong global model to re-pathfind."""
+
+    budget: Budget | None = None
+    finish_model: str | None = None
+
+
 class RunConfig(BaseModel):
     """A whole `agent.yaml` (or `zu.yaml`-style config), parsed and validated."""
 
@@ -150,6 +168,9 @@ class RunConfig(BaseModel):
     # how a run emits to local files or cloud storage for observability.
     trace_sinks: list[EventSinkConfig] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
+    # Maturity settings for a recorded-track replay: a tight replay budget and an
+    # optional cheap finisher model for the frontier (see ReplayConfig).
+    replay: ReplayConfig = Field(default_factory=ReplayConfig)
     # Optional cap (chars per content field) on how much of a tool observation the
     # MODEL sees — OFF by default (the model gets the full page). Set it when an
     # agent fetches big pages on a small-context model: a tier-2 rendered DOM can

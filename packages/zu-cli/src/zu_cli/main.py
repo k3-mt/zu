@@ -94,9 +94,25 @@ def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) ->
     track_path = str(agent_dir / "track.json")
     cost_path = str(agent_dir / "cost.jsonl")
     track = Track.load(track_path) if use_track else None
+    # Maturity settings (agent.yaml `replay:`): a tight budget when a track replays,
+    # and a cheap finisher model (reusing the global provider's endpoint/key, model
+    # swapped) for the post-replay frontier. Built once; the loop applies them only
+    # when a matching track actually replays.
+    from .config import build_provider
+
+    replay_budget = cfg.replay.budget
+    finish_provider = (
+        build_provider(cfg.provider.model_copy(update={"model": cfg.replay.finish_model}))
+        if cfg.replay.finish_model else None
+    )
     if track is not None and track.matches(spec.query):
+        extra = ""
+        if replay_budget is not None:
+            extra += f"; budget≤{replay_budget.max_tokens:,} tok/{replay_budget.max_steps} steps"
+        if finish_provider is not None:
+            extra += f"; finisher={cfg.replay.finish_model}"
         typer.echo(f"track  : replaying {len(track.steps)} recorded steps "
-                   "(deterministic; model only at the frontier)")
+                   f"(deterministic; model only at the frontier{extra})")
     else:
         track = None
 
@@ -128,6 +144,8 @@ def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) ->
                 observation_strategy=cfg.observation_strategy,
                 max_context_chars=cfg.max_context_chars,
                 track=track,
+                replay_budget=replay_budget,
+                finish_provider=finish_provider,
             )
             return result, await bus.query()
         finally:

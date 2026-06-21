@@ -1110,6 +1110,98 @@ async def test_replay_bails_after_a_run_of_soft_misses() -> None:
     assert len(tool.calls) == _REPLAY_MAX_SOFT_MISSES
 
 
+class _MsgCapturingProvider:
+    """Captures the messages of the LAST model call, to assert what the frontier saw."""
+
+    model = None
+
+    def __init__(self) -> None:
+        self.last_messages: list[dict] = []
+        self.capabilities = __import__("zu_core.ports", fromlist=["Capabilities"]).Capabilities()
+
+    async def complete(self, request):
+        from zu_core.ports import Finish, ModelResponse
+        self.last_messages = list(request.messages)
+        return ModelResponse(text='{"ok": true}', finish=Finish.STOP)
+
+
+async def test_clean_replay_injects_extract_dont_renavigate_directive() -> None:
+    from zu_core.loop import _REPLAY_DONE_NOTICE
+    from zu_core.track import Track, TrackStep
+
+    # clean replay -> the frontier is told to extract from history, not re-navigate
+    reg = Registry()
+    reg.register("tools", "rec", _RecordingTool())
+    prov = _MsgCapturingProvider()
+    track = Track(task="q", steps=[TrackStep("rec", {"k": "a"}, 0)])
+    await run_task(TaskSpec(query="q"), prov, reg, EventBus(), track=track)
+    assert any(_REPLAY_DONE_NOTICE in m.get("content", "") for m in prov.last_messages)
+
+    # divergence -> NO directive; the model is expected to navigate/recover
+    reg2 = Registry()
+    reg2.register("tools", "rec", _RecordingTool(fail_on_arg="a"))
+    prov2 = _MsgCapturingProvider()
+    track2 = Track(task="q", steps=[TrackStep("rec", {"k": "a"}, 0)])
+    await run_task(TaskSpec(query="q"), prov2, reg2, EventBus(), track=track2)
+    assert not any(_REPLAY_DONE_NOTICE in m.get("content", "") for m in prov2.last_messages)
+
+
+async def test_replay_budget_replaces_the_task_budget_when_replaying() -> None:
+    from zu_core.contracts import Budget
+    from zu_core.track import Track, TrackStep
+
+    reg = Registry()
+    reg.register("tools", "rec", _RecordingTool())
+    # the finalise move reports 1000 tokens; the tight replay budget caps at 100
+    provider = ScriptedProvider.from_moves(
+        [{"text": '{"ok": true}', "finish": "stop", "usage": {"total_tokens": 1000}}])
+    track = Track(task="q", steps=[TrackStep("rec", {"k": "a"}, 0)])
+    spec = TaskSpec(query="q", budget=Budget(max_tokens=10_000_000))
+    result = await run_task(spec, provider, reg, EventBus(), track=track,
+                            replay_budget=Budget(max_tokens=100))
+    assert result.status == Status.TERMINAL and result.reason == "budget:max_tokens"
+
+
+async def test_replay_budget_is_ignored_without_a_matching_track() -> None:
+    from zu_core.contracts import Budget
+
+    reg = Registry()
+    reg.register("tools", "rec", _RecordingTool())
+    provider = ScriptedProvider.from_moves(
+        [{"text": '{"ok": true}', "finish": "stop", "usage": {"total_tokens": 1000}}])
+    spec = TaskSpec(query="q", budget=Budget(max_tokens=10_000_000))
+    # no track -> pathfinding budget governs, the tight replay budget does not apply
+    result = await run_task(spec, provider, reg, EventBus(), replay_budget=Budget(max_tokens=100))
+    assert result.status == Status.SUCCESS
+
+
+async def test_clean_replay_uses_the_cheap_finisher_but_divergence_keeps_the_strong_model() -> None:
+    from zu_core.track import Track, TrackStep
+
+    main = ScriptedProvider.from_moves([{"text": '{"who": "main"}', "finish": "stop"}])
+    finisher = ScriptedProvider.from_moves([{"text": '{"who": "finish"}', "finish": "stop"}])
+
+    # clean replay (the step succeeds) -> the finisher drives the frontier
+    clean = _RecordingTool()
+    reg = Registry()
+    reg.register("tools", "rec", clean)
+    track = Track(task="q", steps=[TrackStep("rec", {"k": "a"}, 0)])
+    r1 = await run_task(TaskSpec(query="q"), main, reg, EventBus(),
+                        track=track, finish_provider=finisher)
+    assert r1.value == {"who": "finish"}
+
+    # the step challenges -> divergence -> the strong (main) model re-pathfinds
+    main2 = ScriptedProvider.from_moves([{"text": '{"who": "main"}', "finish": "stop"}])
+    finisher2 = ScriptedProvider.from_moves([{"text": '{"who": "finish"}', "finish": "stop"}])
+    fail = _RecordingTool(fail_on_arg="a")
+    reg2 = Registry()
+    reg2.register("tools", "rec", fail)
+    track2 = Track(task="q", steps=[TrackStep("rec", {"k": "a"}, 0)])
+    r2 = await run_task(TaskSpec(query="q"), main2, reg2, EventBus(),
+                        track=track2, finish_provider=finisher2)
+    assert r2.value == {"who": "main"}
+
+
 class _Tier2Tool(_RecordingTool):
     name = "browse"
     tier = 2

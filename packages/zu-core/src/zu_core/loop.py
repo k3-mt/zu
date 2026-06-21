@@ -36,7 +36,7 @@ from uuid import UUID
 
 from . import events as ev
 from .bus import EventBus
-from .contracts import Event, Result, Status, TaskSpec
+from .contracts import Budget, Event, Result, Status, TaskSpec
 from .ports import (
     Finish,
     ModelProvider,
@@ -60,6 +60,18 @@ _RANK = {Severity.WARN: 0, Severity.RETRY: 1, Severity.ESCALATE: 2, Severity.TER
 # before deciding the recorded path has truly diverged and handing off to the model.
 # One or two are normal drift (an already-dismissed banner); a run of them is not.
 _REPLAY_MAX_SOFT_MISSES = 3
+
+# After a CLEAN replay the navigation is done and its observations (the gathered
+# evidence — e.g. the available slots) are already in the message history. Without
+# this nudge the model, seeing a finished/closed session, sometimes decides it must
+# start over and re-drives the whole flow (observed: 8 calls vs 2, blowing the
+# budget). This pins it to the cheap branch: extract from history, don't re-navigate.
+_REPLAY_DONE_NOTICE = (
+    "The recorded navigation above is complete — its tool observations already "
+    "contain the evidence gathered for this task. Produce the final answer NOW by "
+    "extracting it from those observations. Do NOT re-open the browser, re-run a "
+    "search, or repeat any navigation; the session has already served its purpose."
+)
 
 # Observation keys that carry retrieved page content — stored once (in a
 # data.source.fetched event), summarised in the harness.tool.returned event.
@@ -597,6 +609,8 @@ async def run_task(
     observation_strategy: str = "truncate",
     max_context_chars: int | None = None,
     track: Track | None = None,
+    replay_budget: Budget | None = None,
+    finish_provider: ModelProvider | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -616,6 +630,14 @@ async def run_task(
     overshoot ``max_tokens`` before the run is ended — until the real providers
     pass a remaining-token limit into the call (build step 7).
 
+    ``replay_budget`` and ``finish_provider`` make replay cheap at maturity. When a
+    matching ``track`` replays, ``replay_budget`` (if given) REPLACES the task budget
+    for that run — tight, because the navigation is solved, so a broken track fails
+    fast and cheap instead of silently re-pathfinding at full cost. And if replay
+    finishes WITHOUT diverging, ``finish_provider`` (a cheap model) drives the
+    frontier — typically just the final extraction; on a divergence the strong
+    ``provider`` stays in charge to re-pathfind. Both are no-ops on a non-replay run.
+
     ``containment`` is the fail-closed floor (see ``zu_core.security``): with
     ``"required"``, a tool with off-box reach is refused unless the run is inside
     the Zu sandbox; ``"audit"`` (default) runs in-process and logs declarations.
@@ -626,7 +648,11 @@ async def run_task(
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
     run = _Run(spec, bus, trace_id=trace_id)
-    budget = spec.budget
+    # At maturity a matching track makes the run a deterministic replay: apply the
+    # tight replay budget (a broken track then fails fast, not at full pathfinding
+    # cost). The pathfinding budget still governs a fresh/--no-track run.
+    replaying = track is not None and track.matches(spec.query) and bool(track.steps)
+    budget = replay_budget if (replaying and replay_budget is not None) else spec.budget
 
     tools = {name: _materialize(registry.get("tools", name)) for name in registry.names("tools")}
     detectors = [_materialize(registry.get("detectors", n)) for n in registry.names("detectors")]
@@ -665,14 +691,23 @@ async def run_task(
     # path deterministically, with NO model calls, until a step challenges (errors)
     # or the track runs out. The model loop below then takes over at that frontier,
     # sharing the same tools (and live browser session) and message history.
-    if track is not None and track.matches(spec.query) and track.steps:
+    finishing = False
+    if replaying:
+        assert track is not None  # `replaying` already established this
         # The navigator climbs the ladder as the recorded path did (emitting the
         # same escalation events), so when the model takes over at the frontier it
         # inherits the ladder exactly where the path left it — its remembered tier,
         # not a blanket jump to the ceiling.
-        await _replay_track(run, track, tools, messages, ladder,
-                            wall_time_s=budget.wall_time_s, start=start,
-                            max_observation_chars=max_observation_chars)
+        diverged = await _replay_track(run, track, tools, messages, ladder,
+                                       wall_time_s=budget.wall_time_s, start=start,
+                                       max_observation_chars=max_observation_chars)
+        # Replay reached the frontier cleanly (no challenge): what's left is usually
+        # just the final extraction, so a cheap finish_provider can close it out. A
+        # divergence means real re-pathfinding — keep the strong provider for that.
+        finishing = not diverged and finish_provider is not None
+        if not diverged:
+            # Pin the model to "extract from history" instead of re-navigating.
+            messages.append({"role": "user", "content": _REPLAY_DONE_NOTICE})
 
     for step in range(budget.max_steps):
         # --- budget checkpoints (time / tokens) before spending a model call ---
@@ -685,7 +720,11 @@ async def run_task(
         # the provider bound to that tier takes over (global provider otherwise).
         active = ladder.active()
         tool_schemas = ladder.schemas()
+        # A clean-replay finish uses the cheap finisher for the whole frontier;
+        # otherwise the per-tier override (or the global provider) drives the turn.
         turn_provider = by_tier.get(ladder.current, provider)
+        if finishing and finish_provider is not None:
+            turn_provider = finish_provider
 
         turn = await run.emit(ev.TURN_STARTED, {"step": step + 1}, parent=run.root)
         # Bound the single model call by the wall-time the run has left: budgets
