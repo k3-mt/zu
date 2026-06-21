@@ -198,6 +198,31 @@ def test_run_actions_near_disambiguates_a_click() -> None:
     assert ("click", bs._NEAR_MARK) in widget.calls
 
 
+def test_looks_like_css_distinguishes_selectors_from_labels() -> None:
+    for css in ("#onetrust", ".item-link", "[aria-label='x']", "button:has-text('1')",
+                "input[type=radio]", "div > a"):
+        assert bs._looks_like_css(css), css
+    for label in ("Next", "Tue Jun 23", "10:15", "I am a new client",
+                  "Consultation (incl. sick & injured)"):
+        assert not bs._looks_like_css(label), label
+
+
+def test_robust_text_click_resolves_in_a_frame_and_clicks_marker() -> None:
+    # The JS resolves the label to the real clickable and marks it; the helper then
+    # clicks the marked element in the frame whose search succeeded.
+    other = _FakeFrame(present=set(), near_ok=False)
+    widget = _FakeFrame(present={bs._CLICK_MARK}, near_ok=True)
+    page = _FakePage(frames=[other, widget])
+    assert bs._robust_text_click(page, "Tue Jun 23", 5000) is True
+    assert ("click", bs._CLICK_MARK) in widget.calls
+    assert not any(k == "click" for k, *_ in other.calls)
+
+
+def test_robust_text_click_returns_false_when_nothing_matches() -> None:
+    page = _FakePage(frames=[_FakeFrame(near_ok=False)])
+    assert bs._robust_text_click(page, "nope", 5000) is False
+
+
 def test_run_actions_pierces_into_a_child_iframe() -> None:
     # The widget's button lives in a cross-origin iframe, not the top frame. The
     # action must be routed into the frame that actually has the selector.

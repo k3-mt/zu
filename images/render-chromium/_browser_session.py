@@ -17,7 +17,18 @@ handling is unit-tested with fakes and no real Chromium.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+# A selector "looks like CSS" (vs a plain text label) — starts with #/./[ , has a
+# combinator/attribute bracket, or a tag immediately followed by .#:[ (e.g.
+# button:has-text(...), input[type=radio]). Plain labels ("Next", "Tue Jun 23")
+# don't match, so they take the robust text-resolution path.
+_CSS_HINT = re.compile(r"^[#.\[]|[>\]]|^[a-zA-Z][\w-]*[.#:\[]")
+
+
+def _looks_like_css(sel: str) -> bool:
+    return bool(_CSS_HINT.search(sel))
 
 # Bounds so a hostile/janky page can't wedge the browser. Per-action/wait timeouts
 # are short; the action list and captured-response volume are capped.
@@ -208,6 +219,69 @@ def _click_near(page: Any, option: str, anchor: str, timeout: int) -> None:
     raise RuntimeError(f"could not find a control matching {option!r} near {anchor!r}")
 
 
+# Robust click resolution: a label often lives in a NON-clickable wrapper (a date
+# cell's text is in a <div>/<span> inside the real <a role=button>), and the text
+# matches several nested nodes. So: match the label (exact, then contains) on any
+# visible element, then resolve to the element actually CLICKABLE — itself if
+# interactive, else its nearest interactive ancestor, else a descendant — and mark
+# that. Full scan, every frame; the fallback when a plain/near selector misses.
+_CLICK_MARK = "[data-zu-target='zc']"
+_INTERACTIVE = "button,a[href],[role=button],[role=option],[role=gridcell],[role=radio],input,select,textarea,[tabindex]"
+_CLICK_JS = """
+(needle) => {
+  const INTER = "__INTER__";
+  const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+  const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  const clickable = el => el.matches(INTER) ? el
+    : (el.closest(INTER) || el.querySelector(INTER) || el);
+  const n = norm(needle).toLowerCase();
+  const exact = [], contains = [];
+  for (const el of document.querySelectorAll('*')) {
+    if (!vis(el)) continue;
+    const t = norm(el.innerText || el.value || el.getAttribute('aria-label') || '').toLowerCase();
+    if (!t) continue;
+    if (t === n) exact.push(el);
+    else if (t.includes(n) && t.length < n.length + 40) contains.push(el);
+  }
+  for (const el of (exact.length ? exact : contains)) {
+    const c = clickable(el);
+    if (c && vis(c)) {
+      document.querySelectorAll('[data-zu-target]').forEach(e => e.removeAttribute('data-zu-target'));
+      c.setAttribute('data-zu-target', 'zc');
+      return true;
+    }
+  }
+  return false;
+}
+""".replace("__INTER__", _INTERACTIVE)
+
+
+def _robust_text_click(page: Any, text: str, timeout: int) -> bool:
+    """Click the element matching ``text`` (exact, then contains), resolved to the
+    real clickable node. Scans every frame; returns True if it clicked, else False
+    (so the caller can fall back). Handles labels nested in non-clickable wrappers."""
+    needle = text[5:] if text.startswith("text=") else text
+    for frame in getattr(page, "frames", []):
+        try:
+            ok = frame.evaluate(_CLICK_JS, needle)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            try:
+                frame.locator(_CLICK_MARK).first.click(timeout=timeout)
+            finally:
+                try:
+                    frame.evaluate(
+                        "() => document.querySelectorAll('[data-zu-target]')"
+                        ".forEach(e => e.removeAttribute('data-zu-target'))"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return True
+    return False
+
+
 def _run_actions(page: Any, actions: list) -> str | None:
     """Apply read-surfacing actions in order; return an error string on the first
     failure (DOM so far is kept), else None. Each Playwright op auto-waits for the
@@ -226,10 +300,21 @@ def _run_actions(page: Any, actions: list) -> str | None:
             # AND the control), which would be a strict-mode error; acting on the
             # first match keeps the model moving instead of thrashing on selectors.
             if "click" in raw:
-                if raw.get("near"):   # disambiguate by proximity to a label
-                    _click_near(page, raw["click"], raw["near"], _ACTION_TIMEOUT_MS)
+                sel = raw["click"]
+                if raw.get("near"):
+                    # disambiguate by proximity to a label; fall back to a robust scan
+                    try:
+                        _click_near(page, sel, raw["near"], _ACTION_TIMEOUT_MS)
+                    except Exception:  # noqa: BLE001
+                        if not _robust_text_click(page, sel, _ACTION_TIMEOUT_MS):
+                            raise
+                elif _looks_like_css(sel):
+                    _target(_frame_for(page, sel), sel).click(timeout=_ACTION_TIMEOUT_MS)
                 else:
-                    _target(_frame_for(page, raw["click"]), raw["click"]).click(timeout=_ACTION_TIMEOUT_MS)
+                    # a text label: robust resolution to the real clickable (handles
+                    # a label nested in a non-clickable wrapper); fall back to direct.
+                    if not _robust_text_click(page, sel, _ACTION_TIMEOUT_MS):
+                        _target(_frame_for(page, sel), sel).click(timeout=_ACTION_TIMEOUT_MS)
             elif "fill" in raw:
                 sel = raw["fill"]
                 _target(_frame_for(page, sel), sel).fill(str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
