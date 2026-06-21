@@ -1,0 +1,21 @@
+{
+  "task": "Open the product widget and read the product name and price. The static HTML is a JavaScript shell, so escalate to the browser: open the page, click to reveal the price, then read it. Return a JSON object {\"name\": ..., \"price\": ...} with values that actually appear in what you read.",
+  "model": "claude-sonnet-4-6",
+  "moves": [
+    {"tool": "http_fetch", "args": {"url": "http://shop.test/widget"}},
+    {"tool": "browser", "args": {"op": "open", "url": "http://shop.test/widget"}},
+    {"tool": "browser", "args": {"op": "act", "actions": [{"click": "text=Show price"}]}},
+    {"tool": "browser", "args": {"op": "read"}},
+    {"text": "{\"name\": \"Acme Widget\", \"price\": \"$9.00\"}", "finish": "stop"}
+  ],
+  "observations": {
+    "http_fetch": [
+      {"status": 200, "html": "<html><body><div id=\"root\"></div><script src=\"/app.js\"></script></body></html>", "url": "http://shop.test/widget"}
+    ],
+    "browser": [
+      {"rendered": true, "url": "http://shop.test/widget", "text": "Acme Widget. Choose an option, then press Show price."},
+      {"rendered": true, "text": "Acme Widget. Loading price…"},
+      {"rendered": true, "text": "Acme Widget — Price: $9.00 — In stock."}
+    ]
+  }
+}

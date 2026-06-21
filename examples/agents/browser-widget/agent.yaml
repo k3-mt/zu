@@ -1,0 +1,43 @@
+# Browser-widget — a minimal TIER-2 example that runs fully OFFLINE.
+#
+# It exists to prove the construction keystone: a persistent `browser` session driven
+# entirely from a captured fixtures/ bundle, with no model and no network, at ~$0.
+#
+#   zu run examples/agents/browser-widget/ --offline   # replays fixtures/capture.json
+#
+# The arc: http_fetch returns a JavaScript shell (no data in the static HTML) → the
+# js-shell detector escalates to tier 2 → the model drives the `browser` tool
+# (open → act → read) to reach the rendered product data → returns it, grounded.
+#
+# A REAL agent records its own fixtures/capture.json with one live `zu capture`
+# (keys + network); this one ships a hand-authored bundle so the example needs neither.
+
+provider:
+  name: anthropic                 # never called offline — the captured moves drive instead
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+
+tiers:                            # the escalation ladder
+  1: [http_fetch, html_parse]
+  2: [render_dom, browser]        # browser: a PERSISTENT session for a multi-step widget
+
+plugins:
+  detectors: [empty, error, js-shell, bot-wall]   # js-shell escalates the JS shell to tier 2
+  validators: [schema, grounding]                 # shape it, then prove it's on the page
+
+budget: { max_steps: 20, max_tokens: 200000, wall_time_s: 120 }
+
+task:
+  query: >
+    Open the product widget and read the product name and price. The static HTML is a
+    JavaScript shell, so escalate to the browser: open the page, click to reveal the
+    price, then read it. Return a JSON object {"name": ..., "price": ...} with values
+    that actually appear in what you read.
+  target: "http://shop.test/widget"
+  max_tier: 2
+  output_schema:
+    type: object
+    properties:
+      name:  { type: string }
+      price: { type: string }
+    required: [name, price]

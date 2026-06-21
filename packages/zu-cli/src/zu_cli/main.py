@@ -67,7 +67,9 @@ def _append_cost_ledger(path: str, *, agent: str, status: str, replayed: bool, s
         pass
 
 
-def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) -> Result:
+def _execute_once(
+    agent: str, *, stream: bool = True, use_track: bool = True, offline: bool = False
+) -> Result:
     """Load a single ``agent.yaml`` (or bundle dir) and drive its task to a Result,
     printing a summary. Shared by the one-shot and scheduled paths. Raises
     ConfigError for a bad agent file; turns a model/infra failure into a printed
@@ -91,6 +93,22 @@ def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) ->
 
     p = Path(agent)
     agent_dir = p if p.is_dir() else p.parent
+
+    # Offline replay (the construction keystone): swap the live model for the captured
+    # ScriptedProvider and rebind the off-box tools to fixture doubles — no model, no
+    # network, ~$0. Everything downstream (the loop, track recording, cost telemetry) is
+    # unchanged, so an offline run still records track.json and proves ~$0 in cost.jsonl.
+    if offline:
+        from .offline import Bundle, OfflineError, bundle_path, rebind_offline
+
+        try:
+            bundle = Bundle.load(bundle_path(agent_dir))
+        except OfflineError as exc:
+            raise ConfigError(str(exc)) from None
+        provider = rebind_offline(registry, bundle)
+        providers = {}  # no per-tier LIVE overrides offline; the script drives every tier
+        typer.echo(f"zu run --offline: replaying {len(bundle.moves)} captured moves "
+                   "against fixtures (no model, no network)")
     track_path = str(agent_dir / "track.json")
     cost_path = str(agent_dir / "cost.jsonl")
     track = Track.load(track_path) if use_track else None
@@ -281,6 +299,11 @@ def run(
         help="Replay a recorded path (track.json) deterministically — model only at "
              "the frontier — and re-record it on success. --no-track always uses the model.",
     ),
+    offline: bool = typer.Option(
+        False, "--offline",
+        help="Replay against a captured fixtures/ bundle — no model, no network, ~$0. "
+             "Proves the wiring after one `zu capture`; the keystone for cheap construction.",
+    ),
 ) -> None:
     """Run a self-contained agent (one ``agent.yaml`` or a bundle dir) — once, or
     on a schedule with --every.
@@ -289,13 +312,17 @@ def run(
     --no-stream). The whole agent — task, model(s), the tier ladder of tools — is
     one file; a bundle dir adds its own ``tools/`` so custom tools just resolve.
     """
+    if sandboxed and offline:
+        typer.echo("config error: --sandboxed and --offline are mutually exclusive "
+                   "(one is a live contained run, the other replays fixtures).", err=True)
+        raise typer.Exit(code=2) from None
     # One-shot: run, exit non-zero on a non-success result so it composes in a
     # shell. Scheduled: loop and keep going regardless of any single outcome.
     if not every:
         try:
             result = (
                 _execute_sandboxed(agent) if sandboxed
-                else _execute_once(agent, stream=stream, use_track=track)
+                else _execute_once(agent, stream=stream, use_track=track, offline=offline)
             )
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
@@ -316,7 +343,7 @@ def run(
         n += 1
         typer.echo(f"--- run {n} ---")
         try:
-            _execute_once(agent, stream=stream, use_track=track)
+            _execute_once(agent, stream=stream, use_track=track, offline=offline)
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)
@@ -324,6 +351,79 @@ def run(
         if max_runs and n >= max_runs:
             break
         time.sleep(interval)
+
+
+@app.command()
+def capture(
+    agent: str = typer.Argument(
+        "agent.yaml", help="The agent to capture: an agent.yaml file, or a bundle directory."
+    ),
+    stream: bool = typer.Option(
+        True, "--stream/--no-stream", help="Print a live trace as the capture run executes."
+    ),
+) -> None:
+    """Drive an agent LIVE once and project the run into a ``fixtures/`` bundle, so it
+    can then be BUILT and HARDENED offline with ``zu run --offline`` — at ~$0, no further
+    live spend.
+
+    This is the one live step of the construction sequence: it needs the provider's keys
+    and network. It records ``fixtures/capture.json`` (the model's moves + each tool's
+    observations) next to the agent — the input the offline keystone replays.
+    """
+    from pathlib import Path
+
+    from zu_core.loop import run_task
+
+    from .observe import attach_observability
+    from .offline import bundle_path, project_capture
+
+    try:
+        spec, cfg = load_agent(agent)
+        provider, registry, bus, providers = assemble(cfg)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    attach_observability(bus, cfg.observability, trace=stream)
+    model = getattr(provider, "model", None)
+    typer.echo(f"zu capture: {agent} · provider={cfg.provider.name}"
+               + (f" model={model}" if model else "") + " (LIVE — keys + network)")
+
+    async def _drive() -> tuple[Result, list]:
+        try:
+            result = await run_task(
+                spec, provider, registry, bus,
+                providers=providers, containment=cfg.containment,
+                max_observation_chars=cfg.max_observation_chars,
+                observation_strategy=cfg.observation_strategy,
+                max_context_chars=cfg.max_context_chars,
+            )
+            return result, await bus.query()
+        finally:
+            await bus.aclose()
+
+    try:
+        result, events = asyncio.run(_drive())
+    except Exception as exc:  # noqa: BLE001 - a clean message beats a traceback
+        typer.echo(f"capture failed: {type(exc).__name__}: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo(f"status : {result.status.value}")
+    if result.status is not Status.SUCCESS:
+        if result.reason is not None:
+            typer.echo(f"reason : {result.reason}")
+        typer.echo("capture: not recorded (only a SUCCESS run is a faithful fixture).", err=True)
+        raise typer.Exit(code=1) from None
+
+    bundle = project_capture(events, result, task=spec.query, model=model)
+    p = Path(agent)
+    out = bundle_path(p if p.is_dir() else p.parent)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    bundle.save(out)
+    obs_n = sum(len(v) for v in bundle.observations.values())
+    typer.echo(f"capture: recorded {len(bundle.moves)} moves + {obs_n} tool observations "
+               f"→ {out}")
+    typer.echo("next   : `zu run --offline` replays it at ~$0 (no model, no network).")
 
 
 @app.command()
