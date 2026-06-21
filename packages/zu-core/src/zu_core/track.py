@@ -29,26 +29,35 @@ MAX_REPLAY_WAIT_MS = 3000
 
 @dataclass
 class TrackStep:
-    """One tool call on the path: which tool, the exact args, and the gap before it
-    (ms since the previous call was issued — the model's pacing, capped on replay)."""
+    """One tool call on the path: which tool, the exact args, the gap before it
+    (ms since the previous call was issued — the model's pacing, capped on replay),
+    and the ladder ``tier`` the call ran at. The tier lets the track REMEMBER its
+    own escalation: a step recorded at tier 2 means the path had climbed there, so
+    the navigator re-climbs (emitting the escalation) before re-issuing it."""
 
     tool: str
     args: dict
     wait_ms: int = 0
+    tier: int = 1
 
 
 @dataclass
 class Track:
     """A replayable path for a task. ``task`` is the signature it was recorded for
-    (the query) — a track is only replayed for a matching task, never blindly."""
+    (the query) — a track is only replayed for a matching task, never blindly.
+    ``model`` is the provider model id that originally drove (pathfound) the run, kept
+    as provenance: the path is the frontier model's reasoning, frozen for cheap reuse."""
 
     task: str
     steps: list[TrackStep] = field(default_factory=list)
+    model: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(
             {"task": self.task,
-             "steps": [{"tool": s.tool, "args": s.args, "wait_ms": s.wait_ms} for s in self.steps]},
+             "model": self.model,
+             "steps": [{"tool": s.tool, "args": s.args, "wait_ms": s.wait_ms, "tier": s.tier}
+                       for s in self.steps]},
             indent=2,
         )
 
@@ -57,7 +66,9 @@ class Track:
         data = json.loads(text)
         return cls(
             task=data.get("task", ""),
-            steps=[TrackStep(tool=s["tool"], args=s.get("args", {}), wait_ms=int(s.get("wait_ms", 0)))
+            model=data.get("model"),
+            steps=[TrackStep(tool=s["tool"], args=s.get("args", {}),
+                             wait_ms=int(s.get("wait_ms", 0)), tier=int(s.get("tier", 1)))
                    for s in data.get("steps", [])],
         )
 
@@ -78,16 +89,27 @@ class Track:
         return bool(self.task) and self.task == task
 
 
-def record_track(events: list[Any], *, task: str) -> Track:
+def record_track(events: list[Any], *, task: str, model: str | None = None) -> Track:
     """Project a run's event log into a Track: every ``harness.tool.invoked`` in
-    order, with the inter-call gap (ms) derived from the event timestamps. This is
-    the recording — no extra instrumentation; the log already captured the path."""
+    order, with the inter-call gap (ms) derived from the event timestamps and the
+    ladder ``tier`` active at the call. The tier is tracked by replaying the
+    ``harness.task.escalated`` events interleaved with the tool calls — so a path
+    that climbed to a browser tier records those steps at that tier, and the track
+    remembers its escalation. ``model`` stamps which model pathfound the run. No
+    extra instrumentation; the log already captured the path."""
     steps: list[TrackStep] = []
     prev_ts = None
+    tier = 1
     for ev in events:
-        if getattr(ev, "type", "") != "harness.tool.invoked":
-            continue
+        type_ = getattr(ev, "type", "")
         payload = getattr(ev, "payload", {}) or {}
+        if type_ == "harness.task.escalated":
+            to_tier = payload.get("to_tier")
+            if isinstance(to_tier, int):
+                tier = to_tier
+            continue
+        if type_ != "harness.tool.invoked":
+            continue
         tool = payload.get("tool")
         if not tool:
             continue
@@ -96,5 +118,6 @@ def record_track(events: list[Any], *, task: str) -> Track:
         if prev_ts is not None and ts is not None:
             wait_ms = max(0, int((ts - prev_ts).total_seconds() * 1000))
         prev_ts = ts
-        steps.append(TrackStep(tool=tool, args=dict(payload.get("args", {})), wait_ms=wait_ms))
-    return Track(task=task, steps=steps)
+        steps.append(TrackStep(tool=tool, args=dict(payload.get("args", {})),
+                               wait_ms=wait_ms, tier=tier))
+    return Track(task=task, steps=steps, model=model)

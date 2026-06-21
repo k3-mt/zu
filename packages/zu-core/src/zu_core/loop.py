@@ -498,18 +498,44 @@ def _is_challenge(obs: Any) -> bool:
     return isinstance(status, int) and status >= 400
 
 
+async def _replay_climb_to(run: _Run, ladder: _Ladder, tools: dict, step: Any) -> None:
+    """Climb the ladder to the tier a replayed step needs — the larger of the
+    recorded tier and the tool's own tier — emitting the ``task.escalated`` event
+    the model's climb would, so the replay reproduces (and re-records) escalation.
+    Capped at the ceiling; a no-op when already high enough."""
+    tool = tools.get(step.tool)
+    want = max(getattr(step, "tier", 1), _tier_of(tool) if tool is not None else 1)
+    want = min(want, ladder.ceiling)
+    if want <= ladder.current:
+        return
+    frm = ladder.current
+    ladder.current = want
+    await run.emit(
+        ev.TASK_ESCALATED,
+        {"reason": "replay", "from_tier": frm, "to_tier": want, "replay": True},
+        parent=run.root, source="replay",
+    )
+
+
 async def _replay_track(
-    run: _Run, track: Track, tools: dict, messages: list[dict], *,
+    run: _Run, track: Track, tools: dict, messages: list[dict], ladder: _Ladder, *,
     wall_time_s: float, start: float, max_observation_chars: int | None,
 ) -> bool:
     """Drive the recorded path deterministically — re-issue each tool call in order,
     with NO model call — appending the same assistant/tool message pair the loop
     would, so the model has consistent history if it takes over. Stops (returning
     True) at the first challenge; returns False when the whole track replayed. Paced
-    by the recorded gaps (capped), and bounded by the run's wall-time."""
+    by the recorded gaps (capped), and bounded by the run's wall-time.
+
+    The track remembers its escalation: before a step that needs a higher tier (its
+    recorded tier, or the tool's own tier), the navigator climbs the ladder and emits
+    the same ``task.escalated`` event the model's climb would — so the replay is a
+    faithful re-run (and a re-recording captures the escalation), and the model
+    inherits the ladder at the tier the path had reached."""
     for i, step in enumerate(track.steps):
         if wall_time_s - (time.monotonic() - start) <= 0:
             return True  # out of time; let the model loop end the run cleanly
+        await _replay_climb_to(run, ladder, tools, step)
         if step.wait_ms:
             await asyncio.sleep(min(step.wait_ms, MAX_REPLAY_WAIT_MS) / 1000)
         turn = await run.emit(ev.TURN_STARTED, {"step": i + 1, "replay": True}, parent=run.root)
@@ -610,12 +636,13 @@ async def run_task(
     # or the track runs out. The model loop below then takes over at that frontier,
     # sharing the same tools (and live browser session) and message history.
     if track is not None and track.matches(spec.query) and track.steps:
-        await _replay_track(run, track, tools, messages,
+        # The navigator climbs the ladder as the recorded path did (emitting the
+        # same escalation events), so when the model takes over at the frontier it
+        # inherits the ladder exactly where the path left it — its remembered tier,
+        # not a blanket jump to the ceiling.
+        await _replay_track(run, track, tools, messages, ladder,
                             wall_time_s=budget.wall_time_s, start=start,
                             max_observation_chars=max_observation_chars)
-        # The replayed path used whatever tools it needed (already validated), so
-        # unlock the full ladder for the model that continues from here.
-        ladder.current = ladder.ceiling
 
     for step in range(budget.max_steps):
         # --- budget checkpoints (time / tokens) before spending a model call ---

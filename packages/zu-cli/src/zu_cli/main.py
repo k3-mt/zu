@@ -126,9 +126,15 @@ def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) ->
     # the model just built). Best-effort: a save failure never fails the run.
     if use_track and result.status is Status.SUCCESS:
         try:
-            recorded = record_track(events, task=spec.query)
+            recorded = record_track(events, task=spec.query, model=model)
             recorded.save(track_path)
-            typer.echo(f"track  : recorded {len(recorded.steps)} steps → {track_path}")
+            climbs = sorted({s.tier for s in recorded.steps})
+            tiers = (f"tiers {min(climbs)}→{max(climbs)}" if len(climbs) > 1
+                     else f"tier {climbs[0]}" if climbs else "no tools")
+            by = f", driven by {recorded.model}" if recorded.model else ""
+            typer.echo(
+                f"track  : recorded {len(recorded.steps)} steps ({tiers}{by}) → {track_path}"
+            )
         except OSError:
             pass
 

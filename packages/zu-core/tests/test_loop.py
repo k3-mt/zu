@@ -1050,3 +1050,37 @@ async def test_track_challenge_hands_off_to_the_model() -> None:
     result = await run_task(TaskSpec(query="q"), provider, reg, EventBus(), track=track)
     assert result.status == Status.SUCCESS
     assert [c["k"] for c in tool.calls] == ["a", "b"]        # stopped at the challenge
+
+
+class _Tier2Tool(_RecordingTool):
+    name = "browse"
+    tier = 2
+    schema = {"name": "browse", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "browse()"
+
+
+async def test_replay_remembers_and_reproduces_escalation() -> None:
+    # A track that climbed to tier 2 re-climbs on replay: the navigator emits the
+    # escalation before the tier-2 step, and the model inherits the ladder there.
+    from zu_core.track import Track, TrackStep
+
+    t1 = _RecordingTool()
+    t2 = _Tier2Tool()
+    reg = Registry()
+    reg.register("tools", "rec", t1)
+    reg.register("tools", "browse", t2)
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    track = Track(task="q", model="m/v1", steps=[
+        TrackStep("rec", {"k": "a"}, 0, tier=1),
+        TrackStep("browse", {"k": "b"}, 0, tier=2),     # the path had escalated
+    ])
+    bus = EventBus()
+    result = await run_task(
+        TaskSpec(query="q", max_tier=2), provider, reg, bus, track=track)
+
+    assert result.status == Status.SUCCESS
+    assert [c["k"] for c in t1.calls] == ["a"] and [c["k"] for c in t2.calls] == ["b"]
+    escalations = [e for e in await bus.query() if e.type == "harness.task.escalated"]
+    assert len(escalations) == 1
+    assert (escalations[0].payload["from_tier"], escalations[0].payload["to_tier"]) == (1, 2)
+    assert escalations[0].payload.get("replay") is True

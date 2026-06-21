@@ -39,15 +39,42 @@ def test_record_ignores_non_tool_events() -> None:
     assert track.steps == []
 
 
+def test_record_remembers_tier_escalation_and_model() -> None:
+    t0 = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
+    events = [
+        _ev("harness.tool.invoked", t0, tool="web_search", args={"q": "x"}),
+        _ev("harness.tool.invoked", t0, tool="http_fetch", args={"url": "u"}),
+        _ev("harness.task.escalated", t0, from_tier=1, to_tier=2, reason="embedded-widget"),
+        _ev("harness.tool.invoked", t0, tool="browser", args={"op": "open"}),
+        _ev("harness.tool.invoked", t0, tool="browser", args={"op": "act"}),
+    ]
+    track = record_track(events, task="find slots", model="anthropic/claude-sonnet-4.5")
+    assert track.model == "anthropic/claude-sonnet-4.5"
+    # the tier the path had climbed to is remembered per step
+    assert [(s.tool, s.tier) for s in track.steps] == [
+        ("web_search", 1), ("http_fetch", 1), ("browser", 2), ("browser", 2),
+    ]
+
+
 def test_round_trip_json() -> None:
-    track = Track(task="q", steps=[
-        TrackStep("web_search", {"query": "x"}, 0),
-        TrackStep("browser", {"op": "open", "url": "https://x/"}, 1200),
+    track = Track(task="q", model="m/v1", steps=[
+        TrackStep("web_search", {"query": "x"}, 0, tier=1),
+        TrackStep("browser", {"op": "open", "url": "https://x/"}, 1200, tier=2),
     ])
     back = Track.from_json(track.to_json())
-    assert back.task == "q"
-    assert [(s.tool, s.args, s.wait_ms) for s in back.steps] == \
-           [("web_search", {"query": "x"}, 0), ("browser", {"op": "open", "url": "https://x/"}, 1200)]
+    assert back.task == "q" and back.model == "m/v1"
+    assert [(s.tool, s.args, s.wait_ms, s.tier) for s in back.steps] == [
+        ("web_search", {"query": "x"}, 0, 1),
+        ("browser", {"op": "open", "url": "https://x/"}, 1200, 2),
+    ]
+
+
+def test_from_json_back_compatible_with_tierless_track() -> None:
+    # An older track has no model/tier — load it without error, defaulting to tier 1.
+    old = '{"task": "q", "steps": [{"tool": "browser", "args": {"op": "open"}, "wait_ms": 5}]}'
+    track = Track.from_json(old)
+    assert track.model is None
+    assert track.steps[0].tier == 1 and track.steps[0].wait_ms == 5
 
 
 def test_save_load_roundtrip(tmp_path) -> None:
