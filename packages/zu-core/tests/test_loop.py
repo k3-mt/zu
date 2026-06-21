@@ -1052,6 +1052,64 @@ async def test_track_challenge_hands_off_to_the_model() -> None:
     assert [c["k"] for c in tool.calls] == ["a", "b"]        # stopped at the challenge
 
 
+def test_is_challenge_tolerates_a_soft_miss_but_not_a_fatal_one() -> None:
+    from zu_core.loop import _is_challenge, _is_soft_miss
+
+    healthy = {"url": "u", "text": "ok"}
+    soft = {"action_error": "click missed", "action_error_kind": "soft", "url": "u"}
+    fatal = {"action_error": "unknown action", "action_error_kind": "fatal", "url": "u"}
+    assert _is_challenge(healthy) is False
+    assert _is_challenge(soft) is False          # a no-op miss is not a divergence
+    assert _is_soft_miss(soft) is True
+    assert _is_challenge(fatal) is True          # a malformed action is
+    assert _is_challenge({"error": "boom"}) is True
+    assert _is_challenge({"status": 503}) is True
+
+
+class _SoftMissTool(_RecordingTool):
+    """Returns a soft (no-op) action miss for the args in ``miss_on``."""
+
+    def __init__(self, miss_on: set[str]) -> None:
+        super().__init__()
+        self.miss_on = miss_on
+
+    async def __call__(self, ctx, **args) -> dict:
+        self.calls.append(args)
+        if args.get("k") in self.miss_on:
+            return {"action_error": "click missed", "action_error_kind": "soft", "text": "x"}
+        return {"text": f"did {args.get('k')}"}
+
+
+async def test_replay_continues_past_a_single_soft_miss() -> None:
+    from zu_core.track import Track, TrackStep
+
+    tool = _SoftMissTool(miss_on={"b"})         # step 2 no-ops, steps 1/3 fine
+    reg = Registry()
+    reg.register("tools", "rec", tool)
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    track = Track(task="q", steps=[
+        TrackStep("rec", {"k": "a"}, 0), TrackStep("rec", {"k": "b"}, 0),
+        TrackStep("rec", {"k": "c"}, 0)])
+    result = await run_task(TaskSpec(query="q"), provider, reg, EventBus(), track=track)
+    assert result.status == Status.SUCCESS
+    assert [c["k"] for c in tool.calls] == ["a", "b", "c"]   # replay did NOT bail at "b"
+
+
+async def test_replay_bails_after_a_run_of_soft_misses() -> None:
+    from zu_core.loop import _REPLAY_MAX_SOFT_MISSES
+    from zu_core.track import Track, TrackStep
+
+    keys = list("abcdef")
+    tool = _SoftMissTool(miss_on=set(keys))     # every step no-ops -> real divergence
+    reg = Registry()
+    reg.register("tools", "rec", tool)
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    track = Track(task="q", steps=[TrackStep("rec", {"k": k}, 0) for k in keys])
+    await run_task(TaskSpec(query="q"), provider, reg, EventBus(), track=track)
+    # handed off after the streak cap — not all steps replayed blindly
+    assert len(tool.calls) == _REPLAY_MAX_SOFT_MISSES
+
+
 class _Tier2Tool(_RecordingTool):
     name = "browse"
     tier = 2

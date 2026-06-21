@@ -175,9 +175,24 @@ def test_run_actions_fire_in_order_and_report_failure() -> None:
     assert bs._run_actions(page, [{"click": "text=A"}, {"wait_ms": 50}]) is None
     assert page.calls == [("click", "text=A"), ("wait_ms", 50)]
     page.fail_on = "text=X"
-    err = bs._run_actions(page, [{"click": "text=X"}, {"click": "text=Y"}])
-    assert err is not None and "text=X" in err
+    result = bs._run_actions(page, [{"click": "text=X"}, {"click": "text=Y"}])
+    assert result is not None
+    err, soft = result
+    assert "text=X" in err and soft is True            # a missed click is a SOFT miss
     assert ("click", "text=Y") not in page.calls
+
+
+def test_run_actions_classifies_soft_vs_fatal() -> None:
+    page = _FakePage()
+    # a malformed/unknown action is FATAL — the request itself is wrong
+    err, soft = bs._run_actions(page, [{"frobnicate": "x"}])
+    assert "unknown action" in err and soft is False
+    err, soft = bs._run_actions(page, ["not a dict"])
+    assert "bad action" in err and soft is False
+    # an element-targeting action that misses is SOFT (no-op, not a broken page)
+    page.fail_on = "text=Gone"
+    _, soft = bs._run_actions(page, [{"click": "text=Gone"}])
+    assert soft is True
 
 
 def test_click_near_targets_the_frame_that_has_the_match() -> None:

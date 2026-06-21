@@ -25,7 +25,7 @@ from .net import validate_and_pin
 
 _DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
 _OBS_KEYS = ("status", "url", "text", "html", "content", "network",
-             "action_error", "consent_dismissed")
+             "action_error", "action_error_kind", "consent_dismissed")
 
 
 class Browser:

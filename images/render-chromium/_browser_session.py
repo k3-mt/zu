@@ -282,18 +282,28 @@ def _robust_text_click(page: Any, text: str, timeout: int) -> bool:
     return False
 
 
-def _run_actions(page: Any, actions: list) -> str | None:
-    """Apply read-surfacing actions in order; return an error string on the first
-    failure (DOM so far is kept), else None. Each Playwright op auto-waits for the
-    target to be actionable — event-driven, not a fixed sleep. Actions are
-    FRAME-AWARE: the selector is resolved into whichever frame (main or an embedded
-    iframe) actually holds it, so a widget inside a cross-origin frame is driveable.
+# Actions that target a page element (click/fill/select/wait_for): when one fails
+# it is because the element wasn't found/actionable — a SOFT miss. The element may
+# be gone precisely because its goal already holds (a consent banner already
+# dismissed, an option already selected), so a SOFT miss is a no-op, not proof the
+# page is broken. A malformed/unknown action is a FATAL (the request is wrong).
+_TARGETING_ACTIONS = ("click", "fill", "select", "wait_for")
+
+
+def _run_actions(page: Any, actions: list) -> tuple[str, bool] | None:
+    """Apply read-surfacing actions in order; on the first failure return
+    ``(error, soft)`` — ``soft`` True when an element-targeting action missed its
+    target (a no-op miss, not a broken page) — else None (DOM so far is kept). Each
+    Playwright op auto-waits for the target to be actionable — event-driven, not a
+    fixed sleep. Actions are FRAME-AWARE: the selector is resolved into whichever
+    frame (main or an embedded iframe) actually holds it, so a widget inside a
+    cross-origin frame is driveable.
 
     Supported: ``click``/``fill``/``select`` (a CSS or ``text=`` selector;
     ``fill``/``select`` also take ``value``), ``wait_for`` (selector), ``wait_ms``."""
     for raw in actions[:_MAX_ACTIONS]:
         if not isinstance(raw, dict):
-            return f"bad action (not an object): {raw!r}"
+            return (f"bad action (not an object): {raw!r}", False)
         try:
             # ``.first`` makes a selector FORGIVING: a text selector the model
             # picked from what it saw often matches more than one node (a nav link
@@ -326,9 +336,10 @@ def _run_actions(page: Any, actions: list) -> str | None:
             elif "wait_ms" in raw:
                 page.wait_for_timeout(min(int(raw["wait_ms"]), _ACTION_TIMEOUT_MS))
             else:
-                return f"unknown action: {sorted(raw)}"
+                return (f"unknown action: {sorted(raw)}", False)
         except Exception as exc:  # noqa: BLE001 - surface which action failed; keep the DOM
-            return f"action {raw!r} failed: {type(exc).__name__}: {exc}"
+            soft = any(k in raw for k in _TARGETING_ACTIONS)
+            return (f"action {raw!r} failed: {type(exc).__name__}: {exc}", soft)
     return None
 
 
@@ -513,7 +524,7 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
         # A consent wall can pop up AFTER a prior step too — clear it before acting
         # so the model never has to fight it (the whole reason runs stalled).
         consent = dismiss_consent(page, attempts=1) if state.get("dismiss_consent", True) else None
-        action_error = _run_actions(page, cmd.get("actions", [])) if op == "act" else None
+        action = _run_actions(page, cmd.get("actions", [])) if op == "act" else None
         # An ``act`` shows only what CHANGED (the diff); a ``read`` shows the full
         # current view (the model explicitly asked to see everything).
         prev = state.get("prev_text") if op == "act" else None
@@ -522,8 +533,13 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
         state["prev_text"] = cur
         if consent:
             obs["consent_dismissed"] = consent
-        if action_error:
-            obs["action_error"] = action_error
+        if action:
+            error, soft = action
+            obs["action_error"] = error
+            # A soft miss (an element-targeting action that found no target) is a
+            # no-op, not a broken page — flagged so the replay navigator can keep
+            # going instead of treating it as a divergence.
+            obs["action_error_kind"] = "soft" if soft else "fatal"
         return obs, False
 
     if op == "close":

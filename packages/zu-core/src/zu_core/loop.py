@@ -56,6 +56,11 @@ log = logging.getLogger("zu.loop")
 # Severity ordering for picking the worst verdict at a checkpoint.
 _RANK = {Severity.WARN: 0, Severity.RETRY: 1, Severity.ESCALATE: 2, Severity.TERMINAL: 3}
 
+# How many consecutive SOFT misses (no-op actions) the replay navigator tolerates
+# before deciding the recorded path has truly diverged and handing off to the model.
+# One or two are normal drift (an already-dismissed banner); a run of them is not.
+_REPLAY_MAX_SOFT_MISSES = 3
+
 # Observation keys that carry retrieved page content — stored once (in a
 # data.source.fetched event), summarised in the harness.tool.returned event.
 _CONTENT_KEYS = ("html", "text", "content")
@@ -486,16 +491,30 @@ class _Run:
 
 
 def _is_challenge(obs: Any) -> bool:
-    """Did a replayed step hit a challenge — i.e. diverge from the recorded path so
-    the model must take over? A tool error, a blocked/refused call, an action that
-    missed (action_error), or an HTTP error status. (A successful step that merely
-    returns different live DATA is NOT a challenge — the navigation still worked.)"""
+    """Did a replayed step hit a HARD challenge — i.e. diverge from the recorded path
+    so the model must take over? A tool error, a blocked/refused call, or an HTTP
+    error status. (A successful step that merely returns different live DATA is NOT a
+    challenge — the navigation still worked.)
+
+    A SOFT action miss (``action_error_kind == 'soft'``: an element-targeting action
+    that found no target) is NOT a hard challenge: the element is often gone because
+    its goal already holds — a consent banner already dismissed, an option already
+    selected — so it is a no-op, not a broken page. The replay keeps going; only a
+    RUN of consecutive soft misses (handled by the navigator) signals real divergence."""
     if not isinstance(obs, dict):
         return False
-    if obs.get("error") or obs.get("action_error") or obs.get("blocked"):
+    if obs.get("error") or obs.get("blocked"):
+        return True
+    if obs.get("action_error") and obs.get("action_error_kind") != "soft":
         return True
     status = obs.get("status")
     return isinstance(status, int) and status >= 400
+
+
+def _is_soft_miss(obs: Any) -> bool:
+    """A replayed step that no-op'd: an element-targeting action missed its target on
+    an otherwise-healthy page. Tolerated singly, but a run of them means divergence."""
+    return isinstance(obs, dict) and obs.get("action_error_kind") == "soft"
 
 
 async def _replay_climb_to(run: _Run, ladder: _Ladder, tools: dict, step: Any) -> None:
@@ -531,7 +550,12 @@ async def _replay_track(
     recorded tier, or the tool's own tier), the navigator climbs the ladder and emits
     the same ``task.escalated`` event the model's climb would — so the replay is a
     faithful re-run (and a re-recording captures the escalation), and the model
-    inherits the ladder at the tier the path had reached."""
+    inherits the ladder at the tier the path had reached.
+
+    A single SOFT miss (a no-op action — clicking an already-dismissed banner) does
+    NOT end replay: the path is still on track. Only a RUN of consecutive soft misses
+    (``_REPLAY_MAX_SOFT_MISSES``) means the page really diverged — then hand off."""
+    soft_streak = 0
     for i, step in enumerate(track.steps):
         if wall_time_s - (time.monotonic() - start) <= 0:
             return True  # out of time; let the model loop end the run cleanly
@@ -551,6 +575,12 @@ async def _replay_track(
         )
         if _is_challenge(obs):
             return True  # diverged — hand the frontier to the model from here
+        if _is_soft_miss(obs):
+            soft_streak += 1
+            if soft_streak >= _REPLAY_MAX_SOFT_MISSES:
+                return True  # too many no-ops in a row — the path really diverged
+        else:
+            soft_streak = 0
     return False
 
 
