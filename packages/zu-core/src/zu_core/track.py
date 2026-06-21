@@ -1,0 +1,100 @@
+"""Track — a recorded, replayable path of an agent's tool calls.
+
+The model is an expensive PATHFINDER: the first time it does a task it explores,
+and every tool call it makes (with the time between calls) is already on the event
+log. A :class:`Track` is the projection of that log into a deterministic path — the
+ordered tool calls + their pacing — saved in the agent's directory.
+
+A navigator then DRIVES that path with no model calls (see ``navigator`` in the
+loop), reproducing exactly what the model did. The model only reappears at the
+frontier: when a step hits a challenge (an error) or the track runs out. So a task
+done once runs cheaply forever after, and model calls are spent only on the novel.
+
+This module is pure data + projection (SDK-free, stdlib only); the replay engine
+lives in the loop, where tool dispatch already is.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+# Don't make replay wait the model's full think-time between steps — that was the
+# model being slow, not the page needing it. But DO leave a small settle so a
+# replayed click doesn't race a page that the model (by thinking) implicitly let
+# settle. So a recorded gap is capped to this on replay.
+MAX_REPLAY_WAIT_MS = 3000
+
+
+@dataclass
+class TrackStep:
+    """One tool call on the path: which tool, the exact args, and the gap before it
+    (ms since the previous call was issued — the model's pacing, capped on replay)."""
+
+    tool: str
+    args: dict
+    wait_ms: int = 0
+
+
+@dataclass
+class Track:
+    """A replayable path for a task. ``task`` is the signature it was recorded for
+    (the query) — a track is only replayed for a matching task, never blindly."""
+
+    task: str
+    steps: list[TrackStep] = field(default_factory=list)
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"task": self.task,
+             "steps": [{"tool": s.tool, "args": s.args, "wait_ms": s.wait_ms} for s in self.steps]},
+            indent=2,
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> Track:
+        data = json.loads(text)
+        return cls(
+            task=data.get("task", ""),
+            steps=[TrackStep(tool=s["tool"], args=s.get("args", {}), wait_ms=int(s.get("wait_ms", 0)))
+                   for s in data.get("steps", [])],
+        )
+
+    def save(self, path: str) -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self.to_json())
+
+    @classmethod
+    def load(cls, path: str) -> Track | None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return cls.from_json(fh.read())
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            return None
+
+    def matches(self, task: str) -> bool:
+        """A track replays only for the task it was recorded for."""
+        return bool(self.task) and self.task == task
+
+
+def record_track(events: list[Any], *, task: str) -> Track:
+    """Project a run's event log into a Track: every ``harness.tool.invoked`` in
+    order, with the inter-call gap (ms) derived from the event timestamps. This is
+    the recording — no extra instrumentation; the log already captured the path."""
+    steps: list[TrackStep] = []
+    prev_ts = None
+    for ev in events:
+        if getattr(ev, "type", "") != "harness.tool.invoked":
+            continue
+        payload = getattr(ev, "payload", {}) or {}
+        tool = payload.get("tool")
+        if not tool:
+            continue
+        ts = getattr(ev, "ts", None)
+        wait_ms = 0
+        if prev_ts is not None and ts is not None:
+            wait_ms = max(0, int((ts - prev_ts).total_seconds() * 1000))
+        prev_ts = ts
+        steps.append(TrackStep(tool=tool, args=dict(payload.get("args", {})), wait_ms=wait_ms))
+    return Track(task=task, steps=steps)

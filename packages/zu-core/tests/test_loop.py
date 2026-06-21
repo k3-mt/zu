@@ -959,3 +959,77 @@ async def test_mid_turn_halt_leaves_a_balanced_message_history() -> None:
     asst = next(m for m in prov.last if m.get("role") == "assistant" and m.get("tool_calls"))
     n_results = sum(1 for m in prov.last if m.get("role") == "tool")
     assert len(asst["tool_calls"]) == 2 and n_results == 2  # 1 real + 1 stub result
+
+
+# --- track replay: deterministic navigation, model only at the frontier --------
+
+
+class _RecordingTool:
+    name = "rec"
+    tier = 1
+    schema = {"name": "rec", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "rec()"
+    capabilities: frozenset[str] = frozenset()
+    egress: frozenset[str] = frozenset()
+
+    def __init__(self, fail_on_arg: str | None = None) -> None:
+        self.calls: list[dict] = []
+        self.fail_on_arg = fail_on_arg
+
+    async def __call__(self, ctx, **args) -> dict:
+        self.calls.append(args)
+        if self.fail_on_arg is not None and args.get("k") == self.fail_on_arg:
+            return {"error": "boom"}            # a challenge
+        return {"text": f"did {args.get('k')}"}
+
+
+async def test_track_replays_tool_calls_without_the_model() -> None:
+    from zu_core.track import Track, TrackStep
+
+    tool = _RecordingTool()
+    reg = Registry()
+    reg.register("tools", "rec", tool)
+    # the model is asked ONLY to finalise (replay does the tool calls, no model)
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    track = Track(task="q", steps=[
+        TrackStep("rec", {"k": "a"}, 0), TrackStep("rec", {"k": "b"}, 0)])
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="q"), provider, reg, bus, track=track)
+
+    assert result.status == Status.SUCCESS and result.value == {"ok": True}
+    assert [c["k"] for c in tool.calls] == ["a", "b"]        # both replayed
+    invoked = [e for e in await bus.query() if e.type == "harness.tool.invoked"]
+    assert len(invoked) == 2 and all(e.payload.get("tool") == "rec" for e in invoked)
+    # the replayed turns are marked as replay (no model call spent on them)
+    replay_turns = [e for e in await bus.query()
+                    if e.type == "harness.turn.started" and e.payload.get("replay")]
+    assert len(replay_turns) == 2
+
+
+async def test_track_only_replays_for_a_matching_task() -> None:
+    from zu_core.track import Track, TrackStep
+
+    tool = _RecordingTool()
+    reg = Registry()
+    reg.register("tools", "rec", tool)
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    track = Track(task="DIFFERENT", steps=[TrackStep("rec", {"k": "a"}, 0)])
+    await run_task(TaskSpec(query="q"), provider, reg, EventBus(), track=track)
+    assert tool.calls == []                                  # wrong task -> no replay
+
+
+async def test_track_challenge_hands_off_to_the_model() -> None:
+    from zu_core.track import Track, TrackStep
+
+    tool = _RecordingTool(fail_on_arg="b")     # the 2nd replayed step errors
+    reg = Registry()
+    reg.register("tools", "rec", tool)
+    # after the challenge, the model takes over and finalises
+    provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+    track = Track(task="q", steps=[
+        TrackStep("rec", {"k": "a"}, 0),
+        TrackStep("rec", {"k": "b"}, 0),       # challenge here
+        TrackStep("rec", {"k": "c"}, 0)])      # never reached (replay stopped)
+    result = await run_task(TaskSpec(query="q"), provider, reg, EventBus(), track=track)
+    assert result.status == Status.SUCCESS
+    assert [c["k"] for c in tool.calls] == ["a", "b"]        # stopped at the challenge

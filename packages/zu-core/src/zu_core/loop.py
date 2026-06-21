@@ -49,6 +49,7 @@ from .ports import (
 )
 from .registry import REGISTRY, Registry
 from .security import SecurityBlock, enforce_containment
+from .track import MAX_REPLAY_WAIT_MS, Track
 
 log = logging.getLogger("zu.loop")
 
@@ -441,6 +442,49 @@ class _Run:
         return Result(status=Status.ESCALATE, reason=reason)
 
 
+def _is_challenge(obs: Any) -> bool:
+    """Did a replayed step hit a challenge — i.e. diverge from the recorded path so
+    the model must take over? A tool error, a blocked/refused call, an action that
+    missed (action_error), or an HTTP error status. (A successful step that merely
+    returns different live DATA is NOT a challenge — the navigation still worked.)"""
+    if not isinstance(obs, dict):
+        return False
+    if obs.get("error") or obs.get("action_error") or obs.get("blocked"):
+        return True
+    status = obs.get("status")
+    return isinstance(status, int) and status >= 400
+
+
+async def _replay_track(
+    run: _Run, track: Track, tools: dict, messages: list[dict], *,
+    wall_time_s: float, start: float, max_observation_chars: int | None,
+) -> bool:
+    """Drive the recorded path deterministically — re-issue each tool call in order,
+    with NO model call — appending the same assistant/tool message pair the loop
+    would, so the model has consistent history if it takes over. Stops (returning
+    True) at the first challenge; returns False when the whole track replayed. Paced
+    by the recorded gaps (capped), and bounded by the run's wall-time."""
+    for i, step in enumerate(track.steps):
+        if wall_time_s - (time.monotonic() - start) <= 0:
+            return True  # out of time; let the model loop end the run cleanly
+        if step.wait_ms:
+            await asyncio.sleep(min(step.wait_ms, MAX_REPLAY_WAIT_MS) / 1000)
+        turn = await run.emit(ev.TURN_STARTED, {"step": i + 1, "replay": True}, parent=run.root)
+        remaining = max(0.0, wall_time_s - (time.monotonic() - start))
+        obs = await _invoke(run, turn, tools, step.tool, step.args, timeout=remaining)
+        messages.append(
+            {"role": "assistant", "content": f"(replay step {i + 1})",
+             "tool_calls": [{"name": step.tool, "args": step.args}]}
+        )
+        messages.append(
+            {"role": "tool", "name": step.tool,
+             "content": json.dumps(_observation_for_model(obs, max_observation_chars), default=str)}
+        )
+        if _is_challenge(obs):
+            return True  # diverged — hand the frontier to the model from here
+    return False
+
+
 async def run_task(
     spec: TaskSpec,
     provider: ModelProvider,
@@ -453,6 +497,7 @@ async def run_task(
     max_observation_chars: int | None = None,
     observation_strategy: str = "truncate",
     max_context_chars: int | None = None,
+    track: Track | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -516,6 +561,18 @@ async def run_task(
 
     start = time.monotonic()
     tokens = 0
+
+    # --- replay a recorded track first (the navigator): drive the model's known
+    # path deterministically, with NO model calls, until a step challenges (errors)
+    # or the track runs out. The model loop below then takes over at that frontier,
+    # sharing the same tools (and live browser session) and message history.
+    if track is not None and track.matches(spec.query) and track.steps:
+        await _replay_track(run, track, tools, messages,
+                            wall_time_s=budget.wall_time_s, start=start,
+                            max_observation_chars=max_observation_chars)
+        # The replayed path used whatever tools it needed (already validated), so
+        # unlock the full ladder for the model that continues from here.
+        ladder.current = ladder.ceiling
 
     for step in range(budget.max_steps):
         # --- budget checkpoints (time / tokens) before spending a model call ---
