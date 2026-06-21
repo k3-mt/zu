@@ -15,7 +15,7 @@
       "args": {
         "url": "https://www.parkvets.com/"
       },
-      "wait_ms": 4488,
+      "wait_ms": 3287,
       "tier": 1
     },
     {
@@ -23,7 +23,7 @@
       "args": {
         "query": "Park Vets Chislehurst book appointment Vetstoria"
       },
-      "wait_ms": 4672,
+      "wait_ms": 3452,
       "tier": 1
     },
     {
@@ -32,7 +32,7 @@
         "url": "https://www.parkvets.com/",
         "wait_until": "networkidle"
       },
-      "wait_ms": 4798,
+      "wait_ms": 3213,
       "tier": 2
     },
     {
@@ -40,7 +40,7 @@
       "args": {
         "query": "book appointment"
       },
-      "wait_ms": 9816,
+      "wait_ms": 7011,
       "tier": 2
     },
     {
@@ -54,7 +54,7 @@
           }
         ]
       },
-      "wait_ms": 2709,
+      "wait_ms": 2713,
       "tier": 2
     },
     {
@@ -63,7 +63,7 @@
         "op": "open",
         "url": "https://www.parkvets.com/book-an-appointment"
       },
-      "wait_ms": 11341,
+      "wait_ms": 7084,
       "tier": 2
     },
     {
@@ -76,7 +76,7 @@
           }
         ]
       },
-      "wait_ms": 8183,
+      "wait_ms": 5744,
       "tier": 2
     },
     {
@@ -89,7 +89,7 @@
           }
         ]
       },
-      "wait_ms": 14708,
+      "wait_ms": 13207,
       "tier": 2
     },
     {
@@ -97,7 +97,7 @@
       "args": {
         "op": "read"
       },
-      "wait_ms": 3893,
+      "wait_ms": 4451,
       "tier": 2
     },
     {
@@ -110,7 +110,7 @@
           }
         ]
       },
-      "wait_ms": 3056,
+      "wait_ms": 3170,
       "tier": 2
     },
     {
@@ -123,7 +123,7 @@
           }
         ]
       },
-      "wait_ms": 4380,
+      "wait_ms": 3257,
       "tier": 2
     },
     {
@@ -137,7 +137,7 @@
           }
         ]
       },
-      "wait_ms": 3722,
+      "wait_ms": 3332,
       "tier": 2
     },
     {
@@ -150,7 +150,7 @@
           }
         ]
       },
-      "wait_ms": 2839,
+      "wait_ms": 3092,
       "tier": 2
     },
     {
@@ -163,7 +163,7 @@
           }
         ]
       },
-      "wait_ms": 3679,
+      "wait_ms": 3181,
       "tier": 2
     },
     {
@@ -176,7 +176,7 @@
           }
         ]
       },
-      "wait_ms": 3041,
+      "wait_ms": 3210,
       "tier": 2
     },
     {
@@ -184,7 +184,7 @@
       "args": {
         "op": "read"
       },
-      "wait_ms": 2799,
+      "wait_ms": 3013,
       "tier": 2
     },
     {
@@ -197,7 +197,7 @@
           }
         ]
       },
-      "wait_ms": 3298,
+      "wait_ms": 3180,
       "tier": 2
     },
     {
@@ -210,7 +210,7 @@
           }
         ]
       },
-      "wait_ms": 3060,
+      "wait_ms": 3238,
       "tier": 2
     },
     {
@@ -218,7 +218,7 @@
       "args": {
         "op": "read"
       },
-      "wait_ms": 5734,
+      "wait_ms": 6187,
       "tier": 2
     },
     {
@@ -231,7 +231,7 @@
           }
         ]
       },
-      "wait_ms": 3182,
+      "wait_ms": 3158,
       "tier": 2
     },
     {
@@ -244,7 +244,7 @@
           }
         ]
       },
-      "wait_ms": 4616,
+      "wait_ms": 3242,
       "tier": 2
     },
     {
@@ -252,7 +252,7 @@
       "args": {
         "op": "close"
       },
-      "wait_ms": 7336,
+      "wait_ms": 5198,
       "tier": 2
     }
   ]
