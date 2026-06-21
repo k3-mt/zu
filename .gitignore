@@ -26,6 +26,9 @@ zu_review.jsonl
 # A recorded replay path is learned per-run and machine-local — regenerated on
 # every successful run, not source. The agent ships; its track does not.
 track.json
+# …except the flagship example ships its track on purpose, as a demo of the
+# record/replay convergence (committed; re-runs show as ordinary modifications).
+!examples/agents/vet-appointment/track.json
 
 # Editor / OS
 .idea/
