@@ -37,7 +37,22 @@ plugins:
   # Shape the result, then prove every reported value is on the page.
   validators: [schema, grounding]
 
+# Pathfinding budget — generous, for the first (or a --no-track) run where the
+# frontier model explores the live widget and records the path.
 budget: { max_steps: 60, max_tokens: 700000, wall_time_s: 900 }
+
+# Maturity settings, applied only when a recorded track replays:
+#   * budget — tight. The navigation is solved, so the model only finishes (extract
+#     the slots). A broken track then fails fast and cheap (re-record deliberately
+#     with --no-track) instead of silently re-pathfinding at the full budget above.
+#     Proven live: a clean replay extracts in ~2 calls / ~34k tokens.
+#   * finish_model — a cheap model for that frontier extraction (reuses this
+#     provider's endpoint/key, swapping only the model). Viable once the extract-
+#     don't-renavigate directive made the frontier a single clean call: the earlier
+#     Haiku flounder was that re-navigation, not the extraction itself.
+replay:
+  budget: { max_steps: 10, max_tokens: 120000, wall_time_s: 300 }
+  finish_model: anthropic/claude-haiku-4.5
 
 # The browser tool returns a FOCUSED observation each turn — what CHANGED (the
 # diff: a new step or a validation error), the visible controls (the menu), and
