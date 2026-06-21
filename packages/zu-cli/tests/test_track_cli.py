@@ -101,6 +101,27 @@ def test_run_records_then_replays_the_track(tmp_path, monkeypatch):
     assert _count(calls) == 1  # the tool ran deterministically, from the track
 
 
+def test_run_writes_cost_telemetry_and_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZU_TEST_CALLS", str(tmp_path / "calls.log"))
+    # the scripted model carries usage so the cost projection is non-trivial
+    _write_bundle(
+        tmp_path,
+        script="[{tool: call_tool, usage: {input_tokens: 100, output_tokens: 20}}, "
+               "{text: done, finish: stop, usage: {input_tokens: 50, output_tokens: 10}}]",
+    )
+    _isolate_tools_pkg()
+    r = runner.invoke(app, ["run", str(tmp_path), "--no-track"])
+    assert r.exit_code == 0, r.output
+    assert "cost   :" in r.output and "tokens" in r.output
+    # the per-agent ledger is appended with this run's telemetry
+    ledger = tmp_path / "cost.jsonl"
+    assert ledger.exists()
+    entry = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert entry["model_calls"] == 2
+    assert entry["total_tokens"] == 180          # 100+20+50+10
+    assert entry["status"] == "success"
+
+
 def test_no_track_neither_reads_nor_writes(tmp_path, monkeypatch):
     monkeypatch.setenv("ZU_TEST_CALLS", str(tmp_path / "calls.log"))
     _write_bundle(tmp_path, script="[{tool: call_tool}, {text: done, finish: stop}]")

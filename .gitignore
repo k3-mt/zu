@@ -23,6 +23,8 @@ zu.db
 zu.yaml.local
 zu_review.jsonl
 *.review.jsonl
+# Per-agent cost telemetry ledger — machine-local run history, not source.
+cost.jsonl
 # A recorded replay path is learned per-run and machine-local — regenerated on
 # every successful run, not source. The agent ships; its track does not.
 track.json

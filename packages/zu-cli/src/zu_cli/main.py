@@ -51,6 +51,22 @@ def _parse_duration(text: str) -> float:
     return seconds
 
 
+def _append_cost_ledger(path: str, *, agent: str, status: str, replayed: bool, summary) -> None:
+    """Append one run's cost telemetry to a durable per-agent JSONL ledger, so spend
+    is tracked across runs (and record-vs-replay is comparable). Best-effort: a write
+    failure is swallowed — telemetry must never fail the run."""
+    import json
+    from datetime import UTC, datetime
+
+    entry = {"at": datetime.now(UTC).isoformat(), "agent": agent, "status": status,
+             "replayed": replayed, **summary.to_dict()}
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
 def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) -> Result:
     """Load a single ``agent.yaml`` (or bundle dir) and drive its task to a Result,
     printing a summary. Shared by the one-shot and scheduled paths. Raises
@@ -67,13 +83,16 @@ def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) ->
     once runs cheaply forever after. ``--no-track`` disables both."""
     from pathlib import Path
 
+    from zu_core.cost import summarize_cost
     from zu_core.track import Track, record_track
 
     spec, cfg = load_agent(agent)
     provider, registry, bus, providers = assemble(cfg)
 
     p = Path(agent)
-    track_path = str((p if p.is_dir() else p.parent) / "track.json")
+    agent_dir = p if p.is_dir() else p.parent
+    track_path = str(agent_dir / "track.json")
+    cost_path = str(agent_dir / "cost.jsonl")
     track = Track.load(track_path) if use_track else None
     if track is not None and track.matches(spec.query):
         typer.echo(f"track  : replaying {len(track.steps)} recorded steps "
@@ -144,6 +163,14 @@ def _execute_once(agent: str, *, stream: bool = True, use_track: bool = True) ->
     if result.reason is not None:
         typer.echo(f"reason : {result.reason}")
     typer.echo(f"events : {len(events)} recorded")
+
+    # Real cost telemetry: project tokens/dollars + replay savings from the log,
+    # print it, and append it to a durable per-agent ledger so spend is tracked
+    # across runs. Best-effort persistence: a write failure never fails the run.
+    summary = summarize_cost(events)
+    typer.echo(f"cost   : {summary.format()}")
+    _append_cost_ledger(cost_path, agent=agent, status=result.status.value,
+                        replayed=track is not None, summary=summary)
     return result
 
 
