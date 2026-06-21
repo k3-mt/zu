@@ -37,7 +37,7 @@ plugins:
   # Shape the result, then prove every reported value is on the page.
   validators: [schema, grounding]
 
-budget: { max_steps: 40, max_tokens: 600000, wall_time_s: 600 }
+budget: { max_steps: 70, max_tokens: 900000, wall_time_s: 900 }
 
 # The browser tool returns a FOCUSED observation each turn — what CHANGED (the
 # diff: a new step or a validation error), the visible controls (the menu), and
@@ -66,12 +66,18 @@ task:
     (Vetstoria), so the times are not in the static HTML: use the `browser` tool to
     drive it step by step — open the booking page, then act/read to choose the
     Chislehurst location and work through the wizard (new client, species, a
-    consultation appointment type, then Next) until the calendar of times appears;
-    open it with capture_network so the availability data is captured — the booking
-    system fetches availability as JSON (the bookable dates, and the times for a
-    chosen date), so read those captured responses (via recall or the content) to
-    assemble the 3 SOONEST slots, pairing each time with the date it belongs to
-    (a slot is a date + a time, e.g. 2026-06-24 at 10:15 — never a bare time). Read the
+    consultation appointment type, then Next) until the calendar of dates appears.
+    The dates are a horizontal strip; the controls show each date's state (e.g.
+    "Wed Jun 24 — Wednesday June 24th is available"). Click an AVAILABLE date (not
+    one marked not available) to load its times — the times then appear in the page;
+    READ them. Do NOT click a time slot — clicking a time advances to booking; you
+    only need to READ the times. Collect the 3 soonest times starting from the
+    earliest available date, moving to the next available date if one has fewer than
+    3, pairing each time with its date (a slot is a date + a time — never a bare
+    time). Report each date EXACTLY as the calendar shows it (e.g. "Wed Jun 24"); do
+    not convert it to another format or add a year the page does not display, so the
+    value can be verified against the page. Read the visible times directly; do not
+    dig through raw API JSON. Read the
     page after each step and react — if action_error comes back, the selector
     missed, so look at the returned text and try another. On a form step, fill
     EVERY required field before clicking Next; for an option that appears many
@@ -93,8 +99,8 @@ task:
         items:
           type: object
           properties:
-            date: { type: string }   # e.g. 2026-06-24
-            time: { type: string }   # e.g. 09:20
+            date: { type: string }   # as shown on the page, e.g. "Wed Jun 24"
+            time: { type: string }   # e.g. 09:15
           required: [date, time]
       booking_url: { type: string }
     required: [slots, booking_url]

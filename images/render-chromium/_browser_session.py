@@ -393,13 +393,19 @@ _CONTROLS_JS = """
   const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
   const out = []; const seen = new Set();
-  const sel = "button,[role=button],[role=radio],[role=option],[role=tab],a[href],input,select,textarea,[tabindex]";
+  const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+  const sel = "button,[role=button],[role=radio],[role=option],[role=tab],[role=gridcell],a[href],input,select,textarea,[tabindex]";
   for (const el of document.querySelectorAll(sel)) {
     if (!vis(el)) continue;
-    let t = (el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || '')
-      .replace(/\\s+/g, ' ').trim().slice(0, 60);
-    if (!t || seen.has(t)) continue;
-    seen.add(t); out.push(t);
+    let t = norm(el.innerText || el.value || el.placeholder || '').slice(0, 50);
+    // Surface the accessible state: aria-label often carries availability/selection
+    // the visible text omits ("Wednesday June 24th is available"). Disabled too.
+    const al = norm(el.getAttribute('aria-label')).slice(0, 60);
+    let label = t || al;
+    if (al && al !== t) label = t ? (t + " — " + al) : al;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') label += " (disabled)";
+    if (!label || seen.has(label)) continue;
+    seen.add(label); out.push(label);
     if (out.length >= 80) break;
   }
   return out;
