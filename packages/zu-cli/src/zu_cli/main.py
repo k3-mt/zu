@@ -488,6 +488,69 @@ def harden(
 
 
 @app.command()
+def build(
+    agent: str = typer.Argument(
+        "agent.yaml", help="The agent to build: an agent.yaml file, or a bundle directory."
+    ),
+    min_score: float = typer.Option(
+        1.0, "--min-score",
+        help="Hold promotion (exit 1) if the hardened track's resilience is below this.",
+    ),
+    with_canary: bool = typer.Option(
+        False, "--with-canary",
+        help="Also run the live canary (stage 6) — the live lane, not built yet.",
+    ),
+) -> None:
+    """Run the OFFLINE construction spine — build → record track → harden — and write a
+    hardened ``track.json``, at $0 (no model, no network).
+
+    Chains the offline stages of the sequence: replay the captured ``fixtures/`` bundle
+    (stage 3), project the track from that clean run (stage 4), and score it against
+    perturbed fixtures (stage 5), gating the track on resilience. Needs a captured bundle
+    (run ``zu capture`` once); the live canary (stage 6) and promotion (stage 7) are
+    separate steps.
+    """
+    from pathlib import Path
+
+    from .build import _canary, build_offline
+    from .offline import Bundle, OfflineError, bundle_path
+
+    if with_canary:
+        # The explicit live-lane seam: fail loudly rather than pretend it ran.
+        try:
+            _canary(None, None)
+        except NotImplementedError as exc:
+            typer.echo(f"build: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+
+    try:
+        spec, cfg = load_agent(agent)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+    try:
+        bundle = Bundle.load(bundle_path(agent_dir))
+    except OfflineError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    typer.echo(f"zu build: {agent} (offline spine — no model, no network)")
+    report = asyncio.run(build_offline(spec, cfg, agent_dir, bundle, min_score=min_score))
+
+    for s in report.stages:
+        mark = {"ok": "✓", "failed": "✗", "skipped": "·"}.get(s.status, "?")
+        typer.echo(f"  {mark} {s.name}: {s.detail}")
+
+    if not report.ok:
+        typer.echo("build: held — fix the failed stage above before promoting.", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"build: hardened track ready at {report.track_path}")
+    typer.echo("next : `zu run <agent>` for a live canary, then `zu pack` / `zu deploy`.")
+
+
+@app.command()
 def serve(
     config: str = typer.Option(
         "agent.yaml", "--config", "-c", help="Agent/config file for the service (task block ignored; tasks arrive per request)."

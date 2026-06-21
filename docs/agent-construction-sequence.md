@@ -38,10 +38,15 @@ for, live, every time. Close that and the inner loop becomes free.
  5 Harden (chaos) zu harden           BUILT    offline brittleness audit + resilience score
  6 Live canary    one live run        SPEC     assemble from the existing run path
  7 Promote        zu pack / zu deploy EXISTS   deploy.py
-   META-AGENT     --sandboxed + zu mcp loop   SPEC + skeleton — cheap ONLY because it wraps stage 3
+   ─────────────────────────────────────────
+   SPINE         zu build            BUILT    chains stages 3→4→5 offline, gated, at $0
+   META-AGENT    --sandboxed + zu mcp loop   SPEC — cheap ONLY because it wraps the spine
 ```
 
-Stage 3 is the keystone: it turns the construction inner loop (diagnose a wall → edit a
+`zu build` is the offline spine: it runs stages 3→4→5 in order (build → record track →
+harden), gating the recorded track on the resilience score, and writes a hardened
+`track.json` at $0. The live stages (2 capture, 6 canary) and promotion (7) sit outside
+it, behind seams. Stage 3 is the keystone: it turns the construction inner loop (diagnose a wall → edit a
 capability or `agent.yaml` → re-run) from *frontier-priced and live* into *free and
 deterministic*. Everything cheap downstream — iterating, hardening, and the meta-agent —
 depends on it existing.
@@ -115,6 +120,8 @@ against fixtures is what makes its token budget tractable. Hence A lands before 
   `project_capture`, and the reusable `replay_offline`.
 - `zu_cli/harden.py` — the stage-5 brittleness audit + perturbation-replay resilience
   score; the `zu harden` command.
+- `zu_cli/build.py` — the offline spine (`build_offline`) chaining stages 3→4→5; the
+  `zu build` command, with the live canary behind a `NotImplementedError` seam.
 - `zu run --offline` wired through `_execute_once`; the `zu capture` command.
 - `examples/agents/browser-widget/` — a minimal tier-2 example that runs fully offline.
 - `packages/zu-cli/tests/{test_offline,test_harden}.py`.
@@ -195,10 +202,12 @@ can "click Chislehurst" and pass the gate by memorising the answer:
   baked into config or a tool;
 - the output is **gated by review** (human or automated) before promote.
 
-A thin orchestration skeleton may land as `zu_cli/build.py`, chaining the **offline**
-stages (3–5) with the live `capture`/`canary` and the autonomous loop behind explicit
-`NotImplementedError` seams — so the cheap, testable spine exists and the live/autonomous
-parts are clearly marked as the next increment.
+The offline spine already exists as `zu build` (`zu_cli/build.py`), chaining stages 3→4→5
+and writing a gated, hardened track at $0 — the autonomous builder *wraps* this spine
+(capture once, then drive `zu build` and read `zu_traces` to diagnose and re-edit),
+which is exactly why its token budget stays tractable. What remains for the meta-agent is
+the autonomous loop itself (the `--sandboxed` + `zu mcp` driver and the guardrail
+enforcement), plus the live canary seam (`build._canary`).
 
 ## Risks / assumptions to challenge
 
