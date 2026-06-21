@@ -37,7 +37,7 @@ plugins:
   # Shape the result, then prove every reported value is on the page.
   validators: [schema, grounding]
 
-budget: { max_steps: 70, max_tokens: 900000, wall_time_s: 900 }
+budget: { max_steps: 60, max_tokens: 700000, wall_time_s: 900 }
 
 # The browser tool returns a FOCUSED observation each turn — what CHANGED (the
 # diff: a new step or a validation error), the visible controls (the menu), and
@@ -86,8 +86,9 @@ task:
     dialog appears and blocks interaction, dismiss it FIRST (click its
     accept/agree/got-it button) before continuing. Stay in ONE browser session —
     do NOT close and reopen it (reopening resets cookies and wastes steps); keep
-    acting/reading in the same session until you reach the times. Report ONLY slots
-    and a booking_url that actually appear in what you retrieved — never guess a time.
+    acting/reading in the same session until you reach the times. Return ONLY the 3
+    slots — each a date + a time that actually appear in what you retrieved; never
+    guess a time. Once you have 3, finalise — do not re-verify or reopen.
   max_tier: 2
   output_schema:
     type: object
@@ -102,5 +103,4 @@ task:
             date: { type: string }   # as shown on the page, e.g. "Wed Jun 24"
             time: { type: string }   # e.g. 09:15
           required: [date, time]
-      booking_url: { type: string }
-    required: [slots, booking_url]
+    required: [slots]
