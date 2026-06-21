@@ -92,6 +92,12 @@ task:
   max_tier: 2
   output_schema:
     type: object
+    # Strict contract: ONLY slots. Every string the model returns is grounded
+    # against retrieved page content, so a volunteered extra field (a prose
+    # summary, a booking URL) is ungroundable and would loop on retry forever.
+    # additionalProperties:false makes the schema validator reject extras up front
+    # with a message naming them — steering the model to the exact shape.
+    additionalProperties: false
     properties:
       slots:
         type: array
@@ -99,6 +105,7 @@ task:
         maxItems: 3
         items:
           type: object
+          additionalProperties: false
           properties:
             date: { type: string }   # as shown on the page, e.g. "Wed Jun 24"
             time: { type: string }   # e.g. 09:15

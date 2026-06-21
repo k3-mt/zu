@@ -100,13 +100,15 @@ async def test_fabricated_value_is_refused(agent_runner, name, fixture, answer) 
 
 
 _VET_URL = "https://www.parkvets.example/chislehurst/book"
+# Slots only — the agent's output_schema is strict (additionalProperties:false),
+# so a volunteered extra (a booking URL) is rejected, not returned. Every string
+# returned must ground against retrieved page content; a URL would not.
 _VET_ANSWER = {
     "slots": [
         {"date": "2026-06-24", "time": "09:20"},
         {"date": "2026-06-24", "time": "11:40"},
         {"date": "2026-06-25", "time": "14:10"},
     ],
-    "booking_url": _VET_URL,
 }
 
 
@@ -122,8 +124,8 @@ def test_vet_appointment_agent_is_valid() -> None:
 
 
 async def test_vet_appointment_searches_fetches_and_grounds(agent_runner) -> None:
-    # The full shape: web_search -> http_fetch -> 3 grounded slots. The chosen
-    # booking_url grounds against search results; the slots against the page.
+    # The full shape: web_search -> http_fetch -> 3 grounded slots. The strict
+    # schema returns ONLY slots; each date+time grounds against the page.
     d = _AGENTS_DIR / "vet-appointment"
     spec, _cfg = load_agent(str(d / "agent.yaml"))
     html = (d / "fixtures" / "booking.html").read_text(encoding="utf-8")
