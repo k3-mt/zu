@@ -167,7 +167,13 @@ _NEAR_JS = """
     const al = (el.getAttribute('aria-label') || '').trim();
     if (t !== option && v !== option && al !== option) continue;   // EXACT label match
     const r = el.getBoundingClientRect(); const c = [r.x + r.width/2, r.y + r.height/2];
-    const d = (c[0]-ac[0])**2 + (c[1]-ac[1])**2;
+    const dx = c[0]-ac[0], dy = c[1]-ac[1];
+    let d = dx*dx + dy*dy;
+    // Reading order (LTR, top-to-bottom): a label's control sits to its RIGHT on
+    // the same row, or BELOW. Deprioritize a candidate ABOVE the label, or to its
+    // LEFT on the same row — those are against the flow and rarely the answer.
+    const rowTol = Math.max(ar.height, r.height, 12);
+    if (dy < -rowTol || (Math.abs(dy) <= rowTol && dx < -2)) d *= 4;
     if (d < bd) { bd = d; best = el; }
   }
   if (!best) return false;
@@ -288,18 +294,77 @@ def dismiss_consent(page: Any, *, attempts: int = 4, wait_ms: int = 800) -> str 
     return None
 
 
-def observe(page: Any, captured: list, *, include_html: bool = False) -> dict:
-    """The observation shape every command returns: the rendered visible text, the
-    current url, optionally the raw html, and (when network capture is on) the
-    accumulated responses both structured (``network``) and folded into a
-    groundable ``content`` key."""
-    out: dict[str, Any] = {"url": page.url, "text": _visible_text(page)}
+def _new_lines(prev: str, cur: str) -> str:
+    """The visible lines present now but not before — what an action CHANGED. This
+    is the model's per-turn signal: a new wizard step's content, or a validation
+    error that just appeared — i.e. the specific challenge it hit — not the whole
+    page re-sent. Order-preserving; compared on stripped lines."""
+    prev_lines = {ln.strip() for ln in prev.splitlines() if ln.strip()}
+    return "\n".join(ln for ln in cur.splitlines() if ln.strip() and ln.strip() not in prev_lines)
+
+
+_CONTROLS_JS = """
+() => {
+  const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  const out = []; const seen = new Set();
+  const sel = "button,[role=button],[role=radio],[role=option],[role=tab],a[href],input,select,textarea,[tabindex]";
+  for (const el of document.querySelectorAll(sel)) {
+    if (!vis(el)) continue;
+    let t = (el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || '')
+      .replace(/\\s+/g, ' ').trim().slice(0, 60);
+    if (!t || seen.has(t)) continue;
+    seen.add(t); out.push(t);
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+"""
+
+
+def _visible_controls(page: Any, limit: int = 60) -> list:
+    """A compact menu of the currently VISIBLE interactive controls (button/link/
+    radio/option/input labels), across frames. So the model always knows what it
+    can act on this turn — even when the diff is small — without re-sending the
+    page. Generic; deduped and capped."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for frame in getattr(page, "frames", []):
+        try:
+            got = frame.evaluate(_CONTROLS_JS)
+        except Exception:  # noqa: BLE001
+            got = None
+        for lbl in got or []:
+            if lbl and lbl not in seen:
+                seen.add(lbl)
+                labels.append(lbl)
+                if len(labels) >= limit:
+                    return labels
+    return labels
+
+
+def observe(page: Any, captured: list, *, include_html: bool = False,
+            prev_text: str | None = None) -> tuple[dict, str]:
+    """A FOCUSED observation + the current full visible text (so the caller can
+    track it for the next diff). The model gets what it needs to act — not the
+    whole page re-sent each turn:
+
+    * ``text`` — when ``prev_text`` is given (an ``act``), only what CHANGED (the
+      new step / a validation error); otherwise (open/read) the full current text.
+    * ``controls`` — the visible interactive controls (the menu to act on).
+    * ``network`` — METADATA of captured responses; ``content`` — their full bodies
+      (kept for the event log → recall + grounding; the loop elides this from the
+      model's copy, so the data is recall-able, not dumped every turn)."""
+    cur = _visible_text(page)
+    if prev_text is None:
+        text = cur
+    else:
+        diff = _new_lines(prev_text, cur)
+        text = diff if diff.strip() else "(no visible change since the last action)"
+    out: dict[str, Any] = {"url": page.url, "text": text, "controls": _visible_controls(page)}
     if include_html:
         out["html"] = page.content()
     if captured:
-        # Bodies go in `content` (a capped, groundable content key); `network` is
-        # METADATA ONLY (url/status/bytes) so the structured list can't bypass the
-        # observation cap and bloat the model's context by duplicating the bodies.
         out["content"] = "\n\n".join(
             f"# {c['url']} ({c['status']})\n{c['body']}" for c in captured
         )
@@ -308,7 +373,7 @@ def observe(page: Any, captured: list, *, include_html: bool = False) -> dict:
              "content_type": c.get("content_type", ""), "bytes": len(c.get("body", ""))}
             for c in captured
         ]
-    return out
+    return out, cur
 
 
 def launch_page(browser: Any, width: int, height: int) -> Any:
@@ -337,7 +402,8 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
         resp = page.goto(cmd["url"], wait_until=cmd.get("wait_until", "load"), timeout=30000)
         state["dismiss_consent"] = cmd.get("dismiss_consent", True)
         consent = dismiss_consent(page) if state["dismiss_consent"] else None
-        obs = observe(page, state["captured"], include_html=bool(cmd.get("html")))
+        obs, cur = observe(page, state["captured"], include_html=bool(cmd.get("html")))
+        state["prev_text"] = cur                      # baseline for the next diff
         obs["status"] = resp.status if resp is not None else 200
         if consent:
             obs["consent_dismissed"] = consent
@@ -351,7 +417,12 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
         # so the model never has to fight it (the whole reason runs stalled).
         consent = dismiss_consent(page, attempts=1) if state.get("dismiss_consent", True) else None
         action_error = _run_actions(page, cmd.get("actions", [])) if op == "act" else None
-        obs = observe(page, state.get("captured", []), include_html=bool(cmd.get("html")))
+        # An ``act`` shows only what CHANGED (the diff); a ``read`` shows the full
+        # current view (the model explicitly asked to see everything).
+        prev = state.get("prev_text") if op == "act" else None
+        obs, cur = observe(page, state.get("captured", []),
+                           include_html=bool(cmd.get("html")), prev_text=prev)
+        state["prev_text"] = cur
         if consent:
             obs["consent_dismissed"] = consent
         if action_error:

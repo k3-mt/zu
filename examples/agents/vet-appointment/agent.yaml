@@ -39,19 +39,16 @@ plugins:
 
 budget: { max_steps: 40, max_tokens: 600000, wall_time_s: 600 }
 
-# The booking page is JS-heavy; a tier-2 rendered DOM can be hundreds of KB.
-# Bound how much of each fetched/rendered page the MODEL sees so a few pages don't
-# overflow its context window — the full content still lands on the event log
-# (grounding reads that). 'extract' map-reduces the whole page to the task-relevant
-# parts (a model call per chunk) rather than truncating, so nothing important is
-# lost off the end. Use 'truncate' (or remove these) for a large-context model.
+# The browser tool returns a FOCUSED observation each turn — what CHANGED (the
+# diff: a new step or a validation error), the visible controls (the menu), and
+# captured-network METADATA — not the whole page re-sent. Large fields (a fetched
+# page, the captured response bodies) are elided above this threshold to a `recall`
+# pointer: the full content stays on the event log and the model pulls back exactly
+# what it needs with recall — lossless, never a truncated tail.
 max_observation_chars: 20000
-observation_strategy: truncate   # cheap per-read; the model uses `recall` to pull
-                                 # specifics from the full run log on demand
-# Driving the booking widget takes many browser steps; bound the TOTAL running
-# conversation (not just each step) so a long multi-step session never overflows
-# the model's context window — old tool observations are elided (recall reaches
-# them), recent ones kept. Kept lean (~9k tokens/call) so all 40 steps fit inside
+observation_strategy: truncate   # = elide over-cap content to a recall pointer
+# Bound the TOTAL running conversation too (old tool observations elided to recall
+# pointers, recent ones kept) so a long multi-step session never overflows inside
 # the token budget; recall pulls back anything elided.
 max_context_chars: 35000
 
@@ -70,7 +67,11 @@ task:
     drive it step by step — open the booking page, then act/read to choose the
     Chislehurst location and work through the wizard (new client, species, a
     consultation appointment type, then Next) until the calendar of times appears;
-    open it with capture_network so the availability data is captured. Read the
+    open it with capture_network so the availability data is captured — the booking
+    system fetches availability as JSON (the bookable dates, and the times for a
+    chosen date), so read those captured responses (via recall or the content) to
+    assemble the 3 SOONEST slots, pairing each time with the date it belongs to
+    (a slot is a date + a time, e.g. 2026-06-24 at 10:15 — never a bare time). Read the
     page after each step and react — if action_error comes back, the selector
     missed, so look at the returned text and try another. On a form step, fill
     EVERY required field before clicking Next; for an option that appears many

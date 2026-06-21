@@ -109,6 +109,9 @@ class _FakePage:
     def locator(self, sel):
         return _Loc(self, sel, 1 if (self.present is None or sel in self.present) else 0)
 
+    def evaluate(self, _js, arg=None):
+        return None   # the fake doesn't run JS (controls list is empty in tests)
+
     def inner_text(self, _sel: str) -> str:
         return self._text
 
@@ -236,18 +239,34 @@ def test_run_actions_capped() -> None:
     assert len(page.calls) == bs._MAX_ACTIONS
 
 
-def test_observe_returns_text_url_and_optional_html_network() -> None:
+def test_observe_returns_focused_view_and_current_text() -> None:
     page = _FakePage(text="visible slots 10:15", url="https://x/book")
-    obs = bs.observe(page, [], include_html=True)
+    obs, cur = bs.observe(page, [], include_html=True)
     assert obs["text"] == "visible slots 10:15" and obs["url"] == "https://x/book"
-    assert obs["html"].startswith("<html>")
+    assert cur == "visible slots 10:15" and obs["html"].startswith("<html>")
+    assert "controls" in obs                                    # the actionable menu
     captured = [{"url": "https://api/slots", "status": 200, "body": '{"d":["2026-06-24"]}'}]
-    obs2 = bs.observe(page, captured)
+    obs2, _ = bs.observe(page, captured)
     # bodies fold into `content` (groundable); `network` is metadata only (no body)
     assert "2026-06-24" in obs2["content"]
     assert obs2["network"] == [{"url": "https://api/slots", "status": 200,
                                 "content_type": "", "bytes": len('{"d":["2026-06-24"]}')}]
     assert "body" not in obs2["network"][0]
+
+
+def test_observe_diff_returns_only_what_changed() -> None:
+    # With a prev_text (an `act`), the model sees only the NEW lines — the change /
+    # the challenge — not the whole page re-sent.
+    page = _FakePage(text="Step 1\nName field\nStep 2\nThis is required")
+    obs, _ = bs.observe(page, [], prev_text="Step 1\nName field")
+    assert "Step 2" in obs["text"] and "This is required" in obs["text"]
+    assert "Name field" not in obs["text"]                      # unchanged lines omitted
+
+
+def test_observe_diff_reports_no_change() -> None:
+    page = _FakePage(text="same\nstuff")
+    obs, _ = bs.observe(page, [], prev_text="same\nstuff")
+    assert "no visible change" in obs["text"]
 
 
 # --- session handler: state persists across commands -------------------------

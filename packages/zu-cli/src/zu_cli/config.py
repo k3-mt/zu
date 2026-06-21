@@ -158,12 +158,14 @@ class RunConfig(BaseModel):
     # a context-fit measure, not a provenance loss. A large-context model leaves
     # it unset and keeps everything.
     max_observation_chars: int | None = None
-    # How an over-cap observation is shaped for the model (only when
-    # ``max_observation_chars`` is set):
-    #   * ``truncate`` (default) — keep the head, drop the rest. Cheap, no calls.
-    #   * ``extract`` — map-reduce: scan the WHOLE page in chunks and pull the
-    #     task-relevant parts (one utility model call per chunk). Costs calls but
-    #     loses nothing important when the wanted data is past a truncation point.
+    # How an over-cap content field is shaped for the model (only when
+    # ``max_observation_chars`` is set). Both are LOSSLESS — the full content stays
+    # on the event log either way:
+    #   * ``truncate`` (default) — elide it to a ``recall`` pointer (cheap, no
+    #     calls); the model pulls back the part it needs on demand. (Despite the
+    #     name it does NOT cut the tail — it defers to recall.)
+    #   * ``extract`` — map-reduce: scan the whole field in chunks and pull the
+    #     task-relevant parts now (one model call per chunk).
     observation_strategy: str = "truncate"
 
     @field_validator("observation_strategy")

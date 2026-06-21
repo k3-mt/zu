@@ -253,30 +253,27 @@ async def _shrink_for_model(
 
 
 def _observation_for_model(obs: Any, max_chars: int | None) -> Any:
-    """Optionally cap large content fields of an observation before it enters the
-    model's message history.
+    """Optionally bound large content fields of an observation before it enters the
+    model's message history — LOSSLESSLY.
 
-    OFF by default (``max_chars`` None) — the model sees the full observation, so
-    a large-context model keeps everything. It is an OPT-IN policy (config
-    ``max_observation_chars``) for agents that fetch big pages on a small-context
-    model: a fetched/rendered page (a tier-2 DOM can be hundreds of KB) is fed
-    back as the tool result, and a few such pages can overflow the context window.
-    When set, only the model-facing copy is capped — the FULL content stays on the
-    event log (``data.source.fetched``, which grounding reads), so the cap costs no
-    provenance; the model can re-fetch with html_parse / a narrower selector to
-    target what was dropped. Non-dict observations pass through unchanged."""
+    OFF by default (``max_chars`` None) — the model sees the full observation, so a
+    large-context model keeps everything. It is an OPT-IN policy
+    (``max_observation_chars``) for agents that fetch big pages on a small-context
+    model. When set, an over-budget content field is NOT truncated (which would
+    silently drop the tail the model needs) — it is ELIDED to a ``recall`` pointer:
+    the FULL content stays on the event log (``data.source.fetched``, which
+    grounding reads and ``recall`` queries), so the model pulls back exactly the
+    part it needs on demand instead of having the whole thing dumped (or its tail
+    cut) every turn. Non-dict observations pass through unchanged."""
     if max_chars is None or not isinstance(obs, dict):
         return obs
     capped = dict(obs)
     for k in _CONTENT_KEYS:
         v = capped.get(k)
         if isinstance(v, str) and len(v) > max_chars:
-            dropped = len(v) - max_chars
             capped[k] = (
-                v[:max_chars]
-                + f"\n…[truncated {dropped} of {len(v)} chars to fit the model context; "
-                "the full content is on the event log. Use html_parse or a narrower "
-                "selector/url to target what you need.]"
+                f"[{len(v)} chars of retrieved content elided to keep the context lean — "
+                "it is on the run log; use recall(<keyword>) to read the part you need]"
             )
     return capped
 

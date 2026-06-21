@@ -24,7 +24,8 @@ from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandl
 from .net import validate_and_pin
 
 _DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
-_OBS_KEYS = ("status", "url", "text", "html", "content", "network", "action_error")
+_OBS_KEYS = ("status", "url", "text", "controls", "html", "content", "network",
+             "action_error", "consent_dismissed")
 
 
 class Browser:

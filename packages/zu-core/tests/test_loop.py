@@ -763,10 +763,12 @@ def test_observation_for_model_off_by_default() -> None:
     assert _observation_for_model(big, None) is big
 
 
-def test_observation_for_model_caps_only_content_fields_when_set() -> None:
+def test_observation_for_model_elides_content_to_a_recall_pointer() -> None:
     big = {"html": "x" * 500_000, "url": "https://e/", "status": 200}
     out = _observation_for_model(big, 1000)
-    assert len(out["html"]) < 2000 and "truncated" in out["html"]  # content capped + marker
+    # over-budget content is elided LOSSLESSLY to a recall pointer (not truncated)
+    assert len(out["html"]) < 300
+    assert "recall" in out["html"] and "x" * 100 not in out["html"]
     assert out["url"] == "https://e/" and out["status"] == 200      # non-content untouched
     assert big["html"] == "x" * 500_000                            # original not mutated
 
@@ -852,8 +854,8 @@ async def test_shrink_truncate_strategy_makes_no_model_calls() -> None:
     prov = _ExtractStubProvider()
     obs = {"html": "h" * 250}
     out = await _shrink_for_model(obs, max_chars=100, strategy="truncate", provider=prov, query="q")
-    assert prov.prompts == []                          # truncate never calls the model
-    assert "truncated" in out["html"]
+    assert prov.prompts == []                          # the non-extract path never calls the model
+    assert "recall" in out["html"]                     # over-budget content elided to a recall pointer
 
 
 # --- bounded conversation history for long multi-step runs --------------------
