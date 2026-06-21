@@ -40,6 +40,23 @@ def test_parse_value_handles_plain_fenced_and_scalar() -> None:
     assert _parse_value(None) is None
 
 
+def test_parse_value_recovers_json_from_prose() -> None:
+    # Real models prepend prose before the JSON — a start-anchored fence misses it,
+    # which (seen live) left the whole answer opaque and looped grounding to budget.
+    from zu_core.loop import _parse_value
+
+    # prose, then a fenced block
+    assert _parse_value('Here are the results:\n```json\n{"slots": [1, 2]}\n```') == {
+        "slots": [1, 2]
+    }
+    # prose, then a bare object (no fence)
+    assert _parse_value('I found: {"date": "Wed Jun 24"} on the page.') == {"date": "Wed Jun 24"}
+    # a brace inside a string value must not end the object early
+    assert _parse_value('answer: {"note": "a } b", "n": 1} done') == {"note": "a } b", "n": 1}
+    # genuinely no JSON object is still kept, not lost
+    assert _parse_value("no json here at all") == {"text": "no json here at all"}
+
+
 def _fetch_fixture():
     # The real http_fetch tool served the saved page off a mock transport (no net).
     return fetch_tool(text=_PAGE)

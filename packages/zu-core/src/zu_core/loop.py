@@ -116,27 +116,70 @@ def _usage_tokens(usage: dict) -> int:
 
 
 _FENCE = re.compile(r"^```[a-zA-Z0-9]*\s*\n?(.*?)\n?```$", re.DOTALL)
+_FENCE_ANY = re.compile(r"```[a-zA-Z0-9]*[ \t]*\n?(.*?)```", re.DOTALL)
+
+
+def _balanced_object(text: str) -> str | None:
+    """The first balanced ``{...}`` run in ``text`` — so a JSON object the model
+    embedded in prose can be recovered. String- and escape-aware, so a brace
+    inside a JSON string value never ends the object early."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def _parse_value(text: str | None) -> dict | None:
-    """Turn the model's final text into a structured value. A JSON object is
-    used as-is; any other JSON or plain text is wrapped so the result is always
-    a dict (what schema/grounding validation and the result contract expect).
+    """Turn the model's final text into a structured value (always a dict — what
+    the result contract and schema/grounding validation expect).
 
-    Real models routinely wrap JSON in a markdown code fence (```json … ```);
-    strip a single enclosing fence before parsing so that common output isn't
-    treated as opaque text (which would fail grounding and waste retries)."""
+    Real models rarely emit a bare JSON object: they wrap it in a markdown code
+    fence and routinely PREPEND prose ("Here are the results: ```json {…}```").
+    A start-anchored fence misses that, leaving the whole prose treated as opaque
+    text — which then fails grounding and burns the whole budget on retries (seen
+    live). So try, in order: the whole text as JSON; a single enclosing fence; a
+    fenced block anywhere; the first balanced ``{…}`` embedded in prose. Only if
+    none parse is the text kept opaque (``{"text": …}``) — the last resort."""
     if not text:
         return None
-    candidate = text.strip()
-    fenced = _FENCE.match(candidate)
-    if fenced:
-        candidate = fenced.group(1).strip()
-    try:
-        parsed = json.loads(candidate)
-    except (ValueError, TypeError):
-        return {"text": text}
-    return parsed if isinstance(parsed, dict) else {"value": parsed}
+    stripped = text.strip()
+    candidates = [stripped]
+    enclosing = _FENCE.match(stripped)
+    if enclosing:
+        candidates.append(enclosing.group(1).strip())
+    anywhere = _FENCE_ANY.search(text)
+    if anywhere:
+        candidates.append(anywhere.group(1).strip())
+    embedded = _balanced_object(text)
+    if embedded:
+        candidates.append(embedded)
+    for cand in candidates:
+        try:
+            parsed = json.loads(cand)
+        except (ValueError, TypeError):
+            continue
+        return parsed if isinstance(parsed, dict) else {"value": parsed}
+    return {"text": text}
 
 
 def _summarize_observation(obs: dict) -> dict:
