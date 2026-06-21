@@ -1,0 +1,9 @@
+{
+  "script": "script.json",
+  "fetch": [
+    { "url": "https://shop.example/p/acme-widget", "body": "shell.html" }
+  ],
+  "render": [
+    { "url": "https://shop.example/p/acme-widget", "body": "rendered.html" }
+  ]
+}

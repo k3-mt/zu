@@ -116,7 +116,7 @@ class Registry:
                     continue
         return self.failures
 
-    def register(self, kind: str, name: str, obj: Any) -> None:
+    def register(self, kind: str, name: str, obj: Any, *, replace: bool = False) -> None:
         if kind not in self._items:
             raise KeyError(f"unknown plugin kind: {kind!r}")
         # The interface-version gate (MLR §6): refuse a plugin built against an
@@ -125,11 +125,13 @@ class Registry:
         check_interface(kind, obj)
         with self._lock:
             existing = self._items[kind].get(name)
-            if existing is not None and existing is not obj:
+            if existing is not None and existing is not obj and not replace:
                 # A name collision means one plugin is shadowing another (e.g. a
                 # typosquat on a built-in like 'http_fetch'). Last-write-wins is
                 # preserved for back-compat, but the collision must not be silent —
-                # surface it so a caller can see what overrode what.
+                # surface it so a caller can see what overrode what. ``replace=True``
+                # is the opposite case — a deliberate swap (e.g. the offline harness
+                # rebinding a tool to a fixture-backed double) — so it stays quiet.
                 log.warning(
                     "plugin name collision on %s:%s — %r is overriding %r",
                     kind, name, obj, existing,

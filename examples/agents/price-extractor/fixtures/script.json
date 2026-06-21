@@ -1,0 +1,4 @@
+[
+  { "tool": "http_fetch", "args": { "url": "https://shop.example/products/aeropress-go" } },
+  { "text": "{\"name\": \"AeroPress Go Travel Coffee Press\", \"price\": \"$39.95\"}", "finish": "stop" }
+]

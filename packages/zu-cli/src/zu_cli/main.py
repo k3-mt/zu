@@ -51,7 +51,7 @@ def _parse_duration(text: str) -> float:
     return seconds
 
 
-def _execute_once(agent: str, *, stream: bool = True) -> Result:
+def _execute_once(agent: str, *, stream: bool = True, offline: bool = False) -> Result:
     """Load a single ``agent.yaml`` (or bundle dir) and drive its task to a Result,
     printing a summary. Shared by the one-shot and scheduled paths. Raises
     ConfigError for a bad agent file; turns a model/infra failure into a printed
@@ -59,9 +59,27 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
 
     With ``stream`` (the default), a live trace of the run — the model's train of
     thought, every tool call and result, detectors, escalations — prints as it
-    happens, so the loop is never a black box."""
+    happens, so the loop is never a black box.
+
+    With ``offline``, the run replays the agent's ``fixtures/`` bundle: a scripted
+    model substitutes for the live provider (no key), and the tier-1/tier-2 tools are
+    rebound to fixture-backed doubles (no network, no Docker). This is the cheap,
+    deterministic construction loop — iterate the agent at ~$0 per run."""
     spec, cfg = load_agent(agent)
+    bundle = None
+    if offline:
+        from .offline import fixtures_dir_for, load_bundle, scripted_provider_config
+
+        bundle = load_bundle(fixtures_dir_for(agent))
+        # Substitute the scripted provider BEFORE assembly so the live provider is
+        # never built — an offline run needs no API key.
+        cfg = cfg.model_copy(update={"provider": scripted_provider_config(bundle)})
     provider, registry, bus, providers = assemble(cfg)
+    if offline:
+        assert bundle is not None  # set above on the same ``offline`` branch
+        from .offline import apply_offline
+
+        apply_offline(registry, bundle)
 
     # The uniform observability hook: a live trace (when streaming) AND the defense
     # review queue — so a blocked attempt during `zu run` is queued exactly as it
@@ -75,7 +93,8 @@ def _execute_once(agent: str, *, stream: bool = True) -> Result:
     # ``scripted`` has no model, and printing ``model=scripted`` conflates them.
     model = getattr(provider, "model", None)
     suffix = f" model={model}" if model else ""
-    typer.echo(f"zu run: {agent} · provider={cfg.provider.name}{suffix}")
+    mode = " --offline (fixtures)" if offline else ""
+    typer.echo(f"zu run{mode}: {agent} · provider={cfg.provider.name}{suffix}")
 
     async def _drive() -> tuple[Result, int]:
         # Run, count, and release the bus on a *single* event loop: a second
@@ -193,6 +212,11 @@ def run(
         help="Run the WHOLE agent inside a hardened container behind an egress proxy "
              "(needs Docker + the zu image). The real boundary for containment='required'.",
     ),
+    offline: bool = typer.Option(
+        False, "--offline",
+        help="Replay the agent's fixtures/ bundle with a scripted model — no key, no "
+             "network, no Docker, ~$0. The cheap, deterministic construction loop.",
+    ),
 ) -> None:
     """Run a self-contained agent (one ``agent.yaml`` or a bundle dir) — once, or
     on a schedule with --every.
@@ -200,13 +224,18 @@ def run(
     A live trace streams to the console as the loop runs (disable with
     --no-stream). The whole agent — task, model(s), the tier ladder of tools — is
     one file; a bundle dir adds its own ``tools/`` so custom tools just resolve.
+
+    --offline replays a captured fixtures/ bundle (scripted model + fixture-backed
+    tier-1/tier-2 tools) for a free, deterministic iteration loop.
     """
     # One-shot: run, exit non-zero on a non-success result so it composes in a
     # shell. Scheduled: loop and keep going regardless of any single outcome.
     if not every:
         try:
             result = (
-                _execute_sandboxed(agent) if sandboxed else _execute_once(agent, stream=stream)
+                _execute_sandboxed(agent)
+                if sandboxed
+                else _execute_once(agent, stream=stream, offline=offline)
             )
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
@@ -227,7 +256,7 @@ def run(
         n += 1
         typer.echo(f"--- run {n} ---")
         try:
-            _execute_once(agent, stream=stream)
+            _execute_once(agent, stream=stream, offline=offline)
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)

@@ -1,0 +1,6 @@
+{
+  "script": "script.json",
+  "fetch": [
+    { "url": "https://shop.example/products/aeropress-go", "body": "product.html" }
+  ]
+}

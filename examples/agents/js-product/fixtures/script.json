@@ -1,0 +1,5 @@
+[
+  { "tool": "http_fetch", "args": { "url": "https://shop.example/p/acme-widget" } },
+  { "tool": "render_dom", "args": { "url": "https://shop.example/p/acme-widget" } },
+  { "text": "{\"name\": \"Acme Widget\", \"price\": \"$9.00\"}", "finish": "stop" }
+]
