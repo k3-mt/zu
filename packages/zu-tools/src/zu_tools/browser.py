@@ -48,7 +48,11 @@ class Browser:
                     "type": "array",
                     "description": "for op=act: actions run in order on the HELD page — "
                                    "{click|fill|select|wait_for: <selector>, value?} | {wait_ms:<n>}. "
-                                   "A selector is CSS or a text= selector; target what you SEE.",
+                                   "A selector is CSS or a text= selector; target what you SEE. "
+                                   "For an AMBIGUOUS option (e.g. a '1'/'2'/'3' button that appears "
+                                   "many times), add \"near\": \"<label text>\" to a click — it picks "
+                                   "the matching control closest to that label, e.g. "
+                                   "{\"click\": \"1\", \"near\": \"Number of pets\"}.",
                     "items": {"type": "object"},
                 },
                 "wait_until": {

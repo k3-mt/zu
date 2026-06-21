@@ -72,7 +72,10 @@ task:
     consultation appointment type, then Next) until the calendar of times appears;
     open it with capture_network so the availability data is captured. Read the
     page after each step and react — if action_error comes back, the selector
-    missed, so look at the returned text and try another. If a cookie/consent
+    missed, so look at the returned text and try another. On a form step, fill
+    EVERY required field before clicking Next; for an option that appears many
+    times (e.g. a number-of-pets 1/2/3 button), use a click with "near" set to the
+    field's label so the closest matching control is chosen. If a cookie/consent
     dialog appears and blocks interaction, dismiss it FIRST (click its
     accept/agree/got-it button) before continuing. Stay in ONE browser session —
     do NOT close and reopen it (reopening resets cookies and wastes steps); keep

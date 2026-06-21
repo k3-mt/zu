@@ -58,13 +58,19 @@ class _FakeFrame:
     selector isn't present here — so _frame_for must route to the frame that has
     it (the iframe-piercing behavior)."""
 
-    def __init__(self, text: str = "", present=None) -> None:
+    def __init__(self, text: str = "", present=None, near_ok: bool = False) -> None:
         self._text = text
         self.present = present  # None => every selector present
+        self.near_ok = near_ok
         self.calls: list[tuple] = []
 
     def _has(self, sel) -> bool:
         return self.present is None or sel in self.present
+
+    def evaluate(self, _js, arg=None):
+        # The proximity search (with an arg) returns near_ok; the cleanup call
+        # (no arg) returns None — matches _click_near's two evaluate calls.
+        return self.near_ok if arg is not None else None
 
     def inner_text(self, _sel: str) -> str:
         return self._text
@@ -169,6 +175,24 @@ def test_run_actions_fire_in_order_and_report_failure() -> None:
     err = bs._run_actions(page, [{"click": "text=X"}, {"click": "text=Y"}])
     assert err is not None and "text=X" in err
     assert ("click", "text=Y") not in page.calls
+
+
+def test_click_near_targets_the_frame_that_has_the_match() -> None:
+    # "click 1 near 'Number of pets'" must resolve in the frame whose proximity
+    # search succeeds, and click the marked element there — not the other frame.
+    other = _FakeFrame(present=set(), near_ok=False)                       # search fails here
+    widget = _FakeFrame(present={bs._NEAR_MARK}, near_ok=True)             # search succeeds here
+    page = _FakePage(frames=[other, widget])
+    bs._click_near(page, "1", "Number of pets", 5000)
+    assert ("click", bs._NEAR_MARK) in widget.calls
+    assert not any(k == "click" for k, *_ in other.calls)
+
+
+def test_run_actions_near_disambiguates_a_click() -> None:
+    widget = _FakeFrame(present={bs._NEAR_MARK}, near_ok=True)
+    page = _FakePage(frames=[widget])
+    assert bs._run_actions(page, [{"click": "1", "near": "Number of pets"}]) is None
+    assert ("click", bs._NEAR_MARK) in widget.calls
 
 
 def test_run_actions_pierces_into_a_child_iframe() -> None:

@@ -139,6 +139,69 @@ def _target(frame: Any, selector: str) -> Any:
     return _first_visible(frame.locator(selector))
 
 
+# In-page DOM search for the control LOGICALLY CLOSEST to a label. The fix for
+# ambiguous options: "click 1 near 'Number of pets'" can't be a global text=1
+# (which hits the wrong "1"). This finds the smallest visible element holding the
+# anchor text, then the nearest visible interactive element whose exact label/value
+# equals the option, and marks it for the click. Generic — geometry, no site logic.
+_NEAR_MARK = "[data-zu-target='zu1']"
+_NEAR_JS = """
+({option, anchor}) => {
+  const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  let anchorEl = null, anchorArea = Infinity;
+  for (const el of document.querySelectorAll('*')) {
+    if (!vis(el)) continue;
+    if (!(el.textContent || '').includes(anchor)) continue;
+    const r = el.getBoundingClientRect(); const area = r.width * r.height;
+    if (area < anchorArea) { anchorArea = area; anchorEl = el; }   // smallest = most specific
+  }
+  if (!anchorEl) return false;
+  const ar = anchorEl.getBoundingClientRect(); const ac = [ar.x + ar.width/2, ar.y + ar.height/2];
+  const sel = "button,[role=button],[role=radio],[role=option],input,a,label,[tabindex]";
+  let best = null, bd = Infinity;
+  for (const el of document.querySelectorAll(sel)) {
+    if (!vis(el)) continue;
+    const t = (el.textContent || '').trim();
+    const v = (el.value != null ? String(el.value) : '').trim();
+    const al = (el.getAttribute('aria-label') || '').trim();
+    if (t !== option && v !== option && al !== option) continue;   // EXACT label match
+    const r = el.getBoundingClientRect(); const c = [r.x + r.width/2, r.y + r.height/2];
+    const d = (c[0]-ac[0])**2 + (c[1]-ac[1])**2;
+    if (d < bd) { bd = d; best = el; }
+  }
+  if (!best) return false;
+  document.querySelectorAll('[data-zu-target]').forEach(e => e.removeAttribute('data-zu-target'));
+  best.setAttribute('data-zu-target', 'zu1');
+  return true;
+}
+"""
+
+
+def _click_near(page: Any, option: str, anchor: str, timeout: int) -> None:
+    """Click the interactive control whose exact label/value is ``option`` and that
+    is geometrically CLOSEST to the element holding ``anchor`` text — e.g. the "1"
+    button beside "Number of pets". Searches each frame; raises if none found."""
+    for frame in getattr(page, "frames", []):
+        try:
+            ok = frame.evaluate(_NEAR_JS, {"option": str(option), "anchor": str(anchor)})
+        except Exception:  # noqa: BLE001 - a frame that can't be queried isn't the one
+            ok = False
+        if ok:
+            try:
+                frame.locator(_NEAR_MARK).first.click(timeout=timeout)
+            finally:
+                try:
+                    frame.evaluate(
+                        "() => document.querySelectorAll('[data-zu-target]')"
+                        ".forEach(e => e.removeAttribute('data-zu-target'))"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+    raise RuntimeError(f"could not find a control matching {option!r} near {anchor!r}")
+
+
 def _run_actions(page: Any, actions: list) -> str | None:
     """Apply read-surfacing actions in order; return an error string on the first
     failure (DOM so far is kept), else None. Each Playwright op auto-waits for the
@@ -157,7 +220,10 @@ def _run_actions(page: Any, actions: list) -> str | None:
             # AND the control), which would be a strict-mode error; acting on the
             # first match keeps the model moving instead of thrashing on selectors.
             if "click" in raw:
-                _target(_frame_for(page, raw["click"]), raw["click"]).click(timeout=_ACTION_TIMEOUT_MS)
+                if raw.get("near"):   # disambiguate by proximity to a label
+                    _click_near(page, raw["click"], raw["near"], _ACTION_TIMEOUT_MS)
+                else:
+                    _target(_frame_for(page, raw["click"]), raw["click"]).click(timeout=_ACTION_TIMEOUT_MS)
             elif "fill" in raw:
                 sel = raw["fill"]
                 _target(_frame_for(page, sel), sel).fill(str(raw.get("value", "")), timeout=_ACTION_TIMEOUT_MS)
