@@ -120,27 +120,10 @@ Don't know how to write the agent yet? The
 [`examples/agents/vet-appointment/`](examples/agents/vet-appointment/) is a complete, real one
 to copy. The rest of this README is depth on each step.
 
-## Status
-
-The v1 core is complete and green: the typed contracts, the six ports, the
-plugin registry, a scripted (fake) model provider, the event spine (SQLite sink
-+ append-before-notify bus + projection), the deterministic interpreter loop
-with tier-1 tools and budgets, the escalation ladder and the tier-2 browser,
-validation against the event log (schema + grounding), the real `anthropic` and
-`openai-compatible` model adapters, the **config system** (`zu run task.yaml`
-wires a whole run from a file, the model a one-line swap), and the **killer
-demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
-with zero setup. What remains is breadth behind the existing ports, not new core.
-
 ## 🚀 Quickstart
 
-New here? One line gets you everything:
-
-```bash
-pip install 'zu-runtime[all]'     # web tools, both model SDKs, server, Docker, MCP
-```
-
-Or trim to what you need — a lean base, the heavy bits opt-in:
+`pip install 'zu-runtime[all]'` gets you everything (above). Or trim to what you need — a lean
+base, the heavy bits opt-in:
 
 ```bash
 pip install zu-runtime                # base: import zu + the `zu` CLI + web tools
@@ -263,6 +246,18 @@ zu/
   examples/         # runnable example agents + integration configs
   validation/       # end-to-end proof suites (containment, red-team)
 ```
+
+## Status
+
+The v1 core is complete and green: the typed contracts, the six ports, the
+plugin registry, a scripted (fake) model provider, the event spine (SQLite sink
++ append-before-notify bus + projection), the deterministic interpreter loop
+with tier-1 tools and budgets, the escalation ladder and the tier-2 browser,
+validation against the event log (schema + grounding), the real `anthropic` and
+`openai-compatible` model adapters, the **config system** (`zu run task.yaml`
+wires a whole run from a file, the model a one-line swap), and the **killer
+demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
+with zero setup. What remains is breadth behind the existing ports, not new core.
 
 ## Documentation
 
