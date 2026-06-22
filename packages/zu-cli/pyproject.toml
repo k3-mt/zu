@@ -43,6 +43,9 @@ zu = "zu_cli.main:app"
 # In-container entrypoint for the whole-agent-in-container form: the sandbox
 # launcher execs this inside the hardened container (see zu_cli.sandbox).
 zu-run-contained = "zu_cli.sandbox:run_contained_from_env"
+# In-container entrypoint for autonomous construction: the launcher execs this in
+# the same hardened box to run the construct() loop contained (see construct_sandbox).
+zu-construct-contained = "zu_cli.construct_sandbox:construct_contained_from_env"
 
 [build-system]
 requires = ["hatchling"]
