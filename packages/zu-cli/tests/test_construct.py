@@ -18,10 +18,12 @@ from zu_cli.construct import (
     Edit,
     LiveStrategist,
     ScriptedStrategist,
+    _extract_json,
     construct,
     live_capture,
 )
 from zu_cli.offline import Bundle, bundle_path
+from zu_providers.scripted import ScriptedProvider
 
 _BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
 
@@ -111,11 +113,15 @@ def test_construct_cli_check_reports_not_ready(tmp_path: Path) -> None:
     assert "not ready" in result.output
 
 
-def test_construct_cli_autonomous_hits_live_seam(tmp_path: Path) -> None:
+def test_construct_cli_autonomous_hits_live_seam(tmp_path: Path, monkeypatch) -> None:
     from typer.testing import CliRunner
 
     from zu_cli.main import app
 
+    # With NO API key configured there is no live model, so the autonomous loop builds no
+    # provider and stops at the live-strategist seam. Clear the key so the test is hermetic
+    # regardless of the dev/CI environment (a key present would attempt a real model call).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     d = _copy_agent(tmp_path)
     result = CliRunner().invoke(app, ["construct", str(d)])
     assert result.exit_code == 2
@@ -132,3 +138,42 @@ def test_construct_cli_without_bundle_is_clean_error(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["construct", str(tmp_path), "--check"])
     assert result.exit_code == 2
     assert "zu capture" in result.output
+
+
+async def test_live_strategist_hardens_with_a_model(tmp_path: Path) -> None:
+    # The live lane, proven WITHOUT keys: a fake model returns a `near` anchor for the
+    # brittle click; the strategist applies it and the loop converges in round 2.
+    d = _copy_agent(tmp_path)
+    spec, cfg = load_agent(str(d / "agent.yaml"))
+    bundle = Bundle.load(bundle_path(d))
+    model = ScriptedProvider.from_moves(
+        [{"text": 'Here: {"fixes": [{"step": 0, "near": "price"}]}', "finish": "stop"}])
+
+    report = await construct(spec, cfg, d, bundle, LiveStrategist(model), max_rounds=3)
+
+    assert report.converged
+    assert report.rounds[0].guardrails_passed is False        # round 1 held on G1
+    assert report.bundle is not None
+    # the model's fix landed: the click (browser act move) now carries a `near` anchor.
+    assert report.bundle.moves[2]["args"]["actions"][0].get("near") == "price"
+
+
+async def test_live_strategist_gives_up_on_unparseable_reply(tmp_path: Path) -> None:
+    # A reply with no usable JSON yields no fixes → the strategist gives up (never crashes).
+    d = _copy_agent(tmp_path)
+    spec, cfg = load_agent(str(d / "agent.yaml"))
+    bundle = Bundle.load(bundle_path(d))
+    model = ScriptedProvider.from_moves([{"text": "sorry, I can't help", "finish": "stop"}])
+
+    report = await construct(spec, cfg, d, bundle, LiveStrategist(model), max_rounds=3)
+
+    assert not report.converged
+    assert "gave up" in report.rounds[0].note
+
+
+def test_extract_json_recovers_from_prose_and_fences() -> None:
+    # Models prepend prose / wrap in a fence; the parser recovers the JSON either way.
+    assert _extract_json('sure! {"a": 1} done') == {"a": 1}
+    assert _extract_json('```json\n[{"step": 0, "near": "x"}]\n```') == [{"step": 0, "near": "x"}]
+    assert _extract_json("no json at all") is None
+    assert _extract_json(None) is None

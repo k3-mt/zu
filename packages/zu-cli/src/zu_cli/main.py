@@ -617,19 +617,33 @@ def construct(
                    "on these).", err=True)
         raise typer.Exit(code=1) from None
 
-    # Autonomous mode: the live strategist decides edits — the live-lane seam.
-    typer.echo(f"zu construct: {agent} (autonomous — up to {max_rounds} rounds)")
+    # Autonomous mode: the live strategist (a model) decides edits. Build the agent's
+    # configured provider only when its API key is actually set; with no key there is no
+    # live model, so LiveStrategist stays a seam and the run stops cleanly at the live lane.
+    from .config import build_provider
+
+    key_env = getattr(cfg.provider, "api_key_env", None)
+    provider = build_provider(cfg.provider) if (key_env and os.environ.get(key_env)) else None
+    mode = f"live model {cfg.provider.model}" if provider is not None else "no live model"
+    typer.echo(f"zu construct: {agent} (autonomous — up to {max_rounds} rounds; {mode})")
     try:
         report = asyncio.run(run_construct(
-            spec, cfg, agent_dir, bundle, LiveStrategist(),
+            spec, cfg, agent_dir, bundle, LiveStrategist(provider),
             max_rounds=max_rounds, min_resilience=min_resilience))
     except NotImplementedError as exc:
         typer.echo(f"construct: {exc}", err=True)
         raise typer.Exit(code=2) from None
-    # Reached only if the first round already converged (no strategist call needed).
+    except Exception as exc:  # noqa: BLE001 - a live model/network failure: report, don't traceback
+        typer.echo(f"construct: live model failed: {type(exc).__name__}: {exc}", err=True)
+        raise typer.Exit(code=1) from None
     if report.converged:
-        typer.echo("construct: converged on round 1 — ready for review.")
+        typer.echo("construct: converged — ready for review (build clean + guardrails passed).")
         return
+    # Did not converge — report each round's outcome and hand back for review (never G4-promoted).
+    for rr in report.rounds:
+        typer.echo(f"  round {rr.round}: {rr.note}")
+    typer.echo("construct: did not converge — handed back for review (nothing auto-promoted).",
+               err=True)
     raise typer.Exit(code=1) from None
 
 
