@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Zeke the zebra">
+  <title>Zeke — the Zu community helper</title>
+  <rect width="128" height="128" rx="28" fill="#5865F2"/>
+  <!-- ears -->
+  <g fill="#ffffff">
+    <path d="M45 32 L37 14 L55 24 Z"/>
+    <path d="M83 32 L91 14 L73 24 Z"/>
+  </g>
+  <defs>
+    <clipPath id="head">
+      <path d="M64 26 C84 26 94 42 94 64 C94 88 80 104 64 104 C48 104 34 88 34 64 C34 42 44 26 64 26 Z"/>
+    </clipPath>
+  </defs>
+  <!-- head -->
+  <path d="M64 26 C84 26 94 42 94 64 C94 88 80 104 64 104 C48 104 34 88 34 64 C34 42 44 26 64 26 Z" fill="#ffffff"/>
+  <!-- zebra stripes -->
+  <g clip-path="url(#head)" fill="#1b1b1f">
+    <path d="M30 42 Q64 32 98 42 L98 49 Q64 39 30 49 Z"/>
+    <path d="M28 58 Q64 50 100 58 L100 66 Q64 58 28 66 Z"/>
+    <path d="M30 76 Q64 70 98 76 L98 84 Q64 78 30 84 Z"/>
+    <path d="M40 92 Q64 87 88 92 L88 100 Q64 95 40 100 Z"/>
+  </g>
+  <!-- eyes -->
+  <circle cx="51" cy="64" r="3.4" fill="#1b1b1f"/>
+  <circle cx="77" cy="64" r="3.4" fill="#1b1b1f"/>
+  <!-- muzzle -->
+  <ellipse cx="64" cy="99" rx="12" ry="8" fill="#1b1b1f"/>
+  <circle cx="59" cy="99" r="1.6" fill="#ffffff"/>
+  <circle cx="69" cy="99" r="1.6" fill="#ffffff"/>
+</svg>

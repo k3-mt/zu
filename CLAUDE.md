@@ -71,3 +71,5 @@ server — `zu_scaffold/validate/run/traces`, `zu_explore/explore_save`,
   `construct.py` (the meta-agent driver + `LiveStrategist`), `construct_sandbox.py`,
   `explore.py`, `contribute.py`, `mcp_server.py`.
 - Per-package details: each `packages/zu-*/README.md`. Ports + recipes: AGENTS.md.
+- Outside the package workspace: **`automation/gap-triage/`** (zu maintaining zu — the
+  CI triage agent + `zu_cli.gap_triage`) and **`community/discord-bot/`** (community infra).

@@ -1,10 +1,11 @@
-# Zu community Discord bot
+# Zeke — the Zu community Discord bot
 
-A small helper bot for the Zu Discord. It answers the questions newcomers ask
-repeatedly with slash commands, so maintainers don't have to:
+**Zeke** (the zebra mascot — distinct from the "Zu" release/issue webhook) greets new
+members and answers the questions newcomers ask repeatedly, so maintainers don't have to.
 
-| Command | What it does |
+| Trigger | What it does |
 |---------|--------------|
+| *member joins* | Posts a welcome in `#general` pointing at `#start-here`, `#help`, `#capability-gaps`, and the `/run` `/docs` `/gap` commands |
 | `/docs` | Links the construction-sequence guide, the flagship example, AGENTS.md, CONTRIBUTING |
 | `/run`  | The 30-second offline quickstart (`uv sync` → `zu run --offline`) |
 | `/gap`  | How to report a capability gap (`zu_report_gap` / new issue) — Zu's core discipline |
@@ -12,12 +13,17 @@ repeatedly with slash commands, so maintainers don't have to:
 It's deliberately outside the `packages/*` uv workspace: the runtime core stays
 SDK-free, and this bot is community infra, not part of the shipped product.
 
+Identity to set in the Developer Portal (General Information): name **Zeke**, the 🦓 avatar
+([`assets/zeke.svg`](assets/zeke.svg), export to PNG), description "Zeke — the Zu community
+helper. Try /docs, /run, /gap.", tags *Developer Tools · Open Source · AI Agents · Utility*.
+
 ## Create the bot application
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
    → **New Application**.
 2. **Bot** tab → **Reset Token** → copy it. This is your `DISCORD_BOT_TOKEN`.
-   No privileged intents are required.
+   Under **Privileged Gateway Intents**, enable **Server Members Intent** (needed for
+   the new-member welcome; the slash commands work without it).
 3. **Installation** (or **OAuth2 → URL Generator**): scopes `bot` and
    `applications.commands`. For permissions, **Send Messages** is enough.
 4. Open the generated URL and invite the bot to your server.

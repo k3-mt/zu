@@ -35,6 +35,8 @@ zu/
     zu-testing/             # shared test kit: fakes, fixtures, the pytest plugin
   examples/                 # runnable example agents + integration configs
   validation/               # end-to-end proof suites (containment, red-team)
+  automation/               # zu maintaining zu — the gap-triage agent run from CI
+  community/                # community infra (the Discord bot) — outside the package workspace
 ```
 
 Every package has the **same internal shape** — rely on this:
