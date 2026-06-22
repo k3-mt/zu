@@ -34,6 +34,12 @@ local-docker = "zu_backends.local_docker:LocalDockerBackend"
 sqlite = "zu_backends.sqlite_sink:SqliteSink"
 jsonl = "zu_backends.jsonl_sink:JsonlSink"
 
+[project.entry-points."zu.triggers"]
+webhook = "zu_backends.triggers:WebhookTrigger"
+queue = "zu_backends.triggers:QueueTrigger"
+schedule = "zu_backends.triggers:ScheduleTrigger"
+object-store = "zu_backends.triggers:ObjectStoreTrigger"
+
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
 Repository = "https://github.com/k3-mt/zu"

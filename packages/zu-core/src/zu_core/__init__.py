@@ -36,6 +36,8 @@ from .ports import (
     Tool,
     ToolCall,
     ToolSpec,
+    Trigger,
+    TriggerEvent,
     Validator,
     Verdict,
     declared_envelope,
@@ -53,6 +55,7 @@ from .registry import (
     provider,
     sink,
     tool,
+    trigger,
     validator,
 )
 from .security import SecurityBlock
@@ -118,6 +121,8 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolSpec",
+    "Trigger",
+    "TriggerEvent",
     "Validator",
     "Verdict",
     # registry
@@ -132,5 +137,6 @@ __all__ = [
     "provider",
     "sink",
     "tool",
+    "trigger",
     "validator",
 ]

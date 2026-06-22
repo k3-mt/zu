@@ -7,7 +7,7 @@ a concrete adapter — which is what makes every adapter replaceable.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
@@ -35,6 +35,7 @@ INTERFACE_VERSION: dict[str, int] = {
     "backends": 1,
     "sinks": 1,
     "policies": 1,
+    "triggers": 1,
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -360,3 +361,34 @@ class EventSink(Protocol):
     ) -> AsyncIterator[Any]: ...
 
     async def count(self, flt: dict | None = None) -> int: ...
+
+
+# --- trigger — the inbound mirror of EventSink (Engineering Design §4.4) ---
+#
+# EventSink emits events *out*; a Trigger listens for events *in* and starts a
+# run. Email, webhook, queue (SQS/Kafka/PubSub), schedule, an object-storage
+# write, or another agent's event — each is a Trigger plugin, discovered and
+# configured exactly like a Tool (the ``zu.triggers`` group). A trigger carries
+# UNTRUSTED input, which is exactly why the capability envelope matters: the
+# payload is attacker-controlled, so it is typed and recorded as such and never
+# treated as authoritative.
+
+
+class TriggerEvent(BaseModel):
+    """What woke the agent — typed, and put on the log at run start.
+
+    ``payload`` is UNTRUSTED: it is whatever an external party sent (an email
+    body, a webhook JSON, a queue message). It is data to act on under the
+    envelope, never an instruction the harness obeys.
+    """
+
+    source: str  # 'email' | 'webhook' | 'queue' | 'schedule' | 'object-store' | ...
+    payload: dict = Field(default_factory=dict)
+
+
+@runtime_checkable
+class Trigger(Protocol):
+    # The source label this trigger stamps onto every event it yields.
+    source: str
+
+    def listen(self) -> Iterator[TriggerEvent]: ...
