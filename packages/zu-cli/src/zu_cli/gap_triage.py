@@ -63,9 +63,13 @@ def _spotlight(issue_title: str, issue_body: str) -> str:
     )
 
 
-def render_agent(template_path: str | Path, issue_title: str, issue_body: str) -> str:
+def render_agent(
+    template_path: str | Path, issue_title: str, issue_body: str, model: str | None = None
+) -> str:
     """Render the triage ``agent.yaml`` from the committed template, injecting the issue
-    ONLY as ``task.query``. Every other key is preserved verbatim. Returns YAML text.
+    ONLY as ``task.query`` (and, if given, the operator's ``model`` — kept vendor-neutral:
+    the key/endpoint come from generic env vars named in the template). Every other key is
+    preserved verbatim. Returns YAML text.
 
     Raises ``ValueError`` if the template has no ``task`` block (a misconfiguration we
     want loud, not silently producing a runnable-but-wrong agent)."""
@@ -74,9 +78,14 @@ def render_agent(template_path: str | Path, issue_title: str, issue_body: str) -
     doc = yaml.safe_load(Path(template_path).read_text(encoding="utf-8"))
     if not isinstance(doc, dict) or not isinstance(doc.get("task"), dict):
         raise ValueError("triage template must contain a `task:` block")
-    # The ONLY mutation: set the query to a string value via the object model, so no issue
-    # content can ever alter provider / tiers / containment / validators.
+    # Set the query to a string value via the object model, so no issue content can ever
+    # alter provider / tiers / containment / validators.
     doc["task"]["query"] = _spotlight(issue_title, issue_body)
+    # The model is the operator's choice (any provider), injected from env — never baked in.
+    if model:
+        provider = doc.get("provider")
+        if isinstance(provider, dict):
+            provider["model"] = model
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
 
 
@@ -93,7 +102,10 @@ def _main(argv: list[str]) -> int:
     if len(argv) >= 4 and argv[1] == "render":
         template, out_dir = argv[2], argv[3]
         rendered = render_agent(
-            template, os.environ.get("ISSUE_TITLE", ""), os.environ.get("ISSUE_BODY", "")
+            template,
+            os.environ.get("ISSUE_TITLE", ""),
+            os.environ.get("ISSUE_BODY", ""),
+            model=os.environ.get("ZU_MODEL") or None,
         )
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)

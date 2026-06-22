@@ -10,9 +10,16 @@ name: gap-triage
 #   * Least-privilege token: contents:read + issues:write only.
 #   * The issue is injected STRUCTURALLY (python -m zu_cli.gap_triage render, via env —
 #     never spliced into a run: script), and the agent has no egress tools + containment:
-#     required, so there is no channel to exfiltrate ANTHROPIC_API_KEY / the token.
+#     required, so there is no channel to exfiltrate the model key / the token.
 #   * Model output is sanitised (mentions neutralised, length capped) before posting.
 #   * Third-party actions are pinned to commit SHA.
+#
+# CONFIG is vendor-NEUTRAL and fully OPTIONAL. The model is reached through one generic
+# key plus an optional endpoint/model — no vendor is named. If the key is unset the whole
+# workflow is a clean no-op. Configure (any OpenAI-compatible provider):
+#   * secret  ZU_MODEL_API_KEY   — the API key (required to enable; absent ⇒ skip)
+#   * var     ZU_MODEL_BASE_URL  — the endpoint (optional; adapter default if unset)
+#   * var     ZU_MODEL           — the model id (optional)
 
 on:
   issues:
@@ -34,13 +41,13 @@ jobs:
     env:
       NUMBER: ${{ github.event.issue.number }}
     steps:
-      - name: Check for model key
+      - name: Check for a model key
         id: precheck
         env:
-          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KEY: ${{ secrets.ZU_MODEL_API_KEY }}
         run: |
           if [ -z "$KEY" ]; then
-            echo "ANTHROPIC_API_KEY not set — skipping (no-op)."; echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "ZU_MODEL_API_KEY not set — skipping (no-op)."; echo "ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
@@ -66,12 +73,14 @@ jobs:
           # untrusted GitHub context to a step.
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
+          ZU_MODEL: ${{ vars.ZU_MODEL }}            # optional model id, injected into the agent
         run: uv run python -m zu_cli.gap_triage render automation/gap-triage/agent.yaml /tmp/triage
 
       - name: Run the triage agent (one live model call, no egress tools)
         if: steps.precheck.outputs.ok == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZU_MODEL_API_KEY: ${{ secrets.ZU_MODEL_API_KEY }}    # generic key — any provider
+          ZU_MODEL_BASE_URL: ${{ vars.ZU_MODEL_BASE_URL }}     # optional endpoint
         # Best-effort: capture the result block whatever the outcome, then post it.
         run: uv run zu run /tmp/triage --no-stream --no-track > /tmp/triage.out 2>&1 || true
 

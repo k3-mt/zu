@@ -22,7 +22,7 @@ Anyone can open an issue, so the body is attacker-controllable. Defence in depth
   triage/write permission to apply — opening an issue isn't enough to trigger the agent.
 - **No egress + containment.** `tiers: { 1: [recall] }` (no `http_fetch`/`browser`/
   `render_dom`) and `containment: required` — there is no tool that can reach the network,
-  so a prompt-injected model has nothing to exfiltrate a secret through.
+  so a prompt-injected model has nothing to exfiltrate the model key through.
 - **Structural rendering.** The workflow injects the issue via
   `python -m zu_cli.gap_triage render`, which sets `task.query` through a YAML parser (the
   issue is a *string value*). Issue content can never overwrite `provider`/`tiers`/
@@ -36,8 +36,22 @@ Anyone can open an issue, so the body is attacker-controllable. Defence in depth
 zu run automation/gap-triage/ --offline    # replays fixtures/capture.json
 ```
 
-This proves the wiring + schema validator at $0. The CI run is live (one model call,
-using `ANTHROPIC_API_KEY`); the rendered `task.query` carries the real issue.
+This proves the wiring + schema validator at $0. The CI run is live (one model call); the
+rendered `task.query` carries the real issue and `provider.model` is injected from `ZU_MODEL`.
+
+## Configuration — vendor-neutral and optional
+
+The agent is wired to **any** OpenAI-compatible provider; no vendor is named or assumed.
+It runs in CI only if a key is configured — otherwise the workflow is a clean no-op.
+
+| Setting | Where | Required? | Meaning |
+|---|---|---|---|
+| `ZU_MODEL_API_KEY` | Actions **secret** | to enable (absent ⇒ skip) | the API key — for whatever provider you use |
+| `ZU_MODEL_BASE_URL` | Actions **variable** | optional | the endpoint (adapter default if unset) |
+| `ZU_MODEL` | Actions **variable** | optional | the model id |
+
+Point these at OpenAI, OpenRouter, a local vLLM/Ollama, an Anthropic-compatible gateway —
+your choice. Swapping providers is changing these values, nothing in code.
 
 ## Re-capture the fixture
 

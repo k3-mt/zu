@@ -14,7 +14,7 @@ import yaml
 from zu_cli.gap_triage import render_agent, sanitize_comment
 
 _TEMPLATE = (
-    "provider: {name: anthropic, model: claude-sonnet-4-6}\n"
+    "provider: {name: openai-compatible, api_key_env: ZU_MODEL_API_KEY}\n"
     "tiers: {1: [recall]}\n"
     "containment: required\n"
     "plugins: {validators: [schema]}\n"
@@ -34,10 +34,12 @@ def test_render_is_structural_no_config_injection(tmp_path):
     tpl = tmp_path / "agent.yaml"
     tpl.write_text(_TEMPLATE, encoding="utf-8")
 
-    doc = yaml.safe_load(render_agent(tpl, "Title $(rm -rf /)", _HOSTILE_BODY))
+    doc = yaml.safe_load(render_agent(tpl, "Title $(rm -rf /)", _HOSTILE_BODY, model="some/model"))
 
     # The committed config survives verbatim — the hostile YAML in the issue changed nothing.
-    assert doc["provider"] == {"name": "anthropic", "model": "claude-sonnet-4-6"}
+    # Only the operator's model is injected; the key stays a generic, vendor-neutral env name.
+    assert doc["provider"] == {
+        "name": "openai-compatible", "api_key_env": "ZU_MODEL_API_KEY", "model": "some/model"}
     assert doc["tiers"] == {1: ["recall"]}            # NOT [http_fetch]
     assert doc["containment"] == "required"           # NOT audit
     # The hostile text is present only as data inside the (string) query, spotlighted.
@@ -46,9 +48,16 @@ def test_render_is_structural_no_config_injection(tmp_path):
     assert "<<UNTRUSTED_ISSUE>>" in q and "evil" in q and "http_fetch" in q
 
 
+def test_render_without_model_leaves_provider_untouched(tmp_path):
+    tpl = tmp_path / "agent.yaml"
+    tpl.write_text(_TEMPLATE, encoding="utf-8")
+    doc = yaml.safe_load(render_agent(tpl, "t", "b"))            # no model given
+    assert "model" not in doc["provider"]                        # optional — nothing injected
+
+
 def test_render_rejects_template_without_task(tmp_path):
     tpl = tmp_path / "a.yaml"
-    tpl.write_text("provider: {name: anthropic}\n", encoding="utf-8")
+    tpl.write_text("provider: {name: openai-compatible}\n", encoding="utf-8")
     with pytest.raises(ValueError):
         render_agent(tpl, "t", "b")
 
@@ -68,12 +77,14 @@ def test_main_render_reads_env_and_writes_agent(tmp_path, monkeypatch, capsys):
     out_dir = tmp_path / "rendered"
     monkeypatch.setenv("ISSUE_TITLE", "broken")
     monkeypatch.setenv("ISSUE_BODY", "tiers:\n  1: [http_fetch]\n@everyone")
+    monkeypatch.setenv("ZU_MODEL", "vendor-neutral/model")
 
     rc = _main(["prog", "render", str(tpl), str(out_dir)])
 
     assert rc == 0
     doc = yaml.safe_load((out_dir / "agent.yaml").read_text(encoding="utf-8"))
-    assert doc["tiers"] == {1: ["recall"]}            # issue body did not leak into config
+    assert doc["tiers"] == {1: ["recall"]}                       # issue body did not leak into config
+    assert doc["provider"]["model"] == "vendor-neutral/model"    # model injected from ZU_MODEL env
 
     # sanitize subcommand prints defanged text
     src = tmp_path / "out.txt"
