@@ -21,6 +21,7 @@ from zu_cli.config import (
     PluginsConfig,
     ProviderConfig,
     RunConfig,
+    ToolSpecConfig,
     assemble,
     build_provider,
     build_registry,
@@ -30,6 +31,7 @@ from zu_cli.config import (
 )
 from zu_cli.main import app
 from zu_core.contracts import Budget
+from zu_core.registry import Registry
 
 runner = CliRunner()
 
@@ -281,6 +283,121 @@ def test_backend_is_injected_into_a_tool_that_accepts_one():
     # An instance (not the bare class), with the configured backend bound in.
     assert not isinstance(render, type)
     assert type(render._backend).__name__ == "LocalDockerBackend"
+
+
+# --- config-owned tool args: a tool that needs configuration (Layer 1) --------
+
+
+class _KeyedTool:
+    """A tool that needs configuration: a model id and the NAME of the env var it
+    reads its key from (never the key value)."""
+
+    name = "keyed"
+    tier = 1
+    schema = {"name": "keyed", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "keyed()"
+    capabilities: frozenset[str] = frozenset()
+    egress: frozenset[str] = frozenset()
+
+    def __init__(self, model: str | None = None, api_key_env: str = "DEFAULT_KEY") -> None:
+        self.model = model
+        self.api_key_env = api_key_env
+
+    async def __call__(self, ctx, **kw) -> dict:
+        return {"text": "ok"}
+
+
+def _catalog_with_keyed() -> Registry:
+    # The discovered catalog (so the default schema/grounding validators resolve)
+    # plus our configurable tool.
+    cat = Registry()
+    cat.discover()
+    cat.register("tools", "keyed", _KeyedTool)
+    return cat
+
+
+def test_tool_args_are_passed_to_the_constructor():
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=[
+            ToolSpecConfig(ref="keyed", args={"model": "whisper", "api_key_env": "SLACK_TOKEN"})
+        ]),
+    )
+    reg = build_registry(cfg, catalog=_catalog_with_keyed())
+    tool = reg.get("tools", "keyed")
+    assert not isinstance(tool, type)            # constructed, not left as a class
+    assert tool.model == "whisper"
+    assert tool.api_key_env == "SLACK_TOKEN"     # the env-var NAME, not a value
+
+
+def test_tool_entry_dict_coerces_to_a_spec():
+    # A YAML mapping ({ref, args}) and a bare string coexist in one tools list.
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=["http_fetch", {"ref": "keyed", "args": {"model": "m"}}]),
+    )
+    specs = cfg.plugins.tool_specs()
+    assert specs[0].ref == "http_fetch" and specs[0].args == {}
+    assert specs[1].ref == "keyed" and specs[1].args == {"model": "m"}
+    reg = build_registry(cfg, catalog=_catalog_with_keyed())
+    assert set(reg.names("tools")) == {"http_fetch", "keyed"}
+    assert reg.get("tools", "keyed").model == "m"
+
+
+def test_bare_string_tool_keeps_its_class_default_and_stays_lazy():
+    # No args, no tier, no injected dep → the class is left for the loop (lazy).
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=["keyed"]),
+    )
+    reg = build_registry(cfg, catalog=_catalog_with_keyed())
+    assert reg.get("tools", "keyed") is _KeyedTool      # the class, not an instance
+
+
+def test_tool_args_are_signature_filtered():
+    # An arg the constructor does not declare is dropped (not an error), like a provider.
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=[ToolSpecConfig(ref="keyed", args={"model": "m", "bogus": "x"})]),
+    )
+    reg = build_registry(cfg, catalog=_catalog_with_keyed())
+    tool = reg.get("tools", "keyed")
+    assert tool.model == "m"
+    assert not hasattr(tool, "bogus")
+
+
+def test_tool_args_and_tier_compose():
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=[ToolSpecConfig(ref="keyed", args={"model": "m"})]),
+        tiers={3: ["keyed"]},
+    )
+    reg = build_registry(cfg, catalog=_catalog_with_keyed())
+    tool = reg.get("tools", "keyed")
+    assert tool.model == "m" and tool.tier == 3     # args applied AND tier stamped
+
+
+def test_building_a_keyed_tool_does_not_read_the_secret(monkeypatch):
+    # Secrets stay in the environment: assembly names the env var but never reads
+    # it — so building succeeds even with the key absent (it is read at call time).
+    monkeypatch.delenv("SLACK_TOKEN", raising=False)
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=[ToolSpecConfig(ref="keyed", args={"api_key_env": "SLACK_TOKEN"})]),
+    )
+    reg = build_registry(cfg, catalog=_catalog_with_keyed())   # no raise
+    assert reg.get("tools", "keyed").api_key_env == "SLACK_TOKEN"
+
+
+def test_tool_args_on_an_instance_is_a_clear_error():
+    cat = Registry()
+    cat.register("tools", "keyed", _KeyedTool())     # an INSTANCE, not a class
+    cfg = RunConfig(
+        provider=ProviderConfig(name="scripted"),
+        plugins=PluginsConfig(tools=[ToolSpecConfig(ref="keyed", args={"model": "m"})]),
+    )
+    with pytest.raises(ConfigError, match="cannot take"):
+        build_registry(cfg, catalog=cat)
 
 
 def test_unknown_plugin_names_its_kind_in_the_error():

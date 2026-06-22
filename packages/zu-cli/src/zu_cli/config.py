@@ -67,11 +67,28 @@ class ProviderConfig(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolSpecConfig(BaseModel):
+    """A tool entry that carries constructor ``args``.
+
+    A ``tools`` entry may be a bare name/``module:Attr`` string (zero-config, the
+    common case) OR this object, which names the same ``ref`` and passes ``args``
+    to the tool's constructor — only the args its constructor declares are passed
+    (signature-filtered), exactly as a provider is built. This is how a tool that
+    needs configuration is wired per agent: a search connector, a model id for a
+    HuggingFace task tool, or — keeping faith with the secrets rule — the *name*
+    of the environment variable a tool reads its key from (e.g.
+    ``args: {api_key_env: SLACK_TOKEN}``), never the key value itself."""
+
+    ref: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
 class PluginsConfig(BaseModel):
     """Which plugins are active, by name (or ``module:Attr`` reference). Listing
     a plugin here is what activates it — the run registry contains exactly these,
     never everything installed, so a config controls (and orders) plugins per run
-    without touching code.
+    without touching code. A tool entry may also be a ``{ref, args}`` object
+    (:class:`ToolSpecConfig`) to pass constructor args — see there.
 
     ``validators`` defaults to ``[schema, grounding]`` — **correct by default**: a
     run is held to its output schema *and* every reported value must appear in the
@@ -82,9 +99,14 @@ class PluginsConfig(BaseModel):
     ``validators: [schema]`` explicitly, because grounding has no retrieved content
     to check against."""
 
-    tools: list[str] = Field(default_factory=list)
+    tools: list[str | ToolSpecConfig] = Field(default_factory=list)
     detectors: list[str] = Field(default_factory=list)
     validators: list[str] = Field(default_factory=lambda: ["schema", "grounding"])
+
+    def tool_specs(self) -> list[ToolSpecConfig]:
+        """The tools normalised to :class:`ToolSpecConfig` — a bare string becomes
+        a ref with no args, so the assembly path handles one shape."""
+        return [t if isinstance(t, ToolSpecConfig) else ToolSpecConfig(ref=t) for t in self.tools]
 
 
 class EventSinkConfig(BaseModel):
@@ -527,27 +549,52 @@ def build_provider(
 
 
 def _resolve_plugin(
-    kind: str, name: str, catalog: Registry, extra: dict[str, Any], *, allow_imports: bool = True
+    kind: str,
+    name: str,
+    catalog: Registry,
+    extra: dict[str, Any],
+    *,
+    args: dict[str, Any] | None = None,
+    allow_imports: bool = True,
 ) -> Any:
     """A single named plugin → an object for the run registry. An ``module:Attr``
     name is imported (only if ``allow_imports``); a short name is taken from the
     catalog. ``extra`` carries optional injected dependencies (e.g. a configured
     ``backend`` for a tool that accepts one); a class that wants one is
     instantiated here, otherwise it is handed to the registry as-is and the loop
-    materialises it."""
+    materialises it.
+
+    ``args`` are configured constructor arguments (a tool's ``{ref, args}``). When
+    present the class is instantiated here, passing only the args its constructor
+    declares (signature-filtered, like a provider) plus any injected dependency it
+    accepts — so a tool that omits an arg keeps its own default and a secret stays
+    an env-var *name*, never a value baked into the object."""
     if ":" in name:
         if not allow_imports:
             _refuse_import(name, kind[:-1])
-        return _import_ref(name)
-    try:
-        obj = catalog.get(kind, name)
-    except KeyError:
-        raise ConfigError(
-            f"unknown {kind[:-1]} {name!r}; discovered: "
-            f"{', '.join(catalog.names(kind)) or 'none'} (is its package installed?)"
-        ) from None
-    # Inject an optional dependency only when the plugin is a class that declares
-    # it — e.g. render_dom(backend=...). Otherwise leave the class for the loop.
+        obj = _import_ref(name)
+    else:
+        try:
+            obj = catalog.get(kind, name)
+        except KeyError:
+            raise ConfigError(
+                f"unknown {kind[:-1]} {name!r}; discovered: "
+                f"{', '.join(catalog.names(kind)) or 'none'} (is its package installed?)"
+            ) from None
+
+    if args:
+        if not isinstance(obj, type):
+            raise ConfigError(
+                f"{kind[:-1]} {name!r} is registered as an instance and cannot take "
+                "args; pass args only to a tool registered as a class/factory."
+            )
+        # configured args + any injected dependency the constructor declares
+        params = inspect.signature(obj).parameters
+        candidate = {**args, **{k: v for k, v in extra.items() if k in params}}
+        return _construct(obj, candidate)
+
+    # No args: inject an optional dependency only when the plugin is a class that
+    # declares it — e.g. render_dom(backend=...). Otherwise leave it for the loop.
     if extra and isinstance(obj, type):
         params = inspect.signature(obj).parameters
         inject = {k: v for k, v in extra.items() if k in params}
@@ -581,15 +628,20 @@ def build_registry(
     for tier, names in cfg.tiers.items():
         for name in names:
             tier_of[name] = tier
-    tool_names = list(cfg.plugins.tools) + [n for n in tier_of if n not in cfg.plugins.tools]
-    for name in tool_names:
-        obj = _resolve_plugin("tools", name, catalog, extra, allow_imports=allow_imports)
-        if name in tier_of:
+    # Each tool is a {ref, args} spec (a bare string normalises to ref-only). A
+    # tool named only in ``tiers`` (not in ``plugins.tools``) is added ref-only.
+    specs = cfg.plugins.tool_specs()
+    listed = {s.ref for s in specs}
+    specs += [ToolSpecConfig(ref=n) for n in tier_of if n not in listed]
+    for spec in specs:
+        obj = _resolve_plugin("tools", spec.ref, catalog, extra,
+                              args=spec.args, allow_imports=allow_imports)
+        if spec.ref in tier_of:
             # Need an instance to stamp the tier; a class is materialised here
             # (the loop would otherwise instantiate it with no args anyway).
             obj = obj() if isinstance(obj, type) else obj
-            obj.tier = tier_of[name]
-        reg.register("tools", getattr(obj, "name", name), obj)
+            obj.tier = tier_of[spec.ref]
+        reg.register("tools", getattr(obj, "name", spec.ref), obj)
 
     for kind in ("detectors", "validators"):
         for name in getattr(cfg.plugins, kind):
@@ -727,6 +779,7 @@ __all__ = [
     "RunConfig",
     "ProviderConfig",
     "PluginsConfig",
+    "ToolSpecConfig",
     "EventSinkConfig",
     "ObservabilityConfig",
     "ConfigError",
