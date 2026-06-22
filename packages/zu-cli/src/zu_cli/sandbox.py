@@ -144,6 +144,26 @@ class SandboxLauncher:
     async def run(
         self, task: dict, config: dict, *, allowlist: list[str], bundle_dir: str | None = None
     ) -> tuple[Result, list[dict]]:
+        """Run a whole AGENT inside the box (the ``zu-run-contained`` entrypoint) and parse
+        its Result + event log back. A thin wrapper over :meth:`run_entrypoint`."""
+        payload = await self.run_entrypoint(
+            ["zu-run-contained"],
+            {"ZU_TASK": json.dumps(task), "ZU_CONFIG": json.dumps(config)},
+            allowlist=allowlist, bundle_dir=bundle_dir,
+        )
+        result = Result.model_validate(payload["result"])
+        return result, payload.get("events", [])
+
+    async def run_entrypoint(
+        self, entrypoint: list[str], exec_env: dict, *, allowlist: list[str],
+        bundle_dir: str | None = None,
+    ) -> dict:
+        """Launch the hardened box (internal network + egress-proxy sidecar, caps dropped,
+        blocking seccomp), exec ``entrypoint`` inside it with the contained-floor + proxy env
+        merged with ``exec_env``, and return the last JSON object it wrote to stdout. The
+        reusable core of every contained run — an agent run (:meth:`run`) and contained
+        construction (``construct_sandbox.launch_contained_construction``) both go through
+        here, so the container/egress topology lives in exactly one audited place."""
         client = self.backend._docker()
         proxy_name = f"{self.network_name}-proxy"
         # Clear any resources a crashed prior run may have left behind.
@@ -171,7 +191,7 @@ class SandboxLauncher:
             await self._await_proxy_ready(proxy)
 
             # The target: internal-only (the proxy is the only route off-box), caps
-            # dropped + blocking seccomp, kept alive so we exec the agent into it.
+            # dropped + blocking seccomp, kept alive so we exec the entrypoint into it.
             target_spec: dict = {
                 "image": self.image,
                 "network": "isolated",
@@ -193,29 +213,25 @@ class SandboxLauncher:
             # pass it explicitly. ZU_SANDBOXED marks the run contained — set HERE,
             # where the boundary is actually established, never baked into the image.
             proxy_url = f"http://{proxy_name}:{self.proxy_port}"
-            exec_env = {
+            env = {
                 SANDBOX_ENV: "1",
-                "ZU_TASK": json.dumps(task),
-                "ZU_CONFIG": json.dumps(config),
                 "HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url,
                 "http_proxy": proxy_url, "https_proxy": proxy_url,
                 "NO_PROXY": "localhost,127.0.0.1",
             }
             if bundle_dir is not None:
                 # Put the mounted bundle on the path so its tools/ import-refs resolve.
-                exec_env["PYTHONPATH"] = "/bundle"
-                exec_env["ZU_BUNDLE"] = "/bundle"
+                env["PYTHONPATH"] = "/bundle"
+                env["ZU_BUNDLE"] = "/bundle"
+            env.update(exec_env)  # the caller's entrypoint-specific vars (task/config, opts)
             code, out, err = await self.backend.exec_entrypoint(
-                sandbox, ["zu-run-contained"],
-                environment=exec_env, timeout_s=self.exec_timeout_s,
+                sandbox, entrypoint, environment=env, timeout_s=self.exec_timeout_s,
             )
             if not out.strip():
                 raise RuntimeError(
                     f"contained run produced no output (exit {code}): {err[:300]}"
                 )
-            payload = _last_json_object(out)
-            result = Result.model_validate(payload["result"])
-            return result, payload.get("events", [])
+            return _last_json_object(out)
         finally:
             if sandbox is not None:
                 await self.backend.destroy(sandbox)

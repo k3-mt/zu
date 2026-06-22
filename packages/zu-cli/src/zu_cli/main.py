@@ -231,6 +231,27 @@ def _egress_allowlist(cfg) -> list[str]:
     return sorted(allow)
 
 
+def _model_egress(cfg) -> list[str]:
+    """The host the contained meta-agent's BRAIN (its model) must reach — the only egress a
+    construction run needs, since the tools replay offline from the bundle. Derived from the
+    provider's ``base_url`` (explicit or via its env var); a scripted/offline brain needs
+    none. Empty → the proxy denies all egress (fail-closed); set the provider's base_url to
+    permit the model host for a live brain."""
+    from urllib.parse import urlsplit
+
+    p = cfg.provider
+    if p.name == "scripted":
+        return []
+    base = getattr(p, "base_url", None)
+    base_env = getattr(p, "base_url_env", None)
+    url = base or (os.environ.get(base_env) if base_env else None)
+    if url:
+        host = urlsplit(url).hostname
+        return [host] if host else []
+    # No base_url configured: fall back to the known default host for built-in providers.
+    return {"anthropic": ["api.anthropic.com"]}.get(p.name, [])
+
+
 def _execute_sandboxed(agent: str) -> Result:
     """Run the whole agent inside a hardened container behind an egress proxy — the
     real boundary for ``containment='required'``. Needs Docker, the zu image, and
@@ -566,14 +587,21 @@ def construct(
     min_resilience: float = typer.Option(
         1.0, "--min-resilience", help="Required resilience score (0.0–1.0).",
     ),
+    sandboxed: bool = typer.Option(
+        False, "--sandboxed",
+        help="Run the autonomous loop INSIDE a hardened container (needs Docker + the zu "
+             "image). Egress is limited to the model endpoint; the tools replay offline.",
+    ),
 ) -> None:
     """The meta-agent construction loop: build → enforce the anti-hardcode guardrails →
     (autonomously) diagnose, edit, and rebuild — offline, at $0 with a scripted strategist.
 
     ``--check`` runs ONE round and reports readiness (the gate that enforces: alternate
-    locators, a resilient track, and no hardcoded answer). The autonomous loop needs a
-    live model to decide edits and is the next increment; without one it stops at the
-    live-strategist seam. Needs a captured bundle (run ``zu capture`` once).
+    locators, a resilient track, and no hardcoded answer). The autonomous loop decides edits
+    with a live model when its key is set (else it stops at the live-strategist seam).
+    ``--sandboxed`` runs that loop contained — the production form of the meta-agent: zu's
+    own construct() loop inside the hardened box, egress only to the model. Needs a captured
+    bundle (run ``zu capture`` once).
     """
     from pathlib import Path
 
@@ -615,6 +643,47 @@ def construct(
             return
         typer.echo("construct: not ready — fix the items above (a strategist would iterate "
                    "on these).", err=True)
+        raise typer.Exit(code=1) from None
+
+    if sandboxed:
+        # The production form: run the autonomous loop INSIDE the hardened box. The tools
+        # replay offline (the bundle is mounted), so the only egress is the model endpoint.
+        from .construct_sandbox import launch_contained_construction
+
+        try:
+            from zu_backends.local_docker import LocalDockerBackend
+
+            from .sandbox import SandboxLauncher
+        except ModuleNotFoundError:
+            typer.echo("config error: sandboxed construction needs the Docker backend: "
+                       "pip install 'zu-runtime[docker]'", err=True)
+            raise typer.Exit(code=2) from None
+        image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:latest")
+        allowlist = _model_egress(cfg)
+        launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
+        typer.echo(f"zu construct --sandboxed: {agent} in {image} "
+                   f"(contained; egress→{', '.join(allowlist) or 'none'}; up to {max_rounds} rounds)")
+        try:
+            payload = asyncio.run(launch_contained_construction(
+                launcher, str(agent_dir), allowlist=allowlist,
+                max_rounds=max_rounds, min_resilience=min_resilience))
+        except Exception as exc:  # noqa: BLE001 - container/model failure: report, don't traceback
+            typer.echo(f"construct: contained run failed: {type(exc).__name__}: {exc}", err=True)
+            raise typer.Exit(code=1) from None
+        if not payload.get("ok"):
+            typer.echo(f"construct: {payload.get('error', 'contained construction failed')}", err=True)
+            raise typer.Exit(code=1) from None
+        for rr in payload.get("rounds", []):
+            typer.echo(f"  round {rr['round']}: {rr['note']}")
+        if payload.get("converged") and payload.get("track"):
+            track_path = agent_dir / "track.json"
+            track_path.write_text(payload["track"], encoding="utf-8")
+            typer.echo(f"construct: converged — hardened track written → {track_path} "
+                       "(review before promoting; nothing auto-promoted).")
+            return
+        for v in payload.get("violations", []):
+            typer.echo(f"      · [{v['rule']}] {v['detail']}")
+        typer.echo("construct: did not converge — handed back for review.", err=True)
         raise typer.Exit(code=1) from None
 
     # Autonomous mode: the live strategist (a model) decides edits. Build the agent's

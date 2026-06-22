@@ -12,6 +12,7 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 
 from zu_cli.construct_sandbox import construct_contained_from_env, run_contained_construction
@@ -74,3 +75,77 @@ def test_entrypoint_without_bundle_errors(capsys, monkeypatch):
     assert rc == 1
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert payload["ok"] is False and "ZU_BUNDLE" in payload["error"]
+
+
+# --- the host-side launcher (wiring verified with a fake; Docker is the gated seam) -------
+
+
+class _RecordingLauncher:
+    """A stand-in for SandboxLauncher: records the run_entrypoint call and returns a canned
+    payload, so the construction launcher's WIRING is verified with no Docker, at $0 (the
+    real container/Docker is exercised only by the @pytest.mark.docker test below)."""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.calls: list[dict] = []
+
+    async def run_entrypoint(self, entrypoint, exec_env, *, allowlist, bundle_dir=None) -> dict:
+        self.calls.append({"entrypoint": entrypoint, "exec_env": exec_env,
+                           "allowlist": allowlist, "bundle_dir": bundle_dir})
+        return self._payload
+
+
+async def test_launch_contained_construction_wires_the_entrypoint(tmp_path):
+    from zu_cli.construct_sandbox import launch_contained_construction
+
+    launcher = _RecordingLauncher(
+        {"ok": True, "converged": True, "ready": True, "track": "{}",
+         "rounds": [], "violations": []})
+    report = await launch_contained_construction(
+        launcher, str(tmp_path / "agent"), allowlist=["api.anthropic.com"],
+        max_rounds=2, min_resilience=0.9)
+
+    assert report["ready"] and report["track"] == "{}"
+    call = launcher.calls[0]
+    assert call["entrypoint"] == ["zu-construct-contained"]   # the construction entrypoint
+    assert call["exec_env"] == {"ZU_CONSTRUCT_MAX_ROUNDS": "2",
+                                "ZU_CONSTRUCT_MIN_RESILIENCE": "0.9"}
+    assert call["allowlist"] == ["api.anthropic.com"]          # egress only to the model
+    assert call["bundle_dir"].endswith("agent")               # the agent mounted at /bundle
+
+
+def test_model_egress_derivation():
+    from types import SimpleNamespace
+
+    from zu_cli.main import _model_egress
+
+    def _cfg(provider):
+        return SimpleNamespace(provider=provider)
+
+    # A scripted/offline brain needs no egress.
+    assert _model_egress(_cfg(SimpleNamespace(name="scripted"))) == []
+    # An explicit base_url → just its host.
+    assert _model_egress(_cfg(SimpleNamespace(
+        name="openai-compatible", base_url="https://openrouter.ai/api/v1", base_url_env=None,
+    ))) == ["openrouter.ai"]
+    # A built-in provider with no base_url → its known default host.
+    assert _model_egress(_cfg(SimpleNamespace(
+        name="anthropic", base_url=None, base_url_env=None))) == ["api.anthropic.com"]
+
+
+@pytest.mark.docker
+async def test_contained_construction_runs_in_the_box() -> None:
+    # The real launcher: drives Docker (internal net + proxy sidecar) and execs
+    # zu-construct-contained in the box. Needs the rebuilt image (with the new console
+    # script). Gated — only runs with --run-docker.
+    import os
+
+    from zu_backends.local_docker import LocalDockerBackend
+    from zu_cli.construct_sandbox import launch_contained_construction
+    from zu_cli.sandbox import SandboxLauncher
+
+    image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:test")
+    launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
+    report = await launch_contained_construction(
+        launcher, str(_BROWSER_WIDGET), allowlist=[], max_rounds=1)
+    assert report["ok"] is True

@@ -118,3 +118,22 @@ def construct_contained_from_env(argv: list[str] | None = None) -> int:
     json.dump(payload, sys.stdout, default=str)
     sys.stdout.write("\n")
     return 0
+
+
+async def launch_contained_construction(
+    launcher: Any, agent_dir: str | Path, *, allowlist: list[str],
+    max_rounds: int = 3, min_resilience: float = 1.0,
+) -> dict:
+    """Run autonomous construction INSIDE the hardened box — the host-side half. Execs the
+    ``zu-construct-contained`` entrypoint via ``launcher.run_entrypoint`` (a
+    :class:`~zu_cli.sandbox.SandboxLauncher`), with the agent mounted read-only at
+    ``/bundle`` and egress limited to ``allowlist`` (the model endpoint — construction is
+    otherwise offline). Returns the construction report the entrypoint emitted: convergence,
+    each round, the standing violations, and the hardened ``track.json`` contents to write
+    back for review. Never auto-promotes (G4)."""
+    return await launcher.run_entrypoint(
+        ["zu-construct-contained"],
+        {"ZU_CONSTRUCT_MAX_ROUNDS": str(max_rounds),
+         "ZU_CONSTRUCT_MIN_RESILIENCE": str(min_resilience)},
+        allowlist=allowlist, bundle_dir=str(agent_dir),
+    )
