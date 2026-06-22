@@ -1,9 +1,10 @@
-"""Zu community Discord bot.
+"""Zeke — the Zu community Discord bot.
 
-A small, dependency-light helper for the Zu server. It ships a handful of slash
-commands that answer the questions newcomers ask over and over — where the docs
-are, how to run the thing, and (the load-bearing one for this project) how to
-turn "Zu couldn't do X" into a reported capability gap instead of a local hack.
+A small, dependency-light helper for the Zu server (the zebra mascot — "Zeke", distinct
+from the "Zu" release/issue webhook). It greets new members and ships slash commands that
+answer the questions newcomers ask over and over — where the docs are, how to run the
+thing, and (the load-bearing one for this project) how to turn "Zu couldn't do X" into a
+reported capability gap instead of a local hack.
 
 Run it:
 
@@ -11,9 +12,14 @@ Run it:
     pip install -r requirements.txt
     python bot.py
 
-The token is read from the DISCORD_BOT_TOKEN environment variable. Set GUILD_ID
-to a server id during development for instant slash-command registration; leave
-it unset in production for normal (global) propagation.
+Config (environment):
+  * DISCORD_BOT_TOKEN  — required. The bot token (Developer Portal → Bot → Reset Token).
+  * GUILD_ID           — optional. A server id gives instant slash-command registration
+                         during development; unset = normal (global) propagation.
+  * WELCOME_CHANNEL    — optional. Channel name to greet new members in (default: general).
+
+The new-member greeting needs the **Server Members** privileged intent — enable it at
+Developer Portal → your app → Bot → Privileged Gateway Intents → Server Members Intent.
 """
 
 from __future__ import annotations
@@ -32,20 +38,31 @@ except ImportError:
     pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("Zu")
+log = logging.getLogger("zeke")
 
 REPO = "https://github.com/k3-mt/zu"
 BRAND = 0x5865F2  # Discord blurple, matches the README badge.
+WELCOME_CHANNEL = os.environ.get("WELCOME_CHANNEL", "general")
 
 
 def _embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(title=title, description=description, color=BRAND)
+    e = discord.Embed(title=title, description=description, color=BRAND)
+    e.set_footer(text="Zeke · the Zu community helper")
+    return e
 
 
-class ZuBot(discord.Client):
+def _channel_ref(guild: discord.Guild, name: str) -> str:
+    """A clickable #channel mention if it exists, else a plain ``#name`` fallback."""
+    channel = discord.utils.get(guild.text_channels, name=name)
+    return channel.mention if channel else f"#{name}"
+
+
+class ZekeBot(discord.Client):
     def __init__(self) -> None:
-        # No privileged intents needed — slash commands work with the default set.
-        super().__init__(intents=discord.Intents.default())
+        # Default intents + members, so the bot can greet people as they join.
+        intents = discord.Intents.default()
+        intents.members = True
+        super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
@@ -60,12 +77,34 @@ class ZuBot(discord.Client):
             log.info("Slash commands synced globally (may take up to an hour).")
 
 
-client = ZuBot()
+client = ZekeBot()
 
 
 @client.event
 async def on_ready() -> None:
-    log.info("Logged in as %s (id=%s).", client.user, getattr(client.user, "id", "?"))
+    log.info("Zeke is online as %s (id=%s).", client.user, getattr(client.user, "id", "?"))
+
+
+@client.event
+async def on_member_join(member: discord.Member) -> None:
+    """Greet a new member and point them at the load-bearing channels + commands."""
+    guild = member.guild
+    channel = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL)
+    if channel is None:
+        return
+    embed = _embed(
+        f"Welcome to Zu, {member.display_name}! 🦓",
+        "Glad you're here — Zu is a backend-agnostic runtime for production agents.\n\n"
+        f"• {_channel_ref(guild, 'start-here')} — what Zu is, and the rules\n"
+        f"• {_channel_ref(guild, 'help')} — ask anything; try `/run` and `/docs`\n"
+        f"• {_channel_ref(guild, 'capability-gaps')} — hit a wall? `/gap` shows how to report it\n"
+        f"• {_channel_ref(guild, 'show-and-tell')} — share what you build\n\n"
+        f"The open runtime lives at <{REPO}>.",
+    )
+    try:
+        await channel.send(content=member.mention, embed=embed)
+    except discord.DiscordException as exc:  # missing perms / channel gone — never crash
+        log.warning("Could not post welcome for %s: %s", member, exc)
 
 
 @client.tree.command(name="docs", description="Links to the Zu docs and the best starting points.")
