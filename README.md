@@ -122,15 +122,15 @@ pip install 'zu-runtime[mcp]'         # + the MCP server (zu mcp)
 ```
 
 You almost never install the `zu-*` sub-packages individually — they're published standalone
-so *plugin authors* can depend on just `zu-core`. As a user, install
-`zu-runtime` (+ extras); `zu plugins` lists whatever you have.
+so *plugin authors* can depend on just `zu-core`. As a user, install `zu-runtime` (+ extras);
+`zu plugins` lists whatever you have.
 
 Prove it runs — `zu demo` runs against a **real model** (that's the point: prove
 runnability, not just wired logic):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-pip install 'zu-runtime[demo,anthropic]'
+pip install 'zu-runtime[anthropic]'   # web tools are in the base; add the model SDK
 zu demo --model claude-sonnet-4-6     # real http_fetch + extract + validate (tier 1)
 zu demo --type minimal --model claude-sonnet-4-6   # no tools — needs only a key
 zu demo --offline                     # scripted self-test (no key) — proves wiring, not a real run
