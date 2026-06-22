@@ -233,9 +233,10 @@ def _execute_once(
                 track=track,
                 replay_budget=replay_budget,
                 finish_provider=finish_provider,
-                # Humanise pacing on a LIVE run (delays scaling upward across the
-                # track); off offline so replay-driven iteration stays instant.
-                replay_jitter_max_ms=0 if offline else cfg.replay.jitter_max_ms,
+                # Humanise pacing on a LIVE run (recorded gap = floor, plus a
+                # stationary heavy-tailed extra); off offline so replay-driven
+                # iteration stays instant.
+                replay_jitter_median_ms=0 if offline else cfg.replay.jitter_median_ms,
             )
             return result, await bus.query()
         finally:

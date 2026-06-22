@@ -1052,52 +1052,79 @@ async def test_track_challenge_hands_off_to_the_model() -> None:
     assert [c["k"] for c in tool.calls] == ["a", "b"]        # stopped at the challenge
 
 
-async def test_replay_jitter_adds_upward_scaling_delays(monkeypatch) -> None:
-    """With replay_jitter_max_ms on, each replayed step gets a random delay centred
-    on an upward-curving envelope across the track (0%→100%), varying up and down.
-    We capture asyncio.sleep rather than really sleeping, so the test stays instant."""
-    from uuid import UUID
-
-    from zu_core.track import Track, TrackStep
-
+def _capture_sleep(monkeypatch) -> list[float]:
     slept: list[float] = []
 
     async def fake_sleep(secs: float) -> None:
         slept.append(secs)
 
     monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    return slept
 
+
+async def test_replay_jitter_is_stationary_with_a_long_tail(monkeypatch) -> None:
+    """With jitter on, each step adds a stationary, heavy-tailed extra: the pacing
+    does NOT creep upward across the track, but the occasional step is much longer.
+    asyncio.sleep is captured, not really awaited, so the test stays instant."""
+    from uuid import UUID
+
+    from zu_core.track import Track, TrackStep
+
+    slept = _capture_sleep(monkeypatch)
     reg = Registry()
     reg.register("tools", "rec", _RecordingTool())
     provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
-    # six steps, no recorded waits — so every sleep is pure jitter
-    steps = [TrackStep("rec", {"k": str(i)}, 0) for i in range(6)]
-    track = Track(task="q", steps=steps)
+    # many steps, no recorded floor — so every sleep is pure stationary jitter
+    track = Track(task="q", steps=[TrackStep("rec", {"k": str(i)}, 0) for i in range(80)])
     trace = UUID("11111111-1111-1111-1111-111111111111")
 
     await run_task(TaskSpec(query="q"), provider, reg, EventBus(),
-                   track=track, replay_jitter_max_ms=8000, trace_id=trace)
+                   track=track, replay_jitter_median_ms=400, trace_id=trace)
 
-    # first step is progress 0.0 → no delay → not all six produced a sleep
-    assert 0 < len(slept) <= 6
-    # the delays trend upward: the late half's max exceeds the early half's max
-    early_max = max(slept[: len(slept) // 2])
-    late_max = max(slept[len(slept) // 2:])
-    assert late_max > early_max
-    # bounded by the curved envelope's band at 100%: center(=8s) * (1 + spread)
-    assert max(slept) <= 8.0 * (1 + 0.5)
+    assert len(slept) == 80
+    # NOT upward-creeping: the second half's median ≈ the first half's median.
+    def median(xs):
+        s = sorted(xs)
+        return s[len(s) // 2]
+    assert abs(median(slept[:40]) - median(slept[40:])) < 0.25
+    # but a heavy tail exists: at least one step is a second or more.
+    assert max(slept) >= 1.0
+
+
+async def test_replay_floor_honored_live_but_capped_offline(monkeypatch) -> None:
+    """The recorded gap is the absolute floor on a live run (honoured in full, even
+    above MAX_REPLAY_WAIT_MS), but is capped when jitter is off (offline/iteration)."""
+    from zu_core.track import MAX_REPLAY_WAIT_MS, Track, TrackStep
+
+    # a single step whose recorded gap exceeds the offline cap
+    def one_step_track() -> Track:
+        return Track(task="q", steps=[TrackStep("rec", {"k": "a"}, 5000)])
+
+    def fresh_reg():
+        reg = Registry()
+        reg.register("tools", "rec", _RecordingTool())
+        return reg
+
+    def prov():
+        return ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
+
+    # live: floor honoured in full (>= 5s), not capped to 3s
+    slept = _capture_sleep(monkeypatch)
+    await run_task(TaskSpec(query="q"), prov(), fresh_reg(), EventBus(),
+                   track=one_step_track(), replay_jitter_median_ms=400)
+    assert slept and slept[0] >= 5.0
+
+    # offline (jitter off): the recorded gap is capped to MAX_REPLAY_WAIT_MS
+    slept2 = _capture_sleep(monkeypatch)
+    await run_task(TaskSpec(query="q"), prov(), fresh_reg(), EventBus(),
+                   track=one_step_track())
+    assert slept2 == [MAX_REPLAY_WAIT_MS / 1000]
 
 
 async def test_replay_jitter_off_by_default_no_extra_sleep(monkeypatch) -> None:
     from zu_core.track import Track, TrackStep
 
-    slept: list[float] = []
-
-    async def fake_sleep(secs: float) -> None:
-        slept.append(secs)
-
-    monkeypatch.setattr("asyncio.sleep", fake_sleep)
-
+    slept = _capture_sleep(monkeypatch)
     reg = Registry()
     reg.register("tools", "rec", _RecordingTool())
     provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
@@ -1116,18 +1143,13 @@ async def test_replay_jitter_is_reproducible_for_a_trace_id(monkeypatch) -> None
     trace = UUID("22222222-2222-2222-2222-222222222222")
 
     async def run_and_capture() -> list[float]:
-        slept: list[float] = []
-
-        async def fake_sleep(secs: float) -> None:
-            slept.append(secs)
-
-        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+        slept = _capture_sleep(monkeypatch)
         reg = Registry()
         reg.register("tools", "rec", _RecordingTool())
         provider = ScriptedProvider.from_moves([{"text": '{"ok": true}', "finish": "stop"}])
         track = Track(task="q", steps=[TrackStep("rec", {"k": str(i)}, 0) for i in range(6)])
         await run_task(TaskSpec(query="q"), provider, reg, EventBus(),
-                       track=track, replay_jitter_max_ms=8000, trace_id=trace)
+                       track=track, replay_jitter_median_ms=400, trace_id=trace)
         return slept
 
     # same trace_id → identical pacing

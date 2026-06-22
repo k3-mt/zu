@@ -17,6 +17,7 @@ lives in the loop, where tool dispatch already is.
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,53 +29,47 @@ from typing import Any
 MAX_REPLAY_WAIT_MS = 3000
 
 # Replay humanisation. A track driven at machine cadence — every step fired the
-# instant the last returned — is a tell: real use has growing, irregular pauses.
-# So, when running a track from 0% to 100%, add a RANDOM extra delay to each step
-# centred on an envelope that curves UPWARD with progress: the start is
-# near-instant, the tail is the most deliberate. This is the same realism move as
-# the seeded pointer path (§12) — bounded and seeded, so a run is reproducible and
-# tested at $0.
-# The centre delay reached as progress nears 100%.
-REPLAY_JITTER_MAX_MS = 1500
-# The envelope curves upward with progress (ease-in): ``progress ** CURVE``. 2.0 is
-# quadratic — gentle early, steep near the end.
-REPLAY_JITTER_CURVE = 2.0
-# Each step's realised delay varies up AND down around the centre by up to this
-# fraction of it — so a step lands above or below the rising trend, not merely
-# under a one-sided cap.
-REPLAY_JITTER_SPREAD = 0.5
+# instant the last returned — is a tell. But real inter-action pauses do NOT creep
+# upward as a session goes on: they cluster around a typical value with the
+# occasional much longer one (the person paused to read, got distracted). That is
+# a right-skewed, heavy-tailed shape — a log-normal — and it is *stationary*: the
+# same range at step 2 and step 92, not position-dependent. So each replayed step
+# waits a recorded floor (the track value — see ``_replay_track``) plus an extra
+# drawn from a log-normal with a stable median. Seeded, so a run is reproducible.
+# The typical (median) EXTRA pause added per step, on top of the recorded floor.
+REPLAY_JITTER_MEDIAN_MS = 400
+# Log-space spread. Larger ⇒ heavier tail. ~0.9 puts the occasional pause a second
+# or two above the median while keeping the bulk near it.
+REPLAY_JITTER_SIGMA = 0.9
+# A hard ceiling on the EXTRA so one pathological draw can't stall a run; the tail
+# can still reach a second or two ("or longer") below it.
+REPLAY_JITTER_MAX_MS = 8000
 
 
 def replay_extra_delay_ms(
-    progress: float,
     rng: random.Random,
     *,
-    max_extra_ms: int = REPLAY_JITTER_MAX_MS,
-    spread: float = REPLAY_JITTER_SPREAD,
+    median_ms: int = REPLAY_JITTER_MEDIAN_MS,
+    sigma: float = REPLAY_JITTER_SIGMA,
+    max_ms: int = REPLAY_JITTER_MAX_MS,
 ) -> int:
-    """Extra delay (ms) before a replayed step — centred on an UPWARD-CURVING
-    envelope of progress, varying up AND down around it.
+    """The EXTRA delay (ms) to add on top of a step's recorded floor — drawn from a
+    log-normal so most steps wait about ``median_ms`` while a few have a long tail
+    (a second or two, occasionally longer), the shape of real human pauses.
 
-    The centre rises with progress as ``max_extra_ms * progress ** REPLAY_JITTER_CURVE``
-    — an ease-in curve, so the tail of the track is far more deliberate than the
-    start. Each step's realised delay is an INDEPENDENT draw from a triangular
-    distribution centred on that value, spanning ``±spread`` of it — so a step can
-    land above or below the trend (the ms genuinely vary up and down) while the
-    expected value still tracks the curve.
+    **Stationary**: it does NOT depend on the step's position in the track, so the
+    pacing does not creep upward as the run goes on — the same range throughout,
+    with the tail landing on whichever steps the seeded draws happen to hit.
 
-    Pure and deterministic in ``(progress, rng state)``: feed a seeded
-    ``random.Random`` and a run replays with the same pacing. ``max_extra_ms <= 0``
-    disables it. A delay is never negative — you cannot un-sleep — so "down" means
-    below the rising centre, not below zero."""
-    if max_extra_ms <= 0:
+    Pure and deterministic in the ``rng`` state: feed a seeded ``random.Random`` and
+    a run replays with the same pacing. The result is capped at ``max_ms`` so a
+    freak draw can't hang a run; ``median_ms <= 0`` disables it (returns 0)."""
+    if median_ms <= 0:
         return 0
-    p = min(1.0, max(0.0, progress))
-    center = max_extra_ms * (p**REPLAY_JITTER_CURVE)
-    if center <= 0:
-        return 0
-    half = spread * center
-    # triangular(low, high, mode): symmetric about the centre → varies up & down.
-    return max(0, int(rng.triangular(center - half, center + half, center)))
+    # log-normal: exp(N(ln median, sigma)). Its median is exactly median_ms; the
+    # mean sits a little above (right skew), and the tail is long but bounded here.
+    val = rng.lognormvariate(math.log(median_ms), sigma)
+    return min(int(val), max_ms)
 
 
 @dataclass

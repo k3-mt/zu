@@ -7,9 +7,9 @@ import types
 from datetime import UTC, datetime, timedelta
 
 from zu_core.track import (
-    REPLAY_JITTER_CURVE,
     REPLAY_JITTER_MAX_MS,
-    REPLAY_JITTER_SPREAD,
+    REPLAY_JITTER_MEDIAN_MS,
+    REPLAY_JITTER_SIGMA,
     Track,
     TrackStep,
     record_track,
@@ -107,75 +107,69 @@ def test_matches_only_the_recorded_task() -> None:
     assert not Track(task="", steps=[]).matches("")   # empty task never matches
 
 
-# --- replay humanisation: upward-scaling random delays (run a track 0%→100%) ---
+def _samples(n: int, **kw) -> list[int]:
+    return [replay_extra_delay_ms(random.Random(s), **kw) for s in range(n)]
+
+
+def _median(xs: list[int]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+# --- replay humanisation: a stationary, heavy-tailed extra (human-like pauses) ---
 
 
 def test_jitter_disabled_returns_zero() -> None:
     rng = random.Random(0)
-    assert replay_extra_delay_ms(1.0, rng, max_extra_ms=0) == 0
-    assert replay_extra_delay_ms(1.0, rng, max_extra_ms=-100) == 0
+    assert replay_extra_delay_ms(rng, median_ms=0) == 0
+    assert replay_extra_delay_ms(rng, median_ms=-100) == 0
 
 
-def test_jitter_zero_at_the_start_of_the_track() -> None:
-    # progress 0.0 → ceiling is 0 → no delay, however the rng is seeded
-    for seed in range(20):
-        assert replay_extra_delay_ms(0.0, random.Random(seed), max_extra_ms=5000) == 0
+def test_typical_delay_sits_around_the_median() -> None:
+    # The log-normal's median is exactly median_ms, so the sample median tracks it.
+    vals = _samples(1500, median_ms=400, sigma=0.9)
+    assert abs(_median(vals) - 400) < 80  # within ~20% of the configured median
 
 
-def test_jitter_is_bounded_by_the_curved_envelope() -> None:
-    # at progress p the delay stays within the triangular band around the centre:
-    # [center*(1-spread), center*(1+spread)] where center = max * p**curve.
-    for p in (0.1, 0.25, 0.5, 0.75, 1.0):
-        center = 4000 * (p ** REPLAY_JITTER_CURVE)
-        hi = center * (1 + REPLAY_JITTER_SPREAD)
-        for seed in range(50):
-            d = replay_extra_delay_ms(p, random.Random(seed), max_extra_ms=4000)
-            assert 0 <= d <= hi + 1  # +1 for the int() floor
+def test_distribution_is_right_skewed_with_a_long_tail() -> None:
+    # Heavy right tail: mean exceeds median, and a few draws reach a second or two
+    # — while the bulk stays near the median.
+    vals = _samples(2000, median_ms=400, sigma=0.9)
+    mean = sum(vals) / len(vals)
+    assert mean > _median(vals)                 # right-skewed
+    assert max(vals) > 1500                      # the tail reaches a second-plus
+    # ...but it is genuinely a tail, not the norm: most steps are modest.
+    near = [v for v in vals if v <= 800]
+    assert len(near) / len(vals) > 0.6
 
 
-def test_jitter_centre_tracks_the_curve() -> None:
-    # The triangular distribution is symmetric about the centre, so the MEAN of
-    # many independent draws tracks center = max * p**curve.
-    for p in (0.4, 0.7, 1.0):
-        vals = [replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
-                for s in range(800)]
-        center = 4000 * (p ** REPLAY_JITTER_CURVE)
-        assert abs(sum(vals) / len(vals) - center) < 0.1 * 4000  # within 10% of max
+def test_delay_does_not_creep_upward_over_a_run() -> None:
+    # Stationary: draw a long sequence from ONE seeded rng (as a real run does) and
+    # the second half is not systematically longer than the first — no upward drift.
+    rng = random.Random("run-7")
+    seq = [replay_extra_delay_ms(rng, median_ms=400, sigma=0.9) for _ in range(400)]
+    first_half_med = _median(seq[:200])
+    second_half_med = _median(seq[200:])
+    assert abs(first_half_med - second_half_med) < 120  # comparable, no ramp
 
 
-def test_jitter_varies_up_and_down_around_the_centre() -> None:
-    # At a fixed progress, independent draws land BOTH above and below the centre —
-    # the ms genuinely vary up and down, not one-sided from zero.
-    p, center = 0.8, 4000 * (0.8 ** REPLAY_JITTER_CURVE)
-    vals = [replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
-            for s in range(200)]
-    assert min(vals) < center
-    assert max(vals) > center
-
-
-def test_envelope_curves_upward_convexly() -> None:
-    # ease-in: equal steps in progress add MORE delay later than earlier (the
-    # centre rises convexly), using the mean over seeds as the centre estimate.
-    def mean_at(p: float) -> float:
-        return sum(replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
-                   for s in range(800)) / 800
-
-    early_rise = mean_at(0.4) - mean_at(0.2)
-    late_rise = mean_at(0.8) - mean_at(0.6)
-    assert late_rise > early_rise
+def test_tail_is_capped() -> None:
+    # A huge sigma would otherwise produce absurd outliers; max_ms bounds them.
+    vals = _samples(2000, median_ms=400, sigma=3.0, max_ms=8000)
+    assert max(vals) <= 8000
 
 
 def test_jitter_is_deterministic_for_a_seed() -> None:
-    # Same seeded rng → same sequence of delays across the track (a run replays
-    # with identical pacing).
+    # Same seeded rng → same sequence of delays (a run replays with identical pacing).
     def sequence() -> list[int]:
         rng = random.Random("run-42")
-        return [replay_extra_delay_ms(i / 9, rng, max_extra_ms=2000) for i in range(10)]
+        return [replay_extra_delay_ms(rng, median_ms=400) for _ in range(10)]
 
     assert sequence() == sequence()
 
 
 def test_default_constants_are_sane() -> None:
-    assert REPLAY_JITTER_MAX_MS > 0
-    assert REPLAY_JITTER_CURVE > 1.0       # curves upward (convex), not linear
-    assert 0 < REPLAY_JITTER_SPREAD <= 1   # two-sided band that stays non-negative
+    assert REPLAY_JITTER_MEDIAN_MS > 0
+    assert REPLAY_JITTER_SIGMA > 0          # a real spread → a tail exists
+    assert REPLAY_JITTER_MAX_MS > REPLAY_JITTER_MEDIAN_MS  # cap sits above the median
