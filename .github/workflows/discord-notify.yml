@@ -1,0 +1,68 @@
+name: discord-notify
+
+# Posts repo activity to a Discord channel via an incoming webhook.
+#
+# Setup (one time):
+#   1. In Discord: Server Settings → Integrations → Webhooks → New Webhook,
+#      point it at your #announcements (releases) / #github (issues) channel,
+#      and copy the URL.
+#   2. In GitHub: Settings → Secrets and variables → Actions → New repository
+#      secret, name it DISCORD_WEBHOOK, paste the URL.
+#
+# Every job is guarded on the secret being present, so the workflow is a no-op
+# (not a failure) on forks and before the secret is configured.
+
+on:
+  release:
+    types: [published]
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce release
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NAME: ${{ github.event.release.name || github.event.release.tag_name }}
+          URL: ${{ github.event.release.html_url }}
+          BODY: ${{ github.event.release.body }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "DISCORD_WEBHOOK not set — skipping."; exit 0
+          fi
+          # Trim the release notes to keep the embed well under Discord's 4096-char limit.
+          DESC=$(printf '%s' "$BODY" | head -c 1500)
+          jq -n \
+            --arg name "🦓 $NAME" \
+            --arg url "$URL" \
+            --arg desc "$DESC" \
+            '{embeds: [{title: $name, url: $url, description: $desc, color: 5793266}]}' \
+          | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
+
+  issue:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce new issue
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          TITLE: ${{ github.event.issue.title }}
+          URL: ${{ github.event.issue.html_url }}
+          AUTHOR: ${{ github.event.issue.user.login }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "DISCORD_WEBHOOK not set — skipping."; exit 0
+          fi
+          jq -n \
+            --arg title "New issue #${NUMBER}: ${TITLE}" \
+            --arg url "$URL" \
+            --arg author "opened by $AUTHOR" \
+            '{embeds: [{title: $title, url: $url, footer: {text: $author}, color: 16767590}]}' \
+          | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"

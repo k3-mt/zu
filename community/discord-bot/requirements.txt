@@ -1,0 +1,4 @@
+# Zu community Discord bot.
+discord.py>=2.4,<3
+# Optional: load DISCORD_BOT_TOKEN / GUILD_ID from a .env file automatically.
+python-dotenv>=1.0

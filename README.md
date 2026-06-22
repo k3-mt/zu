@@ -11,6 +11,10 @@
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
   <img alt="Tests passing" src="https://img.shields.io/badge/tests-passing-brightgreen.svg">
   <img alt="mypy clean" src="https://img.shields.io/badge/mypy-clean-brightgreen.svg">
+  <!-- Static badge — works before the server has a public widget. Once the server
+       exists with the widget enabled, swap to the live member-count badge:
+       https://img.shields.io/discord/<SERVER_ID>?label=Discord&logo=discord&color=5865F2 -->
+  <a href="https://discord.gg/zRVHsjKv"><img alt="Discord" src="https://img.shields.io/badge/Discord-join%20the%20pack-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
 <p align="center"><i>a pack of agents — escalation by image swap, not improvisation</i></p>
@@ -269,6 +273,22 @@ Architecture, philosophy, and red-team deep-dives are published separately. In t
 - [`CLAUDE.md`](CLAUDE.md) — quick orientation for coding agents working in this repo
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up from a clone (`uv sync`), test, and submit changes
 - [`RELEASING.md`](RELEASING.md) — publish to PyPI (Trusted-Publishing setup + cutting a release)
+
+## Community
+
+Zu is built in the open. Come hang out, ask questions, and share what you're building:
+
+- **[Discord](https://discord.gg/zRVHsjKv)** — the fastest way to ask a question,
+  show off an agent, or talk through a capability gap. New to the project? Start in
+  `#start-here`.
+- **[GitHub Discussions](https://github.com/k3-mt/zu/discussions)** — longer-form Q&A,
+  design proposals, and "should Zu be able to…?" threads worth keeping searchable.
+- **[Issues](https://github.com/k3-mt/zu/issues)** — bugs and concrete feature requests.
+  Hit a wall the runtime couldn't clear? That's a capability gap — file it (or use the
+  `zu_report_gap` MCP tool), don't hack around it.
+
+Everyone is expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md). Setting up the
+server yourself? See [`docs/community/discord-setup.md`](docs/community/discord-setup.md).
 
 ## License
 
