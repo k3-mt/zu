@@ -114,6 +114,13 @@ def _final_value(bundle: Bundle) -> Any:
     return None
 
 
+def grounded_values(bundle: Bundle) -> list[str]:
+    """The distinct scalar strings the captured answer commits to — the values a generic
+    agent must DERIVE from the page (and so must never hardcode). Order-preserving and
+    de-duplicated. Reused by the brittleness audit and the anti-hardcode guardrail."""
+    return list(dict.fromkeys(_value_strings(_final_value(bundle))))
+
+
 def audit_brittleness(bundle: Bundle) -> list[Finding]:
     """Flag single points of failure in the captured path, no run required."""
     findings: list[Finding] = []
@@ -139,7 +146,7 @@ def audit_brittleness(bundle: Bundle) -> list[Finding]:
     # 2. Single-occurrence grounded values: present in exactly one fixture observation.
     haystacks = [str(obs.get(f, "")) for obss in bundle.observations.values()
                  for obs in obss for f in _TEXT_FIELDS]
-    for s in dict.fromkeys(_value_strings(_final_value(bundle))):  # de-dup, keep order
+    for s in grounded_values(bundle):
         hits = sum(s in h for h in haystacks)
         if hits == 1:
             findings.append(Finding(
