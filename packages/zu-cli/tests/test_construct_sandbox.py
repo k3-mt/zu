@@ -144,7 +144,6 @@ async def test_contained_construction_runs_in_the_box(tmp_path) -> None:
     import os
 
     from zu_backends.local_docker import LocalDockerBackend
-
     from zu_cli.construct_sandbox import launch_contained_construction
     from zu_cli.sandbox import SandboxLauncher
 
