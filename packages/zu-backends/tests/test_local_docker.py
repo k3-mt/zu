@@ -9,6 +9,7 @@ exercised the way the real model providers are (build step 7).
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -374,11 +375,15 @@ async def test_seccomp_json_and_unconfined_pass_through() -> None:
 
 
 @pytest.mark.docker
+@pytest.mark.skipif(
+    not os.environ.get("ZU_BROWSER_LIVE"),
+    reason="launches the real Chromium render container + hits the network; GitHub-hosted "
+    "runners can't reliably start headless Chromium in Docker. Set ZU_BROWSER_LIVE=1 on a "
+    "runner that can (mirrors the redteam live-gate).",
+)
 async def test_browser_session_holds_state_across_commands_live() -> None:
     # The persistent session: open a page, then read it again — the SAME browser
     # is held across commands (state persists), proven against the real image.
-    import os
-
     image = os.environ.get("ZU_RENDER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
     session = await LocalDockerBackend().open_session({"image": image, "network": True})
     try:
