@@ -9,6 +9,7 @@ from __future__ import annotations
 from . import events
 from .bus import EventBus, SubscriberFailure
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
+from .content import Action, Audio, Content, ContentPart, Image, Observation, Text
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
 from .ports import (
@@ -62,6 +63,14 @@ __all__ = [
     "Result",
     "Status",
     "TaskSpec",
+    # multimodal content (the policy currency)
+    "Content",
+    "ContentPart",
+    "Text",
+    "Image",
+    "Audio",
+    "Observation",
+    "Action",
     # event bus + taxonomy + projections + sinks + codec
     "EventBus",
     "SubscriberFailure",
