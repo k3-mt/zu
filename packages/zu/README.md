@@ -9,7 +9,7 @@ New here? One line:
 pip install 'zu-runtime[all]'       # everything: web tools, both model SDKs, server, Docker, MCP
 ```
 
-Prefer a lean install (dbt-style)? `pip install zu-runtime` gives you `import zu`, the `zu`
+Prefer a lean install? `pip install zu-runtime` gives you `import zu`, the `zu`
 command, the **web tools** (http_fetch/html_parse/render_dom), the model-provider adapters,
 detectors, validators, and a SQLite event sink. Add the heavy/situational bits as extras:
 
@@ -21,7 +21,7 @@ pip install 'zu-runtime[mcp]'       # + the MCP server (zu mcp)
 ```
 
 The `zu-*` packages are also standalone on PyPI, but you rarely install them individually —
-that's for plugin authors depending on just `zu-core` (the dbt-adapter pattern).
+that's for plugin authors depending on just `zu-core`.
 
 ## Embed it
 

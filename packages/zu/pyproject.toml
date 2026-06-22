@@ -16,7 +16,7 @@ classifiers = [
 ]
 readme = "README.md"
 keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", "event-sourcing"]
-# The runnable base (dbt-core style): `import zu`, the `zu` command, the web tools
+# The runnable base: `import zu`, the `zu` command, the web tools
 # (http_fetch/html_parse/render_dom — the common case, so they ship in the base), the
 # model-provider adapters, detectors, validators, and the sqlite event sink. The
 # heavy/situational bits below are opt-in extras (the real model SDKs, the HTTP server,

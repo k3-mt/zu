@@ -109,7 +109,7 @@ New here? One line gets you everything:
 pip install 'zu-runtime[all]'     # web tools, both model SDKs, server, Docker, MCP
 ```
 
-Or trim to what you need — a lean base, the heavy bits opt-in (dbt-style):
+Or trim to what you need — a lean base, the heavy bits opt-in:
 
 ```bash
 pip install zu-runtime                # base: import zu + the `zu` CLI + web tools
@@ -122,7 +122,7 @@ pip install 'zu-runtime[mcp]'         # + the MCP server (zu mcp)
 ```
 
 You almost never install the `zu-*` sub-packages individually — they're published standalone
-so *plugin authors* can depend on just `zu-core` (the dbt-adapter pattern). As a user, install
+so *plugin authors* can depend on just `zu-core`. As a user, install
 `zu-runtime` (+ extras); `zu plugins` lists whatever you have.
 
 Prove it runs — `zu demo` runs against a **real model** (that's the point: prove
