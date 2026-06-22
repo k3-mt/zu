@@ -1,0 +1,21 @@
+[Unit]
+Description=Zeke — the Zu community Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/zu/community/discord-bot
+EnvironmentFile=/etc/zeke.env
+ExecStart=/opt/zu/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+# Hardening: the bot needs no privileges, no write access, no home.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

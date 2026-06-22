@@ -50,10 +50,16 @@ docker run --rm -e DISCORD_BOT_TOKEN=your-token-here zu-discord-bot
 ## Hosting
 
 The bot is a single long-running process with no inbound ports, so anything that
-keeps a container or a `python bot.py` alive works: Railway, Fly.io, a small VPS
-with systemd, or a free-tier always-on worker. Set `DISCORD_BOT_TOKEN` (and
-optionally `GUILD_ID`) as environment variables/secrets in your host of choice —
-do not bake the token into the image.
+keeps `python bot.py` alive works. Set `DISCORD_BOT_TOKEN` (and optionally
+`GUILD_ID`/`WELCOME_CHANNEL`) as environment/secrets in your host — never bake the
+token into the image.
+
+- **Google Cloud (Always Free) — recommended:** an `e2-micro` VM under systemd.
+  One command + a token over SSH. See [`deploy/gcp/`](deploy/gcp/README.md).
+- **Any VPS:** the same [`deploy/zeke.service`](deploy/zeke.service) systemd unit —
+  see the self-hosting note in the GCP guide.
+- **Container hosts (Fly.io/Railway/etc.):** use the `Dockerfile` here; set the token
+  as a secret. (Note: Cloud Run isn't a fit — a gateway bot can't run there for free.)
 
 ## Extending it
 

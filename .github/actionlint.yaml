@@ -1,0 +1,5 @@
+# actionlint config. Declares the custom self-hosted runner label used by the
+# (opt-in) redteam-image live-gate job so actionlint doesn't flag it as unknown.
+self-hosted-runner:
+  labels:
+    - docker-live
