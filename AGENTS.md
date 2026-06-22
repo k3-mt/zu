@@ -24,11 +24,12 @@ zu/
   AGENTS.md                 # you are here
   CONTRIBUTING.md           # human-facing setup + submission flow (same rules)
   packages/
-    zu-core/                # contracts, ports, registry, loop, bus, pipeline <- stable, SDK-free
-    zu-providers/           # model adapters: scripted, anthropic, openai-compatible
-    zu-tools/               # http_fetch, html_parse, render_dom
-    zu-checks/              # detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)
-    zu-backends/            # local-docker sandbox + sqlite/jsonl event sinks
+    zu-core/                # contracts (+ multimodal Content/Observation/Action), ports, registry, loop, bus <- stable, SDK-free
+    zu-providers/           # model adapters: scripted, anthropic, openai-compatible; LlmPolicy (the Policy bridge)
+    zu-tools/               # http_fetch, html_parse, render_dom, action_surface, pointer, simulate
+    zu-checks/              # detectors (empty, error, js-shell, bot-wall, action-surface-blind) + validators (schema, grounding)
+    zu-backends/            # local-docker sandbox + sqlite/jsonl event sinks + triggers (webhook/queue/schedule/object-store)
+    zu-huggingface/         # HuggingFace task models as typed tools/detectors/validators + supply-chain guards
     zu-redteam/             # the plugin-test gate + adversarial red-team agent
     zu-cli/                 # the `zu` command, HTTP server, MCP server
     zu/                     # the `import zu` embed facade (published as zu-runtime)
@@ -64,7 +65,7 @@ green, mypy stays clean, ruff stays clean.** Every change ships with a test that
 needs no live model and no live network — use the `ScriptedProvider` (fake
 model) and saved web fixtures.
 
-## The six ports → where a plugin goes
+## The ports → where a plugin goes
 
 Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 *shape*, not a base class.
@@ -77,6 +78,16 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 | an on-final result check    | `zu-checks`      | `zu.validators`   | `Validator`     |
 | a sandbox backend           | `zu-backends`    | `zu.backends`     | `SandboxBackend`|
 | an event sink (storage)     | `zu-backends`    | `zu.sinks`        | `EventSink`     |
+| a policy (the decision-maker) | `zu-providers` | `zu.policies`     | `Policy`        |
+| a trigger (inbound event)   | `zu-backends`    | `zu.triggers`     | `Trigger`       |
+
+The last two are the policy-agnostic seams (Engineering Design §9.2, §4.4):
+`Policy` (`act(observation, tools) -> Action`) is the generalisation of the
+decision-maker — an LLM is bridged onto it by `LlmPolicy`, a world model or
+embodied controller implements it directly; `Trigger` (`listen()`) is the
+inbound mirror of `EventSink`, carrying **untrusted** payloads. Both the
+observation and the action are typed multimodal `Content` (`Text`/`Image`/
+`Audio`) in `zu_core.content`.
 
 Plugins are discovered three ways, all resolving into one registry: installed
 packages via entry points (`pyproject.toml`), the in-process decorators

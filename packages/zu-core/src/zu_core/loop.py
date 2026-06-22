@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -49,7 +50,7 @@ from .ports import (
 )
 from .registry import REGISTRY, Registry
 from .security import SecurityBlock, enforce_containment
-from .track import MAX_REPLAY_WAIT_MS, Track
+from .track import MAX_REPLAY_WAIT_MS, Track, replay_extra_delay_ms
 
 log = logging.getLogger("zu.loop")
 
@@ -551,12 +552,21 @@ async def _replay_climb_to(run: _Run, ladder: _Ladder, tools: dict, step: Any) -
 async def _replay_track(
     run: _Run, track: Track, tools: dict, messages: list[dict], ladder: _Ladder, *,
     wall_time_s: float, start: float, max_observation_chars: int | None,
+    jitter_median_ms: int = 0,
 ) -> bool:
     """Drive the recorded path deterministically — re-issue each tool call in order,
     with NO model call — appending the same assistant/tool message pair the loop
     would, so the model has consistent history if it takes over. Stops (returning
     True) at the first challenge; returns False when the whole track replayed. Paced
     by the recorded gaps (capped), and bounded by the run's wall-time.
+
+    ``jitter_median_ms`` humanises the pacing of a live run: the recorded gap is the
+    absolute floor and each step adds a stationary, heavy-tailed (log-normal) extra
+    — most steps a little, the occasional one a second or two (or longer) — so a
+    driven path is not fired at a uniform machine cadence and does not creep upward
+    as the run goes on. Seeded from the run's ``trace_id`` (reproducible per run);
+    0 by default, and when off the recorded gap is capped so offline iteration and
+    tests stay instant.
 
     The track remembers its escalation: before a step that needs a higher tier (its
     recorded tier, or the tool's own tier), the navigator climbs the ladder and emits
@@ -568,12 +578,24 @@ async def _replay_track(
     NOT end replay: the path is still on track. Only a RUN of consecutive soft misses
     (``_REPLAY_MAX_SOFT_MISSES``) means the page really diverged — then hand off."""
     soft_streak = 0
+    # Seeded from the run's trace_id so the humanised pacing is reproducible for a
+    # given run (and a fixed trace_id in tests), varied across runs.
+    jitter_rng = random.Random(str(run.trace_id))
     for i, step in enumerate(track.steps):
         if wall_time_s - (time.monotonic() - start) <= 0:
             return True  # out of time; let the model loop end the run cleanly
         await _replay_climb_to(run, ladder, tools, step)
-        if step.wait_ms:
-            await asyncio.sleep(min(step.wait_ms, MAX_REPLAY_WAIT_MS) / 1000)
+        if jitter_median_ms > 0:
+            # Live run: the recorded gap is the absolute FLOOR (honoured in full),
+            # plus a stationary, heavy-tailed extra — most steps a little, the
+            # occasional one a second or two (or longer). Humanised pacing.
+            wait_ms = step.wait_ms + replay_extra_delay_ms(jitter_rng, median_ms=jitter_median_ms)
+        else:
+            # Offline / iteration / tests: cap the recorded gap so replay stays
+            # fast and there is no added jitter.
+            wait_ms = min(step.wait_ms, MAX_REPLAY_WAIT_MS)
+        if wait_ms:
+            await asyncio.sleep(wait_ms / 1000)
         turn = await run.emit(ev.TURN_STARTED, {"step": i + 1, "replay": True}, parent=run.root)
         remaining = max(0.0, wall_time_s - (time.monotonic() - start))
         obs = await _invoke(run, turn, tools, step.tool, step.args, timeout=remaining)
@@ -611,6 +633,7 @@ async def run_task(
     track: Track | None = None,
     replay_budget: Budget | None = None,
     finish_provider: ModelProvider | None = None,
+    replay_jitter_median_ms: int = 0,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -637,6 +660,14 @@ async def run_task(
     finishes WITHOUT diverging, ``finish_provider`` (a cheap model) drives the
     frontier — typically just the final extraction; on a divergence the strong
     ``provider`` stays in charge to re-pathfind. Both are no-ops on a non-replay run.
+
+    ``replay_jitter_median_ms`` humanises a replayed track's pacing: the recorded
+    gap is the absolute floor and each step adds a stationary, heavy-tailed
+    (log-normal) extra with this median — most steps a little, the occasional one a
+    second or two (or longer), and it does NOT creep upward as the run goes on.
+    Seeded from the run's trace_id so it is reproducible. It is 0 (off) by default —
+    live runs turn it on; offline replay and tests leave it off so iteration stays
+    instant.
 
     ``containment`` is the fail-closed floor (see ``zu_core.security``): with
     ``"required"``, a tool with off-box reach is refused unless the run is inside
@@ -700,7 +731,8 @@ async def run_task(
         # not a blanket jump to the ceiling.
         diverged = await _replay_track(run, track, tools, messages, ladder,
                                        wall_time_s=budget.wall_time_s, start=start,
-                                       max_observation_chars=max_observation_chars)
+                                       max_observation_chars=max_observation_chars,
+                                       jitter_median_ms=replay_jitter_median_ms)
         # Replay reached the frontier cleanly (no challenge): what's left is usually
         # just the final extraction, so a cheap finish_provider can close it out. A
         # divergence means real re-pathfinding — keep the strong provider for that.

@@ -7,12 +7,13 @@ a concrete adapter — which is what makes every adapter replaceable.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from .content import Action, Observation
 from .contracts import Result
 
 # --- interface versioning (MLR §6) ---------------------------------------
@@ -33,6 +34,8 @@ INTERFACE_VERSION: dict[str, int] = {
     "validators": 1,
     "backends": 1,
     "sinks": 1,
+    "policies": 1,
+    "triggers": 1,
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -83,6 +86,46 @@ class ModelProvider(Protocol):
     def model(self) -> str | None: ...
 
     async def complete(self, req: ModelRequest) -> ModelResponse: ...
+
+
+# --- the generalised policy port (Engineering Design §9.2) ----------------
+#
+# ``ModelProvider.complete`` is the LLM-shaped seam: messages in, text + tool
+# calls out. ``Policy`` is the *generalisation* of the decision-maker — typed
+# observation in, typed action out — so a world-model controller or an embodied
+# policy plugs into the SAME seam an LLM does, and the harness, bus, detectors,
+# validation, escalation, and envelope are unchanged. An LLM is bridged onto it
+# by an adapter (``zu_providers.llm_policy.LlmPolicy``) that turns the
+# observation + tools into a ``ModelRequest``, calls ``complete``, and maps the
+# response back to an ``Action``. A world model implements ``act`` directly.
+#
+# The interpreter loop is not rewritten to use this — it remains the LLM path.
+# ``Policy`` is the forward-compatible port: "that single generalisation lets the
+# decision-maker change without touching the runtime."
+
+
+class ToolSpec(BaseModel):
+    """What the policy is told it may do — a tool's name, description, and
+    JSON-schema, decoupled from the concrete :class:`Tool` instance.
+
+    The field is ``json_schema`` (not ``schema``) so it does not shadow
+    ``BaseModel.schema``; it holds the same dict a :class:`Tool` exposes as
+    ``.schema``.
+    """
+
+    name: str
+    description: str = ""
+    json_schema: dict = Field(default_factory=dict)
+
+
+@runtime_checkable
+class Policy(Protocol):
+    capabilities: Capabilities
+
+    @property
+    def model(self) -> str | None: ...
+
+    async def act(self, observation: Observation, tools: list[ToolSpec]) -> Action: ...
 
 
 # --- the capability envelope ---------------------------------------------
@@ -318,3 +361,34 @@ class EventSink(Protocol):
     ) -> AsyncIterator[Any]: ...
 
     async def count(self, flt: dict | None = None) -> int: ...
+
+
+# --- trigger — the inbound mirror of EventSink (Engineering Design §4.4) ---
+#
+# EventSink emits events *out*; a Trigger listens for events *in* and starts a
+# run. Email, webhook, queue (SQS/Kafka/PubSub), schedule, an object-storage
+# write, or another agent's event — each is a Trigger plugin, discovered and
+# configured exactly like a Tool (the ``zu.triggers`` group). A trigger carries
+# UNTRUSTED input, which is exactly why the capability envelope matters: the
+# payload is attacker-controlled, so it is typed and recorded as such and never
+# treated as authoritative.
+
+
+class TriggerEvent(BaseModel):
+    """What woke the agent — typed, and put on the log at run start.
+
+    ``payload`` is UNTRUSTED: it is whatever an external party sent (an email
+    body, a webhook JSON, a queue message). It is data to act on under the
+    envelope, never an instruction the harness obeys.
+    """
+
+    source: str  # 'email' | 'webhook' | 'queue' | 'schedule' | 'object-store' | ...
+    payload: dict = Field(default_factory=dict)
+
+
+@runtime_checkable
+class Trigger(Protocol):
+    # The source label this trigger stamps onto every event it yields.
+    source: str
+
+    def listen(self) -> Iterator[TriggerEvent]: ...

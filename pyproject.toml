@@ -17,6 +17,7 @@ dependencies = [
     "zu-backends",
     "zu-redteam",
     "zu-cli",
+    "zu-huggingface",
     "zu-runtime",
 ]
 
@@ -34,6 +35,7 @@ zu-checks     = { workspace = true }
 zu-backends   = { workspace = true }
 zu-redteam    = { workspace = true }
 zu-cli        = { workspace = true }
+zu-huggingface = { workspace = true }
 zu-runtime    = { workspace = true }
 zu-testing    = { workspace = true }
 

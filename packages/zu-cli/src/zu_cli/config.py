@@ -37,6 +37,7 @@ from zu_core.bus import EventBus
 from zu_core.contracts import Budget, TaskSpec
 from zu_core.ports import ModelProvider
 from zu_core.registry import GROUPS, Registry
+from zu_core.track import REPLAY_JITTER_MEDIAN_MS
 
 # --- the parsed config shape --------------------------------------------------
 
@@ -129,10 +130,16 @@ class ReplayConfig(BaseModel):
     * ``finish_model`` — a cheap model id for the post-replay frontier (usually just
       the final extraction). It REUSES the global provider's endpoint/key, swapping
       only the model. Used solely when replay reaches the frontier without diverging;
-      a divergence keeps the strong global model to re-pathfind."""
+      a divergence keeps the strong global model to re-pathfind.
+    * ``jitter_median_ms`` — the typical (median) EXTRA delay added to a replayed
+      step on a LIVE run, on top of the recorded gap (the absolute floor). The
+      extra is log-normal: most steps add about this, the occasional one a second
+      or two (or longer), and it does NOT creep upward as the run goes on. 0
+      disables it; forced off for ``--offline`` so iteration stays instant."""
 
     budget: Budget | None = None
     finish_model: str | None = None
+    jitter_median_ms: int = REPLAY_JITTER_MEDIAN_MS
 
 
 class RunConfig(BaseModel):

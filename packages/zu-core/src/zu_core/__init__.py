@@ -9,6 +9,7 @@ from __future__ import annotations
 from . import events
 from .bus import EventBus, SubscriberFailure
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
+from .content import Action, Audio, Content, ContentPart, Image, Observation, Text
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .eventstore import ALLOWED_EVENT_FILTERS, event_matches, validate_filter
 from .ports import (
@@ -27,12 +28,16 @@ from .ports import (
     ModelProvider,
     ModelRequest,
     ModelResponse,
+    Policy,
     RunContext,
     SandboxBackend,
     Scope,
     Severity,
     Tool,
     ToolCall,
+    ToolSpec,
+    Trigger,
+    TriggerEvent,
     Validator,
     Verdict,
     declared_envelope,
@@ -46,9 +51,11 @@ from .registry import (
     backend,
     check_interface,
     detector,
+    policy,
     provider,
     sink,
     tool,
+    trigger,
     validator,
 )
 from .security import SecurityBlock
@@ -62,6 +69,14 @@ __all__ = [
     "Result",
     "Status",
     "TaskSpec",
+    # multimodal content (the policy currency)
+    "Content",
+    "ContentPart",
+    "Text",
+    "Image",
+    "Audio",
+    "Observation",
+    "Action",
     # event bus + taxonomy + projections + sinks + codec
     "EventBus",
     "SubscriberFailure",
@@ -98,12 +113,16 @@ __all__ = [
     "ModelProvider",
     "ModelRequest",
     "ModelResponse",
+    "Policy",
     "RunContext",
     "SandboxBackend",
     "Scope",
     "Severity",
     "Tool",
     "ToolCall",
+    "ToolSpec",
+    "Trigger",
+    "TriggerEvent",
     "Validator",
     "Verdict",
     # registry
@@ -114,8 +133,10 @@ __all__ = [
     "Registry",
     "backend",
     "detector",
+    "policy",
     "provider",
     "sink",
     "tool",
+    "trigger",
     "validator",
 ]

@@ -26,6 +26,7 @@ error = "zu_checks.detectors.error:ErrorDetector"
 js-shell = "zu_checks.detectors.js_shell:JsShellDetector"
 embedded-widget = "zu_checks.detectors.embedded_widget:EmbeddedWidgetDetector"
 bot-wall = "zu_checks.detectors.bot_wall:BotWallDetector"
+action-surface-blind = "zu_checks.detectors.action_surface_blind:ActionSurfaceBlindDetector"
 
 [project.entry-points."zu.validators"]
 schema = "zu_checks.validators.schema:SchemaValidator"

@@ -17,6 +17,8 @@ lives in the loop, where tool dispatch already is.
 from __future__ import annotations
 
 import json
+import math
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +27,49 @@ from typing import Any
 # replayed click doesn't race a page that the model (by thinking) implicitly let
 # settle. So a recorded gap is capped to this on replay.
 MAX_REPLAY_WAIT_MS = 3000
+
+# Replay humanisation. A track driven at machine cadence — every step fired the
+# instant the last returned — is a tell. But real inter-action pauses do NOT creep
+# upward as a session goes on: they cluster around a typical value with the
+# occasional much longer one (the person paused to read, got distracted). That is
+# a right-skewed, heavy-tailed shape — a log-normal — and it is *stationary*: the
+# same range at step 2 and step 92, not position-dependent. So each replayed step
+# waits a recorded floor (the track value — see ``_replay_track``) plus an extra
+# drawn from a log-normal with a stable median. Seeded, so a run is reproducible.
+# The typical (median) EXTRA pause added per step, on top of the recorded floor.
+REPLAY_JITTER_MEDIAN_MS = 400
+# Log-space spread. Larger ⇒ heavier tail. ~0.9 puts the occasional pause a second
+# or two above the median while keeping the bulk near it.
+REPLAY_JITTER_SIGMA = 0.9
+# A hard ceiling on the EXTRA so one pathological draw can't stall a run; the tail
+# can still reach a second or two ("or longer") below it.
+REPLAY_JITTER_MAX_MS = 8000
+
+
+def replay_extra_delay_ms(
+    rng: random.Random,
+    *,
+    median_ms: int = REPLAY_JITTER_MEDIAN_MS,
+    sigma: float = REPLAY_JITTER_SIGMA,
+    max_ms: int = REPLAY_JITTER_MAX_MS,
+) -> int:
+    """The EXTRA delay (ms) to add on top of a step's recorded floor — drawn from a
+    log-normal so most steps wait about ``median_ms`` while a few have a long tail
+    (a second or two, occasionally longer), the shape of real human pauses.
+
+    **Stationary**: it does NOT depend on the step's position in the track, so the
+    pacing does not creep upward as the run goes on — the same range throughout,
+    with the tail landing on whichever steps the seeded draws happen to hit.
+
+    Pure and deterministic in the ``rng`` state: feed a seeded ``random.Random`` and
+    a run replays with the same pacing. The result is capped at ``max_ms`` so a
+    freak draw can't hang a run; ``median_ms <= 0`` disables it (returns 0)."""
+    if median_ms <= 0:
+        return 0
+    # log-normal: exp(N(ln median, sigma)). Its median is exactly median_ms; the
+    # mean sits a little above (right skew), and the tail is long but bounded here.
+    val = rng.lognormvariate(math.log(median_ms), sigma)
+    return min(int(val), max_ms)
 
 
 @dataclass

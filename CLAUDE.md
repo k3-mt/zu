@@ -13,8 +13,10 @@ the canonical, fuller guides are:
 
 A tiny, SDK-free **core** (`zu-core`: contracts, ports, registry, loop, bus) owns the
 interpreter loop and the event log. Everything that varies is a **plugin behind a typed port**
-(models, tools, detectors, validators, sandbox backends, event sinks), discovered via entry
-points. Built-ins live in sibling `packages/zu-*`. One predictable shape — see AGENTS.md.
+(models/**policies**, tools, detectors, validators, sandbox backends, event sinks, **triggers**),
+discovered via entry points. Built-ins live in sibling `packages/zu-*`. The core also carries the
+typed multimodal currency (`Content`/`Observation`/`Action` in `zu_core.content`) the
+policy-agnostic seams speak. One predictable shape — see AGENTS.md.
 
 ## The dev loop — the non-negotiable bar
 

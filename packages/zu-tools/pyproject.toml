@@ -27,6 +27,9 @@ browser = "zu_tools.browser:Browser"
 recall = "zu_tools.recall:Recall"
 html_parse = "zu_tools.parse:HtmlParse"
 render_dom = "zu_tools.render:RenderDom"
+action_surface = "zu_tools.action_surface:ActionSurface"
+pointer = "zu_tools.pointer:PointerControl"
+simulate = "zu_tools.simulate:Simulate"
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

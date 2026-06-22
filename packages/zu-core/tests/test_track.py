@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import random
 import types
 from datetime import UTC, datetime, timedelta
 
-from zu_core.track import Track, TrackStep, record_track
+from zu_core.track import (
+    REPLAY_JITTER_MAX_MS,
+    REPLAY_JITTER_MEDIAN_MS,
+    REPLAY_JITTER_SIGMA,
+    Track,
+    TrackStep,
+    record_track,
+    replay_extra_delay_ms,
+)
 
 
 def _ev(type_, ts, **payload):
@@ -96,3 +105,71 @@ def test_matches_only_the_recorded_task() -> None:
     assert track.matches("find slots")
     assert not track.matches("something else")
     assert not Track(task="", steps=[]).matches("")   # empty task never matches
+
+
+def _samples(n: int, **kw) -> list[int]:
+    return [replay_extra_delay_ms(random.Random(s), **kw) for s in range(n)]
+
+
+def _median(xs: list[int]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+# --- replay humanisation: a stationary, heavy-tailed extra (human-like pauses) ---
+
+
+def test_jitter_disabled_returns_zero() -> None:
+    rng = random.Random(0)
+    assert replay_extra_delay_ms(rng, median_ms=0) == 0
+    assert replay_extra_delay_ms(rng, median_ms=-100) == 0
+
+
+def test_typical_delay_sits_around_the_median() -> None:
+    # The log-normal's median is exactly median_ms, so the sample median tracks it.
+    vals = _samples(1500, median_ms=400, sigma=0.9)
+    assert abs(_median(vals) - 400) < 80  # within ~20% of the configured median
+
+
+def test_distribution_is_right_skewed_with_a_long_tail() -> None:
+    # Heavy right tail: mean exceeds median, and a few draws reach a second or two
+    # — while the bulk stays near the median.
+    vals = _samples(2000, median_ms=400, sigma=0.9)
+    mean = sum(vals) / len(vals)
+    assert mean > _median(vals)                 # right-skewed
+    assert max(vals) > 1500                      # the tail reaches a second-plus
+    # ...but it is genuinely a tail, not the norm: most steps are modest.
+    near = [v for v in vals if v <= 800]
+    assert len(near) / len(vals) > 0.6
+
+
+def test_delay_does_not_creep_upward_over_a_run() -> None:
+    # Stationary: draw a long sequence from ONE seeded rng (as a real run does) and
+    # the second half is not systematically longer than the first — no upward drift.
+    rng = random.Random("run-7")
+    seq = [replay_extra_delay_ms(rng, median_ms=400, sigma=0.9) for _ in range(400)]
+    first_half_med = _median(seq[:200])
+    second_half_med = _median(seq[200:])
+    assert abs(first_half_med - second_half_med) < 120  # comparable, no ramp
+
+
+def test_tail_is_capped() -> None:
+    # A huge sigma would otherwise produce absurd outliers; max_ms bounds them.
+    vals = _samples(2000, median_ms=400, sigma=3.0, max_ms=8000)
+    assert max(vals) <= 8000
+
+
+def test_jitter_is_deterministic_for_a_seed() -> None:
+    # Same seeded rng → same sequence of delays (a run replays with identical pacing).
+    def sequence() -> list[int]:
+        rng = random.Random("run-42")
+        return [replay_extra_delay_ms(rng, median_ms=400) for _ in range(10)]
+
+    assert sequence() == sequence()
+
+
+def test_default_constants_are_sane() -> None:
+    assert REPLAY_JITTER_MEDIAN_MS > 0
+    assert REPLAY_JITTER_SIGMA > 0          # a real spread → a tail exists
+    assert REPLAY_JITTER_MAX_MS > REPLAY_JITTER_MEDIAN_MS  # cap sits above the median
