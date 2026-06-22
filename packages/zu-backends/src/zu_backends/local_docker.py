@@ -176,7 +176,10 @@ class LocalDockerBackend:
                 "and ensure a Docker daemon is running, or inject a SandboxBackend."
             ) from exc
         try:
-            self._client = docker.from_env()
+            # version="auto" negotiates the daemon's API version. Without it the SDK
+            # requests its own (newer) default and 404s on older daemons — e.g. the CI
+            # runner's Docker — at containers/create.
+            self._client = docker.from_env(version="auto")
         except Exception as exc:  # pragma: no cover - daemon-dependent
             raise DockerUnavailableError(
                 f"could not connect to the Docker daemon: {exc}"
