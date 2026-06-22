@@ -19,6 +19,10 @@
 
 <p align="center"><i>a pack of agents — escalation by image swap, not improvisation</i></p>
 
+<p align="center">
+  💬 <b>Join the community on <a href="https://discord.gg/zRVHsjKv">Discord</a></b> — ask questions, show what you're building, and talk through capability gaps. New here? Start in <code>#start-here</code>.
+</p>
+
 <!-- ▶ Hero demo: record `zu demo --offline --type escalation` (e.g. with vhs / asciinema),
      save it to docs/assets/zu-demo.gif, then uncomment the line below for an animated hero. -->
 <!-- <p align="center"><img src="docs/assets/zu-demo.gif" alt="Zu: fetch → fail-on-JS → escalate → validated result" width="760"></p> -->
