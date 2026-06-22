@@ -368,6 +368,69 @@ def build_server() -> FastMCP:
         _explore["session"] = None
         return {"ok": True}
 
+    @mcp.tool()
+    async def zu_report_gap(
+        agent: str, summary: str, expected: str, observed: str, proposed: str | None = None,
+    ) -> dict:
+        """When zu genuinely CAN'T do something — a missing tool/primitive, a detector that
+        won't fire, a selector zu can't resolve, a soft miss it mishandles — that's a
+        CAPABILITY GAP in zu, not a bug in your agent. **Don't hardcode around it.** This
+        builds a strong, REPEATABLE issue for the zu repo: it embeds the agent's `agent.yaml`,
+        points at its `fixtures/` bundle (a $0 deterministic repro the maintainers reproduce
+        with `zu run --offline`), and records expected vs observed + a proposed GENERIC
+        capability. Writes `gap-report.md` next to the agent and returns a ready
+        `gh issue create` command. Capture a bundle first (`zu_explore` / `zu capture`) so the
+        gap reproduces — see the `zu://contributing` resource."""
+        from pathlib import Path
+
+        from .contribute import ZU_REPO, build_gap_report
+
+        p = Path(agent)
+        agent_dir = p if p.is_dir() else p.parent
+        report = build_gap_report(
+            agent_dir, summary=summary, expected=expected, observed=observed, proposed=proposed)
+        out = agent_dir / "gap-report.md"
+        out.write_text(report.body, encoding="utf-8")
+        return {
+            "ok": True,
+            "title": report.title,
+            "issue_markdown": report.body,
+            "has_repro": report.has_repro,
+            "repro": report.repro_path,
+            "report_file": str(out),
+            "repo": ZU_REPO,
+            "gh_command": report.gh_command(str(out)),
+            "next": (
+                "A repeatable fixtures repro is attached — file it (gh_command); the "
+                "maintainers' agent reproduces it with `zu run --offline` and builds the "
+                "generic capability." if report.has_repro else
+                "⚠️ No fixtures bundle — capture one first (zu_explore / zu capture) so the "
+                "gap reproduces deterministically, then re-run zu_report_gap."
+            ),
+        }
+
+    @mcp.resource("zu://contributing")
+    def contributing_resource() -> str:
+        """When and how to contribute a capability gap upstream — read this on any wall."""
+        return (
+            "Contributing to zu — the no-hardcoding contract.\n\n"
+            "zu's rule: when you hit a wall you do NOT hardcode around it. The model reasons; "
+            "tools expose generic primitives. So if zu can't do something you need, that is a "
+            "CAPABILITY GAP in zu — file it upstream rather than working around it locally.\n\n"
+            "What counts as a gap (not a user error): a missing tool/primitive; a detector "
+            "that should have escalated but didn't; a selector or control zu can't resolve; a "
+            "soft miss the loop mishandles; a tier ladder that can't express your flow.\n\n"
+            "How to file a strong one: capture a repeatable example first — drive the path "
+            "with `zu_explore` (your harness pathfinds the live site) or `zu capture` (one "
+            "live run), which records `fixtures/capture.json`. That bundle reproduces the run "
+            "deterministically at $0, so the maintainers reproduce the gap with "
+            "`zu run --offline` and the maintainers' agent picks it up. Then call "
+            "`zu_report_gap` to build the issue (agent.yaml + the repro + expected/observed + "
+            "a proposed GENERIC capability) and a ready `gh issue create` command.\n\n"
+            "The fix that lands will be a generic capability — which then helps every zu user, "
+            "the same way the existing capabilities were built."
+        )
+
     @mcp.resource("zu://plugins")
     def plugins_resource() -> str:
         """Everything Zu can discover here — context for designing a config."""

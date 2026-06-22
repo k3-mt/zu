@@ -23,15 +23,39 @@ You should see `status : success`, a `track.json` written next to the agent, and
   final answer (`Acme Widget`, `$9.00`) appears verbatim in the last `browser` read, so
   the `grounding` validator passes.
 
-## A real agent
+## A real agent — the full sequence
 
-This bundle is hand-authored so the example needs no keys. A real agent records its own
-by driving the live site **once**:
+This bundle is hand-authored so the example needs no keys. A real agent records its own by
+driving the live site **once**, then everything downstream is offline at ~$0. There are two
+ways to do that one live discovery:
 
 ```sh
-zu capture examples/agents/my-agent/      # LIVE — needs keys + network, writes fixtures/capture.json
-zu run    examples/agents/my-agent/ --offline   # then iterate offline, ~$0
+# Option A — zu pathfinds with its own configured model:
+zu capture examples/agents/my-agent/        # LIVE — keys + network → fixtures/capture.json
+
+# Option B — YOUR harness model pathfinds (Claude Code / Codex / Cursor over `zu mcp`):
+#   zu_explore(tool="http_fetch", url=...) → see the JS shell
+#   zu_explore(tool="browser", op="open", url=...) → act → read … until you reach the data
+#   zu_explore_save(agent="examples/agents/my-agent/", task=..., answer=...)
+# Your discovery in the harness you already use BECOMES fixtures/capture.json.
 ```
 
-That one live capture is the only live spend of the construction sequence — everything
-after it (build, record the track, harden against perturbed fixtures) runs offline.
+Then iterate and ship — all offline, ~$0 (the model returns only on divergence at run time):
+
+```sh
+zu run       examples/agents/my-agent/ --offline   # replay; iterate the agent for free
+zu build     examples/agents/my-agent/             # build → record track → harden
+zu construct examples/agents/my-agent/ --check     # the anti-hardcode readiness gate (G1–G3)
+zu construct examples/agents/my-agent/ --sandboxed # autonomous, contained (needs Docker)
+# then one live canary, then: zu pack / zu deploy
+```
+
+That one live capture (A or B) is the only live spend of the construction sequence.
+
+## Hit a wall zu can't pass?
+
+If zu genuinely can't do something — a missing primitive, a detector that won't fire, a
+selector it can't resolve — that's a **capability gap in zu, not a bug in your agent**.
+Don't hardcode around it: call `zu_report_gap` (over `zu mcp`) to file a strong, **repeatable**
+issue. Your `fixtures/capture.json` is the repro — maintainers reproduce it with
+`zu run --offline` and build the generic capability. See the `zu://contributing` resource.
