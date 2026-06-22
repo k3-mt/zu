@@ -40,7 +40,8 @@ for, live, every time. Close that and the inner loop becomes free.
  7 Promote        zu pack / zu deploy EXISTS   deploy.py
    ─────────────────────────────────────────
    SPINE         zu build            BUILT    chains stages 3→4→5 offline, gated, at $0
-   META-AGENT    --sandboxed + zu mcp loop   SPEC — cheap ONLY because it wraps the spine
+   GUARDRAILS    zu construct --check BUILT   executable anti-hardcode gate (G1–G3)
+   META-AGENT    zu construct + loop  BUILT*   driver loop + gate built; live brain is a seam
 ```
 
 `zu build` is the offline spine: it runs stages 3→4→5 in order (build → record track →
@@ -122,6 +123,9 @@ against fixtures is what makes its token budget tractable. Hence A lands before 
   score; the `zu harden` command.
 - `zu_cli/build.py` — the offline spine (`build_offline`) chaining stages 3→4→5; the
   `zu build` command, with the live canary behind a `NotImplementedError` seam.
+- `zu_cli/guardrails.py` — the executable anti-hardcode gate (`enforce_guardrails`, G1–G3).
+- `zu_cli/construct.py` — the meta-agent driver loop (`construct` + `Strategist` /
+  `ScriptedStrategist`), with the live strategist + live capture as seams; `zu construct`.
 - `zu run --offline` wired through `_execute_once`; the `zu capture` command.
 - `examples/agents/browser-widget/` — a minimal tier-2 example that runs fully offline.
 - `packages/zu-cli/tests/{test_offline,test_harden}.py`.
@@ -145,7 +149,9 @@ escalation), `zu_core/track.py` (`record_track`), `zu_core/cost.py` (`summarize_
 - a recorded soft miss replays as a soft miss;
 - `project_capture` round-trips a synthetic event log → bundle → reproduced result;
 - `zu harden` audits the captured path, scores 100% resilience on cosmetic noise, and
-  fails every value-deletion control (`test_harden.py`).
+  fails every value-deletion control (`test_harden.py`);
+- the guardrail gate bites and clears (G1/G2/G3, `test_guardrails.py`) and the construction
+  loop converges with a scripted strategist (`test_construct.py`).
 
 **Out of scope here (each needs one live run — keys + network):** a real `zu capture`,
 the stage-6 canary, and a real meta-agent build. `zu.db` is empty locally; do not
@@ -175,39 +181,52 @@ unexpected interstitial) cannot be absorbed offline; measuring that needs a live
 and is the next increment (a live hardening lane), deliberately out of this $0 scope
 rather than silently conflated with what is measured.
 
-## Specced behind seams
+## The meta-agent — gate + driver built; only the live brain remains
 
-### The meta-agent / container-CLI builder
+The headline is a Claude CLI running autonomously **inside `zu run --sandboxed`** (the
+hardened container + egress proxy: `main._execute_sandboxed` + `SandboxLauncher`), driving
+the **existing `zu mcp` tools** (`zu_scaffold` / `zu_validate` / `zu_run` / `zu_traces`,
+`zu_cli/mcp_server.py`) to capture once, then iterate stages 3–5 offline and free, reading
+its own `zu_traces` to diagnose each wall and decide the next edit.
 
-A Claude CLI running autonomously **inside `zu run --sandboxed`** (the hardened container
-+ egress proxy: `main._execute_sandboxed` + `SandboxLauncher`), driving the **existing
-`zu mcp` tools** (`zu_scaffold` / `zu_validate` / `zu_run` / `zu_traces`,
-`zu_cli/mcp_server.py`):
+Two load-bearing parts are now **built** and tested at $0; only the live model brain and
+live capture remain as seams.
 
-1. **Capture once live**, then iterate stages 3–5 **offline and free** — explore,
-   diagnose, and harden without re-paying the frontier prefix.
-2. **Read its own event logs** (`zu_traces`) to diagnose each wall and decide the next
-   capability or `agent.yaml` edit — the loop the human does today, automated.
-3. **Hand back a bundle for review** (`agent.yaml` + hardened `track.json` + `fixtures/`)
-   with a cost ledger showing construction spend.
+### The anti-hardcode guardrail gate (built; `zu_cli/guardrails.py`)
 
-**Anti-hardcode guardrails (load-bearing, not optional)** — without these a meta-agent
-can "click Chislehurst" and pass the gate by memorising the answer:
+`enforce_guardrails(spec, cfg, bundle, agent_dir)` makes the load-bearing rules
+executable, reusing the stage-5 machinery — without these a meta-agent can "click
+Chislehurst" and pass by memorising the answer:
 
-- a capability that targets an element must carry **≥1 alternate selector** (no
-  single-point-of-failure step);
-- the track must clear a **stage-5 resilience threshold** (it survives perturbed
-  fixtures, not just the captured one);
-- the builder emits **generic capabilities only** — never a literal site-answer constant
-  baked into config or a tool;
-- the output is **gated by review** (human or automated) before promote.
+- **G1 — alternate locators**: every targeting step carries a `near` fallback (a
+  `single-selector` finding from `audit_brittleness` is a violation).
+- **G2 — resilient track**: clears a resilience threshold AND grounding is load-bearing
+  (reuses `harden`).
+- **G3 — no hardcoded answer**: no captured grounded value (`grounded_values`) appears
+  verbatim in `agent.yaml` or a bundle tool's source.
+- **G4 — review gate**: structural — `construct` hands back a bundle + report for sign-off
+  and never auto-promotes.
 
-The offline spine already exists as `zu build` (`zu_cli/build.py`), chaining stages 3→4→5
-and writing a gated, hardened track at $0 — the autonomous builder *wraps* this spine
-(capture once, then drive `zu build` and read `zu_traces` to diagnose and re-edit),
-which is exactly why its token budget stays tractable. What remains for the meta-agent is
-the autonomous loop itself (the `--sandboxed` + `zu mcp` driver and the guardrail
-enforcement), plus the live canary seam (`build._canary`).
+The gate is intentionally **stricter than `zu build`**: `zu build` *notes* single-selector
+brittleness (the hand-authored `browser-widget` example legitimately has one); the
+guardrails *fail* on it, because they gate autonomous output bound for production.
+
+### The construction driver loop (built; `zu_cli/construct.py`)
+
+`construct(spec, cfg, agent_dir, bundle, strategist, …)` runs the diagnose → edit →
+rebuild loop: each round `build_offline` (the spine) then `enforce_guardrails` (the gate);
+on a hold, ask the `Strategist` for an `Edit` (a mutated bundle) and retry. It reuses the
+offline spine and the gate — no new offline machinery — and never promotes (G4).
+
+`ScriptedStrategist` drives it deterministically (the tests prove convergence: the brittle
+example + one edit that adds a `near` fallback → builds clean and clears the gate in two
+rounds, no model). `zu construct --check` runs one round as a **$0 readiness gate**.
+
+**What remains (the live brain):** `LiveStrategist.propose` (a model — the Claude CLI on
+the `zu mcp` tools in the sandbox — deciding the next edit) and `live_capture` (stage 2)
+are explicit `NotImplementedError` seams. The autonomous loop is cheap *because* it wraps
+the offline spine; only its decision-maker needs frontier tokens. Plus the live canary
+seam (`build._canary`).
 
 ## Risks / assumptions to challenge
 

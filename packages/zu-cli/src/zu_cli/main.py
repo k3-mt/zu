@@ -551,6 +551,89 @@ def build(
 
 
 @app.command()
+def construct(
+    agent: str = typer.Argument(
+        "agent.yaml", help="The agent to construct: an agent.yaml file, or a bundle directory."
+    ),
+    check: bool = typer.Option(
+        False, "--check",
+        help="One round only: report construction-readiness (build + guardrails) and exit. "
+             "No model needed — the $0 readiness gate.",
+    ),
+    max_rounds: int = typer.Option(
+        3, "--max-rounds", help="Autonomous mode: max diagnose→edit→rebuild rounds.",
+    ),
+    min_resilience: float = typer.Option(
+        1.0, "--min-resilience", help="Required resilience score (0.0–1.0).",
+    ),
+) -> None:
+    """The meta-agent construction loop: build → enforce the anti-hardcode guardrails →
+    (autonomously) diagnose, edit, and rebuild — offline, at $0 with a scripted strategist.
+
+    ``--check`` runs ONE round and reports readiness (the gate that enforces: alternate
+    locators, a resilient track, and no hardcoded answer). The autonomous loop needs a
+    live model to decide edits and is the next increment; without one it stops at the
+    live-strategist seam. Needs a captured bundle (run ``zu capture`` once).
+    """
+    from pathlib import Path
+
+    from .build import build_offline
+    from .construct import LiveStrategist
+    from .construct import construct as run_construct
+    from .guardrails import enforce_guardrails
+    from .offline import Bundle, OfflineError, bundle_path
+
+    try:
+        spec, cfg = load_agent(agent)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+    try:
+        bundle = Bundle.load(bundle_path(agent_dir))
+    except OfflineError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    if check:
+        typer.echo(f"zu construct --check: {agent} (offline readiness gate — no model)")
+        build = asyncio.run(build_offline(spec, cfg, agent_dir, bundle, min_score=min_resilience))
+        guards = asyncio.run(
+            enforce_guardrails(spec, cfg, bundle, agent_dir, min_resilience=min_resilience))
+        for s in build.stages:
+            mark = {"ok": "✓", "failed": "✗", "skipped": "·"}.get(s.status, "?")
+            typer.echo(f"  {mark} {s.name}: {s.detail}")
+        if guards.passed:
+            typer.echo(f"  ✓ guardrails: passed (resilience {guards.resilience:.0%})")
+        else:
+            typer.echo(f"  ✗ guardrails: {len(guards.violations)} violation(s)")
+            for v in guards.violations:
+                typer.echo(f"      · [{v.rule}] {v.detail}")
+        if build.ok and guards.passed:
+            typer.echo("construct: ready for review (build clean + guardrails passed).")
+            return
+        typer.echo("construct: not ready — fix the items above (a strategist would iterate "
+                   "on these).", err=True)
+        raise typer.Exit(code=1) from None
+
+    # Autonomous mode: the live strategist decides edits — the live-lane seam.
+    typer.echo(f"zu construct: {agent} (autonomous — up to {max_rounds} rounds)")
+    try:
+        report = asyncio.run(run_construct(
+            spec, cfg, agent_dir, bundle, LiveStrategist(),
+            max_rounds=max_rounds, min_resilience=min_resilience))
+    except NotImplementedError as exc:
+        typer.echo(f"construct: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    # Reached only if the first round already converged (no strategist call needed).
+    if report.converged:
+        typer.echo("construct: converged on round 1 — ready for review.")
+        return
+    raise typer.Exit(code=1) from None
+
+
+@app.command()
 def serve(
     config: str = typer.Option(
         "agent.yaml", "--config", "-c", help="Agent/config file for the service (task block ignored; tasks arrive per request)."
