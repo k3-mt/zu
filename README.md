@@ -90,6 +90,36 @@ Containment is two problems, and they have different answers:
 same build runs on Anthropic, OpenAI, OpenRouter, or a local model (Ollama / vLLM)
 with a one-line config change.
 
+## Your first agent — zero to deployed
+
+Five steps, even if you've never seen Zu before. Each links to the deeper guide.
+
+```bash
+# 1 · install
+pip install 'zu-runtime[all]'
+
+# 2 · scaffold — writes a starter agent.yaml you can run immediately
+zu init my-agent
+
+# 3 · build & run — edit my-agent/agent.yaml (set your model + the task), then:
+export ANTHROPIC_API_KEY=sk-...
+zu run my-agent/                  # streams the live train-of-thought as it works
+
+# 4 · test it — capture one live run, then replay OFFLINE at ~$0 (no model, no network)
+zu capture my-agent/              # the one live step → records fixtures/
+zu run my-agent/ --offline        # deterministic replay; iterate for free
+zu construct my-agent/ --check    # readiness gate: alternate locators · resilience · no hardcoded answer
+
+# 5 · deploy — run it contained, or ship it as a service/image
+zu run my-agent/ --sandboxed      # hardened container, egress-gated (needs Docker)
+zu serve -c my-agent/agent.yaml   # …or serve over HTTP   ·   zu pack / zu deploy → a container image
+```
+
+Don't know how to write the agent yet? The
+**[Building an agent guide](docs/agent-construction-sequence.md)** walks the whole arc, and
+[`examples/agents/vet-appointment/`](examples/agents/vet-appointment/) is a complete, real one
+to copy. The rest of this README is depth on each step.
+
 ## Status
 
 The v1 core is complete and green: the typed contracts, the six ports, the
