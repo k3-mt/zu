@@ -1,0 +1,50 @@
+# Publish the Zu distributions to PyPI on a version tag — token-free via PyPI
+# Trusted Publishing (GitHub OIDC). Building blocks:
+#
+#   uv build --all-packages   → sdist + wheel for every workspace member into dist/
+#   pypa/gh-action-pypi-publish → uploads dist/ using a short-lived OIDC token
+#
+# ONE-TIME SETUP (on PyPI, per distribution — these are all available as of setup):
+#   For each of: zu-core, zu-providers, zu-tools, zu-checks, zu-backends,
+#   zu-redteam, zu-cli, zu-runtime — add a "pending" Trusted Publisher at
+#   https://pypi.org/manage/account/publishing/ with:
+#     Owner: k3-mt   Repo: zu   Workflow: publish.yml   Environment: pypi
+#   (Pending publishers create the project on first publish — no token needed.)
+# Then create the `pypi` environment in the repo settings, and:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Tip: validate end-to-end against TestPyPI first by temporarily pointing the
+# publish step at https://test.pypi.org/legacy/ (repository-url) with a pending
+# publisher there.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Build every workspace member (zu-core … zu-runtime) into ./dist.
+      - run: uv build --all-packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi          # gate the release behind the `pypi` environment
+    permissions:
+      id-token: write          # OIDC for Trusted Publishing — NO token stored in the repo
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # All 8 projects trust this same workflow, so one upload publishes the set.
