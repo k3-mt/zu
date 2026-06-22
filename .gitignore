@@ -58,3 +58,9 @@ docs/BUILD.md
 # Local secret — API key for live validation, never commit
 zu_demo_key.md
 *_key.md
+
+# Local PyPI publish token — never commit
+/pypi
+
+# Local Discord credentials (bot token / app secrets) — never commit
+/discord

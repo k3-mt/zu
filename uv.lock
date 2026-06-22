@@ -1783,6 +1783,7 @@ dependencies = [
     { name = "zu-checks" },
     { name = "zu-cli" },
     { name = "zu-providers" },
+    { name = "zu-tools" },
 ]
 
 [package.optional-dependencies]
@@ -1835,6 +1836,7 @@ requires-dist = [
     { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'anthropic'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["openai"], marker = "extra == 'all'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["openai"], marker = "extra == 'openai'", editable = "packages/zu-providers" },
+    { name = "zu-tools", editable = "packages/zu-tools" },
     { name = "zu-tools", marker = "extra == 'all'", editable = "packages/zu-tools" },
     { name = "zu-tools", marker = "extra == 'demo'", editable = "packages/zu-tools" },
     { name = "zu-tools", marker = "extra == 'web'", editable = "packages/zu-tools" },
