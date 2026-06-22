@@ -14,7 +14,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync
-      - run: uv run ruff check packages
+      - run: uv run ruff check packages community automation  # also lint the bot + CI agent
       - run: uv run pytest --cov   # enforces the coverage floor in [tool.coverage]
       - run: uv run mypy packages
 
@@ -28,6 +28,17 @@ jobs:
       - run: uv sync
       # Supply-chain visibility: fail on a known-vulnerable dependency.
       - run: uvx pip-audit
+
+  # Static-lint the GitHub Actions workflows themselves — catches bad `if:`
+  # expressions, unknown contexts, shell quoting bugs, and typos before they ship.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
 
   # Tier 2–3: build the image, then run everything marked @docker — the whole
   # agent inside the hardened container + the red-team egress enforcement proofs +

@@ -50,9 +50,10 @@ jobs:
   # Optional: on a self-hosted runner with Docker, run the live enforcement
   # proofs against the freshly built image. Disabled by default (the GitHub-hosted
   # ubuntu runner cannot create --internal networks with external bridging the way
-  # the proofs need); enable on a runner labelled `docker-live`.
+  # the proofs need); enable by setting repo variable REDTEAM_LIVE_GATE=true and
+  # registering a runner labelled `docker-live`.
   live-gate:
-    if: false
+    if: ${{ vars.REDTEAM_LIVE_GATE == 'true' }}
     runs-on: [self-hosted, docker-live]
     needs: build-and-push
     steps:
