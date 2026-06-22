@@ -561,10 +561,11 @@ async def _replay_track(
     by the recorded gaps (capped), and bounded by the run's wall-time.
 
     ``jitter_max_ms`` humanises the pacing of a live run: each step gets a random
-    extra delay whose ceiling scales upward with progress through the track (0% →
-    100%), so a driven path is not fired at a uniform machine cadence. The jitter
-    is seeded from the run's ``trace_id`` — reproducible per run — and is 0 by
-    default (offline iteration and tests stay instant).
+    extra delay centred on an upward-curving envelope of progress through the track
+    (0% → 100%) and varying up and down around it, so a driven path is not fired at
+    a uniform machine cadence. The jitter is seeded from the run's ``trace_id`` —
+    reproducible per run — and is 0 by default (offline iteration and tests stay
+    instant).
 
     The track remembers its escalation: before a step that needs a higher tier (its
     recorded tier, or the tool's own tier), the navigator climbs the ladder and emits
@@ -584,8 +585,9 @@ async def _replay_track(
         if wall_time_s - (time.monotonic() - start) <= 0:
             return True  # out of time; let the model loop end the run cleanly
         await _replay_climb_to(run, ladder, tools, step)
-        # The recorded settle (capped), plus an upward-scaling random delay across
-        # the track from 0% to 100% (off when jitter_max_ms <= 0).
+        # The recorded settle (capped), plus a random delay centred on an
+        # upward-curving envelope of progress (0%→100%) that varies up and down
+        # per step (off when jitter_max_ms <= 0).
         progress = i / (n_steps - 1) if n_steps > 1 else 1.0
         wait_ms = min(step.wait_ms, MAX_REPLAY_WAIT_MS)
         wait_ms += replay_extra_delay_ms(progress, jitter_rng, max_extra_ms=jitter_max_ms)
@@ -657,10 +659,10 @@ async def run_task(
     ``provider`` stays in charge to re-pathfind. Both are no-ops on a non-replay run.
 
     ``replay_jitter_max_ms`` humanises a replayed track's pacing: each step gets a
-    random extra delay whose ceiling scales upward with progress through the track
-    (0% → 100%), seeded from the run's trace_id so it is reproducible. It is 0
-    (off) by default — live runs turn it on; offline replay and tests leave it off
-    so iteration stays instant.
+    random extra delay centred on an upward-curving envelope of progress through
+    the track (0% → 100%) that varies up and down around it, seeded from the run's
+    trace_id so it is reproducible. It is 0 (off) by default — live runs turn it
+    on; offline replay and tests leave it off so iteration stays instant.
 
     ``containment`` is the fail-closed floor (see ``zu_core.security``): with
     ``"required"``, a tool with off-box reach is refused unless the run is inside

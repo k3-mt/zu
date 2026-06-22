@@ -7,7 +7,9 @@ import types
 from datetime import UTC, datetime, timedelta
 
 from zu_core.track import (
+    REPLAY_JITTER_CURVE,
     REPLAY_JITTER_MAX_MS,
+    REPLAY_JITTER_SPREAD,
     Track,
     TrackStep,
     record_track,
@@ -120,24 +122,47 @@ def test_jitter_zero_at_the_start_of_the_track() -> None:
         assert replay_extra_delay_ms(0.0, random.Random(seed), max_extra_ms=5000) == 0
 
 
-def test_jitter_is_bounded_by_progress_times_max() -> None:
-    # at every progress p the delay stays within [0, max*p]
+def test_jitter_is_bounded_by_the_curved_envelope() -> None:
+    # at progress p the delay stays within the triangular band around the centre:
+    # [center*(1-spread), center*(1+spread)] where center = max * p**curve.
     for p in (0.1, 0.25, 0.5, 0.75, 1.0):
+        center = 4000 * (p ** REPLAY_JITTER_CURVE)
+        hi = center * (1 + REPLAY_JITTER_SPREAD)
         for seed in range(50):
             d = replay_extra_delay_ms(p, random.Random(seed), max_extra_ms=4000)
-            assert 0 <= d <= 4000 * p + 1  # +1 for the int() floor
+            assert 0 <= d <= hi + 1  # +1 for the int() floor
 
 
-def test_jitter_ceiling_scales_upward_with_progress() -> None:
-    # The reachable ceiling grows with progress: sampling many seeds, the max delay
-    # seen near 100% far exceeds the max seen near the start.
-    def max_seen(p: float) -> int:
-        return max(replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
-                   for s in range(200))
+def test_jitter_centre_tracks_the_curve() -> None:
+    # The triangular distribution is symmetric about the centre, so the MEAN of
+    # many independent draws tracks center = max * p**curve.
+    for p in (0.4, 0.7, 1.0):
+        vals = [replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
+                for s in range(800)]
+        center = 4000 * (p ** REPLAY_JITTER_CURVE)
+        assert abs(sum(vals) / len(vals) - center) < 0.1 * 4000  # within 10% of max
 
-    early, mid, late = max_seen(0.1), max_seen(0.5), max_seen(1.0)
-    assert early < mid < late
-    assert late > 3000  # near 100% it approaches the full max
+
+def test_jitter_varies_up_and_down_around_the_centre() -> None:
+    # At a fixed progress, independent draws land BOTH above and below the centre —
+    # the ms genuinely vary up and down, not one-sided from zero.
+    p, center = 0.8, 4000 * (0.8 ** REPLAY_JITTER_CURVE)
+    vals = [replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
+            for s in range(200)]
+    assert min(vals) < center
+    assert max(vals) > center
+
+
+def test_envelope_curves_upward_convexly() -> None:
+    # ease-in: equal steps in progress add MORE delay later than earlier (the
+    # centre rises convexly), using the mean over seeds as the centre estimate.
+    def mean_at(p: float) -> float:
+        return sum(replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
+                   for s in range(800)) / 800
+
+    early_rise = mean_at(0.4) - mean_at(0.2)
+    late_rise = mean_at(0.8) - mean_at(0.6)
+    assert late_rise > early_rise
 
 
 def test_jitter_is_deterministic_for_a_seed() -> None:
@@ -150,5 +175,7 @@ def test_jitter_is_deterministic_for_a_seed() -> None:
     assert sequence() == sequence()
 
 
-def test_default_max_constant_is_positive() -> None:
+def test_default_constants_are_sane() -> None:
     assert REPLAY_JITTER_MAX_MS > 0
+    assert REPLAY_JITTER_CURVE > 1.0       # curves upward (convex), not linear
+    assert 0 < REPLAY_JITTER_SPREAD <= 1   # two-sided band that stays non-negative

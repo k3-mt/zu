@@ -1053,9 +1053,9 @@ async def test_track_challenge_hands_off_to_the_model() -> None:
 
 
 async def test_replay_jitter_adds_upward_scaling_delays(monkeypatch) -> None:
-    """With replay_jitter_max_ms on, each replayed step gets a random delay whose
-    ceiling scales upward across the track (0%→100%). We capture asyncio.sleep
-    rather than really sleeping, so the test stays instant."""
+    """With replay_jitter_max_ms on, each replayed step gets a random delay centred
+    on an upward-curving envelope across the track (0%→100%), varying up and down.
+    We capture asyncio.sleep rather than really sleeping, so the test stays instant."""
     from uuid import UUID
 
     from zu_core.track import Track, TrackStep
@@ -1084,8 +1084,8 @@ async def test_replay_jitter_adds_upward_scaling_delays(monkeypatch) -> None:
     early_max = max(slept[: len(slept) // 2])
     late_max = max(slept[len(slept) // 2:])
     assert late_max > early_max
-    # bounded by the configured max (seconds)
-    assert max(slept) <= 8.0
+    # bounded by the curved envelope's band at 100%: center(=8s) * (1 + spread)
+    assert max(slept) <= 8.0 * (1 + 0.5)
 
 
 async def test_replay_jitter_off_by_default_no_extra_sleep(monkeypatch) -> None:

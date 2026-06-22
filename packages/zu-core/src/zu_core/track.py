@@ -30,28 +30,51 @@ MAX_REPLAY_WAIT_MS = 3000
 # Replay humanisation. A track driven at machine cadence — every step fired the
 # instant the last returned — is a tell: real use has growing, irregular pauses.
 # So, when running a track from 0% to 100%, add a RANDOM extra delay to each step
-# whose ceiling scales UPWARD with progress: the start is near-instant, the tail
-# is the most deliberate. This is the same realism move as the seeded pointer
-# path (§12) — bounded and seeded, so a run is reproducible and tested at $0.
-# The most extra delay any single step adds, reached as progress nears 100%.
+# centred on an envelope that curves UPWARD with progress: the start is
+# near-instant, the tail is the most deliberate. This is the same realism move as
+# the seeded pointer path (§12) — bounded and seeded, so a run is reproducible and
+# tested at $0.
+# The centre delay reached as progress nears 100%.
 REPLAY_JITTER_MAX_MS = 1500
+# The envelope curves upward with progress (ease-in): ``progress ** CURVE``. 2.0 is
+# quadratic — gentle early, steep near the end.
+REPLAY_JITTER_CURVE = 2.0
+# Each step's realised delay varies up AND down around the centre by up to this
+# fraction of it — so a step lands above or below the rising trend, not merely
+# under a one-sided cap.
+REPLAY_JITTER_SPREAD = 0.5
 
 
 def replay_extra_delay_ms(
-    progress: float, rng: random.Random, *, max_extra_ms: int = REPLAY_JITTER_MAX_MS
+    progress: float,
+    rng: random.Random,
+    *,
+    max_extra_ms: int = REPLAY_JITTER_MAX_MS,
+    spread: float = REPLAY_JITTER_SPREAD,
 ) -> int:
-    """Extra delay (ms) to add before a replayed step, scaling upward with
-    ``progress`` (0.0 at the first step, 1.0 at the last) with seeded randomness.
+    """Extra delay (ms) before a replayed step — centred on an UPWARD-CURVING
+    envelope of progress, varying up AND down around it.
 
-    At progress ``p`` the delay is uniform in ``[0, max_extra_ms * p]`` — so early
-    steps add ~nothing and late steps add up to ``max_extra_ms``. Pure and
-    deterministic in ``(progress, rng state)``: feed a seeded ``random.Random`` and
-    the same run replays with the same pacing. ``max_extra_ms <= 0`` disables it
-    (returns 0), which is how offline iteration and tests stay instant."""
+    The centre rises with progress as ``max_extra_ms * progress ** REPLAY_JITTER_CURVE``
+    — an ease-in curve, so the tail of the track is far more deliberate than the
+    start. Each step's realised delay is an INDEPENDENT draw from a triangular
+    distribution centred on that value, spanning ``±spread`` of it — so a step can
+    land above or below the trend (the ms genuinely vary up and down) while the
+    expected value still tracks the curve.
+
+    Pure and deterministic in ``(progress, rng state)``: feed a seeded
+    ``random.Random`` and a run replays with the same pacing. ``max_extra_ms <= 0``
+    disables it. A delay is never negative — you cannot un-sleep — so "down" means
+    below the rising centre, not below zero."""
     if max_extra_ms <= 0:
         return 0
     p = min(1.0, max(0.0, progress))
-    return int(rng.uniform(0.0, max_extra_ms * p))
+    center = max_extra_ms * (p**REPLAY_JITTER_CURVE)
+    if center <= 0:
+        return 0
+    half = spread * center
+    # triangular(low, high, mode): symmetric about the centre → varies up & down.
+    return max(0, int(rng.triangular(center - half, center + half, center)))
 
 
 @dataclass
