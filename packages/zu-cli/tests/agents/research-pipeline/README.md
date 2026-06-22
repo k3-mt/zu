@@ -1,7 +1,8 @@
-# research-pipeline
+# research-pipeline — test fixture (not a shipped example)
 
 A **multi-phase** agent built with `zu.Pipeline`: `extract → summarize`, chained
-so the whole thing is one event-sourced run.
+so the whole thing is one event-sourced run. Used by the test suite to exercise multi-phase
+runs (`test_example_agents.py`); the sole shipped example is `examples/agents/vet-appointment/`.
 
 ```bash
 python pipeline.py                                          # offline (scripted), no key
@@ -21,5 +22,4 @@ What it shows — the robust way to run multiple phases:
 
 Pipelines are *code* (not a `task.yaml`), because that keeps each phase
 independently validated, budgeted, and auditable — staging without giving up the
-per-run provenance guarantee. See the **Multi-phase agents** section of the
-build-an-agent guide (published docs).
+per-run provenance guarantee.

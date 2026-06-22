@@ -138,8 +138,10 @@ published docs).
 
 ## Pointers
 
-- Runnable example agents → [`examples/agents/`](examples/agents/)
+- The flagship example agent → [`examples/agents/vet-appointment/`](examples/agents/vet-appointment/) (machinery fixture agents live in `packages/zu-cli/tests/agents/`)
+- Building an agent (capture → offline at ~$0 → harden → ship) → [`docs/agent-construction-sequence.md`](docs/agent-construction-sequence.md)
+- Quick orientation for coding agents → [`CLAUDE.md`](CLAUDE.md)
 - End-to-end proof suites (containment, red-team) → [`validation/`](validation/)
 - The shared test kit for your own plugins → [`packages/zu-testing/`](packages/zu-testing/)
 - Human setup + PR flow → [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- Architecture, philosophy, quickstart, red-team → the published documentation
+- Architecture, philosophy, red-team → the published documentation

@@ -41,7 +41,8 @@ for, live, every time. Close that and the inner loop becomes free.
    ─────────────────────────────────────────
    SPINE         zu build            BUILT    chains stages 3→4→5 offline, gated, at $0
    GUARDRAILS    zu construct --check BUILT   executable anti-hardcode gate (G1–G3)
-   META-AGENT    zu construct + loop  BUILT*   driver loop + gate built; live brain is a seam
+   DISCOVERY     zu_explore (harness) BUILT    your harness pathfinds → records the bundle
+   META-AGENT    zu construct[--sandboxed] BUILT  driver loop + gate + model brain, contained
 ```
 
 `zu build` is the offline spine: it runs stages 3→4→5 in order (build → record track →
@@ -127,7 +128,9 @@ against fixtures is what makes its token budget tractable. Hence A lands before 
 - `zu_cli/construct.py` — the meta-agent driver loop (`construct` + `Strategist` /
   `ScriptedStrategist`), with the live strategist + live capture as seams; `zu construct`.
 - `zu run --offline` wired through `_execute_once`; the `zu capture` command.
-- `examples/agents/browser-widget/` — a minimal tier-2 example that runs fully offline.
+- `packages/zu-cli/tests/agents/browser-widget/` — a minimal tier-2 **fixture agent** that
+  runs fully offline (the offline suite's keystone fixture; the sole shipped example is
+  `examples/agents/vet-appointment/`).
 - `packages/zu-cli/tests/{test_offline,test_harden}.py`.
 
 **Reused (cited):** `zu_core/loop.py` (`_replay_track`, `_is_challenge`/`_is_soft_miss`,
@@ -142,9 +145,8 @@ escalation), `zu_core/track.py` (`record_track`), `zu_core/cost.py` (`summarize_
 
 `packages/zu-cli/tests/test_offline.py` validates the machinery offline:
 
-- the `browser-widget` example runs through `FixtureSessionBackend` to a grounded
-  SUCCESS at **0 model tokens** (`uv run zu run examples/agents/browser-widget/
-  --offline`);
+- the `browser-widget` fixture agent runs through `FixtureSessionBackend` to a grounded
+  SUCCESS at **0 model tokens** (offline, exercised by the test suite);
 - a short browser fixture fails **loudly** (overrun → challenge, not a silent pass);
 - a recorded soft miss replays as a soft miss;
 - `project_capture` round-trips a synthetic event log → bundle → reproduced result;
@@ -181,16 +183,19 @@ unexpected interstitial) cannot be absorbed offline; measuring that needs a live
 and is the next increment (a live hardening lane), deliberately out of this $0 scope
 rather than silently conflated with what is measured.
 
-## The meta-agent — gate + driver built; only the live brain remains
+## The meta-agent — built: gate + driver + model brain, contained
 
-The headline is a Claude CLI running autonomously **inside `zu run --sandboxed`** (the
-hardened container + egress proxy: `main._execute_sandboxed` + `SandboxLauncher`), driving
-the **existing `zu mcp` tools** (`zu_scaffold` / `zu_validate` / `zu_run` / `zu_traces`,
-`zu_cli/mcp_server.py`) to capture once, then iterate stages 3–5 offline and free, reading
-its own `zu_traces` to diagnose each wall and decide the next edit.
+The production form is **zu's own `construct()` loop run inside `zu run --sandboxed`** (the
+hardened container + egress proxy: `main._execute_sandboxed` + `SandboxLauncher`) — the
+meta-agent is a *contained zu run*, not an external binary, so it reuses the whole stack (the
+offline spine, the guardrails, cost telemetry, the event log) and its only egress is the
+model endpoint. `zu construct --sandboxed` drives it; `construct_sandbox.py` is the
+in-container entrypoint + the host-side launcher (verified on real Docker with a scripted
+brain at $0). It is equally drivable interactively from your own coding harness over the
+`zu mcp` construction tools (`zu_build` / `zu_harden` / `zu_construct`).
 
-Two load-bearing parts are now **built** and tested at $0; only the live model brain and
-live capture remain as seams.
+The gate, the driver loop, and the model brain (`LiveStrategist`) are all **built** and
+tested at $0; only the stage-6 live canary remains a seam.
 
 ### The anti-hardcode guardrail gate (built; `zu_cli/guardrails.py`)
 
@@ -208,7 +213,7 @@ Chislehurst" and pass by memorising the answer:
   and never auto-promotes.
 
 The gate is intentionally **stricter than `zu build`**: `zu build` *notes* single-selector
-brittleness (the hand-authored `browser-widget` example legitimately has one); the
+brittleness (the hand-authored `browser-widget` fixture legitimately has one); the
 guardrails *fail* on it, because they gate autonomous output bound for production.
 
 ### The construction driver loop (built; `zu_cli/construct.py`)
@@ -222,11 +227,32 @@ offline spine and the gate — no new offline machinery — and never promotes (
 example + one edit that adds a `near` fallback → builds clean and clears the gate in two
 rounds, no model). `zu construct --check` runs one round as a **$0 readiness gate**.
 
-**What remains (the live brain):** `LiveStrategist.propose` (a model — the Claude CLI on
-the `zu mcp` tools in the sandbox — deciding the next edit) and `live_capture` (stage 2)
-are explicit `NotImplementedError` seams. The autonomous loop is cheap *because* it wraps
-the offline spine; only its decision-maker needs frontier tokens. Plus the live canary
-seam (`build._canary`).
+**Built:** `LiveStrategist.propose` — given a `ModelProvider` it reads the diagnosis and
+proposes the next edit (adding a `near` alternate locator drawn from the captured page text),
+applies it to a fresh bundle, and hands it back; constructed without a provider it stays a
+clean seam, so `zu construct` with no live model still stops cleanly. The autonomous loop is
+cheap *because* it wraps the offline spine; only its decision-maker spends frontier tokens.
+
+**What remains a seam:** the stage-6 live canary (`build._canary`). (`construct.live_capture`
+is a convenience seam — the real live-capture paths are the `zu capture` command and the
+harness-driven `zu_explore` / `zu_explore_save` tools, below.)
+
+## Drive it from your own harness — discovery and contribution
+
+The whole sequence is harness-agnostic over `zu mcp` (Claude Code / Cursor / Codex):
+
+- **Discovery (`zu_explore` / `zu_explore_save`).** Your *own* harness model pathfinds the
+  live site step by step — `zu_explore(tool="http_fetch"…)`, then `browser` open/act/read —
+  and `zu_explore_save` projects that trail into `fixtures/capture.json`. The frontier
+  reasoning is spent once, in the harness you already pay for; the path replays free
+  thereafter. This is the recommended alternative to `zu capture` (which spends zu's own
+  configured model).
+- **Contribution (`zu_report_gap` / `zu://contributing`).** If zu genuinely can't do
+  something — a missing primitive, a detector that won't fire, a selector it can't resolve —
+  that's a capability *gap*, not a user bug. Don't hardcode around it: `zu_report_gap` builds
+  a strong, **reproducible** issue (agent.yaml + the `fixtures/` bundle the maintainers replay
+  with `zu run --offline` + a proposed generic capability). The fix that lands is a generic
+  capability — which helps every zu user, exactly how the existing capabilities were built.
 
 ## Risks / assumptions to challenge
 

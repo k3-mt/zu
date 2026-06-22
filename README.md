@@ -152,13 +152,24 @@ console as it happens (`zu run`), or over Server-Sent Events (`POST /run/stream`
 so you can watch a local or containerized run in real time, no refresh.
 
 **Live in your coding agent.** `pip install 'zu-runtime[mcp]'` adds a `zu mcp`
-server so Claude Code / Cursor / Codex can design, validate, run, and inspect Zu
-agents for you in natural language — and stream the run back live. One stdio
-server, every MCP client; register it once. See
+server so Claude Code / Cursor / Codex can design, validate, run, inspect — and
+**construct** — Zu agents for you in natural language, and stream the run back live.
+One stdio server, every MCP client; register it once. See
 [`examples/integrations/`](examples/integrations/).
 
-**→ Runnable examples:** [`examples/agents/`](examples/agents/) — from one-shot
-extraction to a multi-phase pipeline, each tested offline.
+**Build an agent cheaply.** A browser agent used to take many live, frontier-priced
+iterations against a drifting site. Zu bounds that to **one** live capture: pathfind the
+site once — `zu capture`, or drive `zu_explore` from your own harness so *your* discovery
+becomes the agent's path — then iterate **offline at ~$0** against the recorded fixtures
+(`zu run --offline`), harden the track against perturbations (`zu harden`), and gate it with
+an executable anti-hardcode check (`zu construct`), all with no model and no network. The
+flagship agent replays its track at **~$0.03/run** (vs ~$2.17 to pathfind). The full path is
+the **[Building an agent guide](docs/agent-construction-sequence.md)**.
+
+**→ The flagship example:**
+[`examples/agents/vet-appointment/`](examples/agents/vet-appointment/) — search → fetch → a
+persistent browser through a real booking widget → 3 grounded slots, with a recorded track
+for deterministic replay.
 
 Every built-in above is registered through the **same** plugin API you'd use for your
 own — which is how we prove the plugin system is real, not a second-class add-on.
@@ -203,11 +214,12 @@ zu/
 
 ## Documentation
 
-Full documentation (quickstart, the build-an-agent guide, architecture,
-philosophy, red-team) is published separately. In this repo:
+Architecture, philosophy, and red-team deep-dives are published separately. In this repo:
 
-- [`examples/agents/`](examples/agents/) — runnable example agents (start here): one-shot extraction and a multi-phase pipeline
+- [`docs/agent-construction-sequence.md`](docs/agent-construction-sequence.md) — **the build-an-agent guide**: capture once → iterate offline at ~$0 → harden → ship
+- [`examples/agents/vet-appointment/`](examples/agents/vet-appointment/) — the flagship example agent (start here)
 - [`AGENTS.md`](AGENTS.md) — how to navigate and extend this repo (for AI agents and new humans)
+- [`CLAUDE.md`](CLAUDE.md) — quick orientation for coding agents working in this repo
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up from a clone (`uv sync`), test, and submit changes
 
 ## License

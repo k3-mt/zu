@@ -1,35 +1,15 @@
-# custom-tool (a bundle)
+# custom-tool — test fixture (not a shipped example)
 
-Shows the whole self-contained-agent picture: **your own tool**, **your choice of
-tier**, in **one directory** you can run or load into a container.
+A bundle fixture used by the test suite to exercise **custom tools + bundle/pack**: a `tools/`
+package referenced as `tools.greet:Greet` in the tier ladder and loaded by running the
+directory — no packaging, no `pip install`, no entry point. Backs `test_example_agents.py`
+(the bundle-runs-via-CLI test) and the docker `zu pack` test in `test_sandbox.py`.
 
-```
-custom-tool/
-  agent.yaml          # the agent: model, the tier ladder, the task
-  tools/
-    greet.py          # your tool — referenced as tools.greet:Greet in tiers
-```
-
-```bash
-zu run examples/agents/custom-tool/          # run the bundle, offline, no key
-zu run examples/agents/custom-tool/ --sandboxed   # ...inside a hardened container
-zu pack examples/agents/custom-tool/ -t my-agent:1   # ...bake it into a standalone image
+```sh
+zu run  packages/zu-cli/tests/agents/custom-tool/                 # offline, no key
+zu pack packages/zu-cli/tests/agents/custom-tool/ -t my-agent:1   # bake into a standalone image
 ```
 
-`--sandboxed` mounts the bundle, so it uses the base image's packages. If your
-tools need extra pip deps, add a `requirements.txt` and `zu pack` bakes them into
-a portable image (`docker run my-agent:1`, or point `--sandboxed` at it via
-`ZU_SANDBOX_IMAGE`).
-
-How it works:
-
-- **Your tools live with the agent.** Drop a Python file in `tools/` (written in
-  your own codebase or a fresh repo). No packaging, no `pip install`, no entry
-  point — loading the bundle puts `tools/` on the path.
-- **You register it by referencing it.** `tiers: { 1: ["tools.greet:Greet"] }` —
-  naming a `module:Class` in the ladder is the registration.
-- **You choose the tier.** The same line decides which tier the tool sits at; the
-  tool's own default `tier` is just a fallback.
-
-Swap the `scripted` provider for a real one (`anthropic` + `api_key_env`) and the
-agent runs against a real model with no other change.
+The pattern — drop a `module:Class` in `tools/`, name it in `tiers:` (the registration), pick
+its tier on that same line — is how any bundle ships its own tools. The sole shipped example
+agent is `examples/agents/vet-appointment/`.
