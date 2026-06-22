@@ -134,18 +134,24 @@ def test_model_egress_derivation():
 
 
 @pytest.mark.docker
-async def test_contained_construction_runs_in_the_box() -> None:
-    # The real launcher: drives Docker (internal net + proxy sidecar) and execs
-    # zu-construct-contained in the box. Needs the rebuilt image (with the new console
-    # script). Gated — only runs with --run-docker.
+async def test_contained_construction_runs_in_the_box(tmp_path) -> None:
+    # The real launcher end-to-end: drives Docker (internal net + proxy sidecar, caps
+    # dropped, blocking seccomp), mounts the agent ro at /bundle, execs
+    # zu-construct-contained in the box, and parses the report back across the boundary.
+    # The brain is SCRIPTED, so it converges with NO model call and allowlist=[] (egress
+    # denied) — the contained mechanics are verified at $0. Needs the rebuilt image; gated
+    # to --run-docker.
     import os
 
     from zu_backends.local_docker import LocalDockerBackend
+
     from zu_cli.construct_sandbox import launch_contained_construction
     from zu_cli.sandbox import SandboxLauncher
 
+    d = _scripted_brain_agent(tmp_path)
     image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:test")
     launcher = SandboxLauncher(backend=LocalDockerBackend(), image=image)
     report = await launch_contained_construction(
-        launcher, str(_BROWSER_WIDGET), allowlist=[], max_rounds=1)
-    assert report["ok"] is True
+        launcher, str(d), allowlist=[], max_rounds=2)
+    assert report["ok"] is True and report["converged"] is True
+    assert report["track"]  # the hardened track came back from inside the box
