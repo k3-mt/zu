@@ -1,0 +1,55 @@
+name: release-on-main
+
+# Auto-publish package updates from main. On every push to main that touches a
+# package, build all workspace distributions and upload to PyPI with --skip-existing:
+# only packages whose version is NOT already on PyPI are published. So the release
+# flow is simply "bump the version in that package's pyproject.toml and merge" — the
+# package(s) you changed get published; everything else is skipped (a no-op).
+#
+# Auth: a PyPI API token in the PYPI_API_TOKEN secret. The job is a clean no-op if the
+# secret is absent. (The tag-triggered publish.yml uses OIDC Trusted Publishing; this
+# main-branch flow uses a token so it needs no per-project PyPI setup.)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for a PyPI token
+        id: precheck
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "PYPI_API_TOKEN not set — skipping (no-op)."; echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.precheck.outputs.ok == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        if: steps.precheck.outputs.ok == 'true'
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build all distributions
+        if: steps.precheck.outputs.ok == 'true'
+        run: uv build --all-packages
+
+      - name: Upload new versions (skip already-published)
+        if: steps.precheck.outputs.ok == 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: uvx twine upload --skip-existing --non-interactive dist/*
