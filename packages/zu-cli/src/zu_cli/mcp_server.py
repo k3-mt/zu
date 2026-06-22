@@ -13,6 +13,11 @@ anti-hardcode readiness gate — all at ~$0 (no model, no network). They are the
 surface the autonomous meta-agent drives: an external agent reads the readiness
 violations, edits the agent, and re-checks until it clears the gate.
 
+The exploration tools (``zu_explore`` / ``zu_explore_save``) let the DEVELOPER's own
+harness model pathfind a live site step by step and capture that discovery as the
+agent's ``fixtures/`` bundle — so the frontier reasoning is spent once, in the harness
+they already use, and the path replays free thereafter.
+
 The live stream-back is the point: ``zu_run`` subscribes to the event bus and
 pushes every step — the model's train of thought, each tool call and result,
 detector verdicts, escalations — to the client as an MCP log message *as it
@@ -69,6 +74,10 @@ def build_server() -> FastMCP:
     """Build the FastMCP server. Factored out so tests can drive the tools
     in-process via ``server.call_tool(...)``."""
     mcp = FastMCP("zu-runtime")
+
+    # One live pathfinding session per server process (a developer explores one site at a
+    # time in their harness). Held in a mutable cell the explore tools share.
+    _explore: dict[str, Any] = {"session": None}
 
     @mcp.tool()
     async def zu_plugins() -> dict:
@@ -274,6 +283,90 @@ def build_server() -> FastMCP:
             "resilience": guards.resilience,
             "violations": [{"rule": v.rule, "detail": v.detail} for v in guards.violations],
         }
+
+    @mcp.tool()
+    async def zu_explore(
+        tool: str, op: str | None = None, url: str | None = None,
+        actions: list | None = None, capture_network: bool = False,
+        wait_until: str | None = None, html: bool = False,
+    ) -> dict:
+        """Pathfind a LIVE site one step at a time — YOU (the harness model) drive zu's
+        off-box tool, see the observation, and decide the next step; the trail is recorded.
+        The session persists across calls. When the path reaches the data you need, call
+        ``zu_explore_save`` to capture it as the agent's fixtures.
+
+        ``tool`` is one of: ``http_fetch`` / ``render_dom`` (one-shot — pass ``url``) or
+        ``browser`` (a PERSISTENT session — pass ``op`` open/act/read/close, plus ``url`` for
+        open and ``actions`` for act). Tip: fetch the page first; if it's a JS shell, drive
+        the browser — that fetch step is what lets the agent escalate offline later."""
+        from .explore import EXPLORABLE, new_session
+
+        if tool not in EXPLORABLE:
+            return {"ok": False, "error": f"unknown tool {tool!r}; choose one of {list(EXPLORABLE)}"}
+        args: dict[str, Any] = {}
+        if tool in ("http_fetch", "render_dom"):
+            if not url:
+                return {"ok": False, "error": f"{tool} needs a url"}
+            args["url"] = url
+            if tool == "render_dom" and wait_until:
+                args["wait_until"] = wait_until
+        else:  # browser
+            if not op:
+                return {"ok": False, "error": "browser needs an op (open/act/read/close)"}
+            args["op"] = op
+            if url:
+                args["url"] = url
+            if actions:
+                args["actions"] = actions
+            if capture_network:
+                args["capture_network"] = True
+        if html:
+            args["html"] = True
+        if _explore["session"] is None:
+            _explore["session"] = new_session()
+        try:
+            obs = await _explore["session"].step(tool, args)
+        except Exception as exc:  # noqa: BLE001 - a tool/SSRF failure is data for the harness
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "step": len(_explore["session"].steps), "observation": obs}
+
+    @mcp.tool()
+    async def zu_explore_save(agent: str, task: str, answer: Any) -> dict:
+        """Capture the current exploration as the agent's ``fixtures/capture.json`` — the
+        discovered path becomes a replayable bundle (then ``zu build`` hardens it into a
+        track). ``task`` is the query the agent will run; ``answer`` is the final value you
+        read (what the agent should produce). Ends the session."""
+        from pathlib import Path
+
+        from .offline import bundle_path
+
+        sess = _explore["session"]
+        if sess is None or not sess.steps:
+            return {"ok": False, "error": "no exploration to save — call zu_explore first"}
+        p = Path(agent)
+        agent_dir = p if p.is_dir() else p.parent
+        out = bundle_path(agent_dir)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        sess.to_bundle(task=task, answer=answer).save(out)
+        steps = len(sess.steps)
+        tools_seen = sorted({s["tool"] for s in sess.steps})
+        _explore["session"] = None  # a save finalizes the session
+        return {
+            "ok": True, "bundle": str(out), "steps": steps, "tools": tools_seen,
+            "next": "`zu run --offline` replays it at ~$0; `zu build` hardens it into a track.",
+        }
+
+    @mcp.tool()
+    async def zu_explore_reset() -> dict:
+        """Discard the current exploration (close any open browser) and start fresh."""
+        sess = _explore["session"]
+        if sess is not None and "browser" in sess.tools:
+            try:
+                await sess.tools["browser"](sess.ctx, op="close")
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+        _explore["session"] = None
+        return {"ok": True}
 
     @mcp.resource("zu://plugins")
     def plugins_resource() -> str:
