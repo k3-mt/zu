@@ -2,6 +2,7 @@
 name = "zu-providers"
 version = "0.1.0"
 description = "Zu model-provider adapters: scripted, anthropic, openai-compatible"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 classifiers = [
