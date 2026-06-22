@@ -17,7 +17,7 @@ import yaml
 
 from zu_cli.construct_sandbox import construct_contained_from_env, run_contained_construction
 
-_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+_BROWSER_WIDGET = Path(__file__).resolve().parent / "agents" / "browser-widget"
 
 
 def _scripted_brain_agent(tmp_path, fix: str = '{"fixes": [{"step": 0, "near": "price"}]}') -> Path:

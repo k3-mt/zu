@@ -16,7 +16,7 @@ pytest.importorskip("mcp")
 
 from zu_cli.mcp_server import build_server  # noqa: E402
 
-_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+_BROWSER_WIDGET = Path(__file__).resolve().parent / "agents" / "browser-widget"
 
 
 def _copy_widget(tmp_path) -> Path:

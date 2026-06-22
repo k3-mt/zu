@@ -21,7 +21,7 @@ from zu_core.contracts import Event, Result, Status
 from zu_core.cost import summarize_cost
 from zu_core.loop import run_task
 
-_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+_BROWSER_WIDGET = Path(__file__).resolve().parent / "agents" / "browser-widget"
 
 
 async def _run_offline(agent_dir: Path, bundle: Bundle | None = None) -> tuple[Result, list]:

@@ -25,7 +25,7 @@ from zu_cli.construct import (
 from zu_cli.offline import Bundle, bundle_path
 from zu_providers.scripted import ScriptedProvider
 
-_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+_BROWSER_WIDGET = Path(__file__).resolve().parent / "agents" / "browser-widget"
 
 
 def _copy_agent(tmp_path: Path) -> Path:

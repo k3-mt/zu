@@ -115,7 +115,7 @@ def test_zu_pack_builds_a_runnable_bundle_image() -> None:
 
     from zu_cli import deploy
 
-    bundle = Path(__file__).resolve().parents[3] / "examples" / "agents" / "custom-tool"
+    bundle = Path(__file__).resolve().parent / "agents" / "custom-tool"
     base = os.environ.get("ZU_SANDBOX_IMAGE", "zu:test")
     tag = "zu-custom-tool:packtest"
     df = deploy.pack_dockerfile_text(base)
@@ -140,7 +140,7 @@ async def test_launcher_mounts_a_bundles_own_tools() -> None:
     from zu_backends.local_docker import LocalDockerBackend
     from zu_cli.sandbox import SandboxLauncher
 
-    bundle = Path(__file__).resolve().parents[3] / "examples" / "agents" / "custom-tool"
+    bundle = Path(__file__).resolve().parent / "agents" / "custom-tool"
     image = os.environ.get("ZU_SANDBOX_IMAGE", "zu:test")
     config = {
         "provider": {"name": "scripted", "script": [

@@ -28,7 +28,7 @@ _SUMMARY_SCHEMA = {
 }
 
 
-def build(provider: dict) -> "zu.Pipeline":
+def build(provider: dict) -> zu.Pipeline:
     pipe = zu.Pipeline(config={"provider": provider, "plugins": {"validators": ["schema"]}})
 
     # Phase 1: extract structured facts from the source note.

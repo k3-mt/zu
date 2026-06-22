@@ -15,7 +15,7 @@ from zu_cli.config import load_agent
 from zu_cli.guardrails import enforce_guardrails
 from zu_cli.offline import Bundle, bundle_path
 
-_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+_BROWSER_WIDGET = Path(__file__).resolve().parent / "agents" / "browser-widget"
 
 
 def _bundle() -> Bundle:

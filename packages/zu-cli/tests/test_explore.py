@@ -17,7 +17,7 @@ import pytest
 from zu_cli.explore import ExplorationSession, new_session
 from zu_core.ports import RunContext
 
-_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+_BROWSER_WIDGET = Path(__file__).resolve().parent / "agents" / "browser-widget"
 
 
 class _Fake:
