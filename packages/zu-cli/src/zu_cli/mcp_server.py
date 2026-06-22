@@ -1,10 +1,17 @@
 """The `zu mcp` server — drive Zu from any MCP coding agent.
 
 A developer lives in their harness of choice (Claude Code, Cursor, …), types in
-natural language, and the agent uses these tools to *design, validate, run, and
-inspect* a Zu agent on their behalf — then streams the run back so they can watch
-it work. It is a thin wrapper over the same engine the CLI uses (config, the
-loop, the event bus), exposed over MCP's stdio transport.
+natural language, and the agent uses these tools to *design, validate, run,
+inspect* — and *construct* — a Zu agent on their behalf, then streams the run back
+so they can watch it work. It is a thin wrapper over the same engine the CLI uses
+(config, the loop, the event bus), exposed over MCP's stdio transport.
+
+The construction tools (``zu_offline_run`` / ``zu_build`` / ``zu_harden`` /
+``zu_construct``) expose the offline construction sequence — replay a captured
+``fixtures/`` bundle, build a hardened track, score resilience, and run the
+anti-hardcode readiness gate — all at ~$0 (no model, no network). They are the
+surface the autonomous meta-agent drives: an external agent reads the readiness
+violations, edits the agent, and re-checks until it clears the gate.
 
 The live stream-back is the point: ``zu_run`` subscribes to the event bus and
 pushes every step — the model's train of thought, each tool call and result,
@@ -41,6 +48,21 @@ def _discovered() -> dict[str, list[str]]:
     reg = Registry()
     reg.discover()
     return {kind: reg.names(kind) for kind in GROUPS}
+
+
+def _load_for_construction(agent: str) -> tuple[Any, Any, Any, Any]:
+    """Load ``(spec, cfg, agent_dir, bundle)`` for a construction tool. Raises
+    ``ConfigError`` (bad agent) or ``OfflineError`` (no ``fixtures/`` bundle yet) — the
+    caller turns either into a clean ``{"ok": False, "error": ...}``."""
+    from pathlib import Path
+
+    from .config import load_agent
+    from .offline import Bundle, bundle_path
+
+    spec, cfg = load_agent(agent)
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+    return spec, cfg, agent_dir, Bundle.load(bundle_path(agent_dir))
 
 
 def build_server() -> FastMCP:
@@ -161,6 +183,96 @@ def build_server() -> FastMCP:
                 {"type": e.type, "source": e.source, "ts": e.ts.isoformat(), "payload": e.payload}
                 for e in events
             ],
+        }
+
+    @mcp.tool()
+    async def zu_offline_run(agent: str) -> dict:
+        """Replay an agent against its captured ``fixtures/`` bundle — no model, no network,
+        ~$0. The agent must have a ``fixtures/capture.json`` (from ``zu capture``). Returns
+        the result and whether it succeeded — the cheap inner loop of construction."""
+        from .offline import OfflineError, replay_offline
+
+        try:
+            spec, cfg, _dir, bundle = _load_for_construction(agent)
+        except (ConfigError, OfflineError) as exc:
+            return {"ok": False, "error": str(exc)}
+        result, events = await replay_offline(spec, cfg, bundle)
+        return {
+            "ok": result.status.value == "success",
+            "status": result.status.value,
+            "value": result.value,
+            "reason": result.reason,
+            "events": len(events),
+        }
+
+    @mcp.tool()
+    async def zu_build(agent: str, min_resilience: float = 1.0) -> dict:
+        """Run the offline construction spine — build → record track → harden — at ~$0, and
+        write a hardened ``track.json`` next to the agent. Returns each stage's outcome, the
+        track path, and the resilience score. Needs a captured bundle."""
+        from .build import build_offline
+        from .offline import OfflineError
+
+        try:
+            spec, cfg, agent_dir, bundle = _load_for_construction(agent)
+        except (ConfigError, OfflineError) as exc:
+            return {"ok": False, "error": str(exc)}
+        report = await build_offline(spec, cfg, agent_dir, bundle, min_score=min_resilience)
+        return {
+            "ok": report.ok,
+            "stages": [{"name": s.name, "status": s.status, "detail": s.detail}
+                       for s in report.stages],
+            "track_path": report.track_path,
+            "resilience": report.harden.resilience if report.harden else None,
+        }
+
+    @mcp.tool()
+    async def zu_harden(agent: str) -> dict:
+        """Score how brittle a captured path is — replay perturbed fixtures offline (~$0).
+        Returns the resilience score (fraction of cosmetic page changes the path absorbs),
+        whether grounding is load-bearing (the score is only meaningful if value-deletion
+        controls fail), and the static brittleness findings to fix."""
+        from .harden import harden
+        from .offline import OfflineError
+
+        try:
+            spec, cfg, _dir, bundle = _load_for_construction(agent)
+        except (ConfigError, OfflineError) as exc:
+            return {"ok": False, "error": str(exc)}
+        hr = await harden(spec, cfg, bundle)
+        return {
+            "ok": True,
+            "resilience": hr.resilience,
+            "grounding_load_bearing": hr.grounding_load_bearing,
+            "findings": [{"kind": f.kind, "where": f.where, "detail": f.detail}
+                         for f in hr.findings],
+        }
+
+    @mcp.tool()
+    async def zu_construct(agent: str, min_resilience: float = 1.0) -> dict:
+        """The construction-readiness gate (one round, no model, ~$0): the offline build
+        plus the anti-hardcode guardrails (G1 alternate locators, G2 resilience, G3 no
+        hardcoded answer). Returns whether the agent is ready for promotion and, if not, the
+        violations to fix — the loop an autonomous agent drives: read the violations, edit
+        the agent, call again until ``ready`` is true. Never promotes (review gate G4)."""
+        from .build import build_offline
+        from .guardrails import enforce_guardrails
+        from .offline import OfflineError
+
+        try:
+            spec, cfg, agent_dir, bundle = _load_for_construction(agent)
+        except (ConfigError, OfflineError) as exc:
+            return {"ok": False, "error": str(exc)}
+        build = await build_offline(spec, cfg, agent_dir, bundle, min_score=min_resilience)
+        guards = await enforce_guardrails(
+            spec, cfg, bundle, agent_dir, min_resilience=min_resilience)
+        return {
+            "ok": True,
+            "ready": build.ok and guards.passed,
+            "build_ok": build.ok,
+            "guardrails_passed": guards.passed,
+            "resilience": guards.resilience,
+            "violations": [{"rule": v.rule, "detail": v.detail} for v in guards.violations],
         }
 
     @mcp.resource("zu://plugins")

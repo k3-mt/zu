@@ -7,12 +7,24 @@ scripted provider), so no harness, no key, and no network are needed.
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("mcp")
 
 from zu_cli.mcp_server import build_server  # noqa: E402
+
+_BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / "browser-widget"
+
+
+def _copy_widget(tmp_path) -> Path:
+    """A throwaway copy of the offline browser-widget example (without runtime artifacts a
+    local run leaves behind) — so construction tools can write track.json into it freely."""
+    d = tmp_path / "agent"
+    shutil.copytree(_BROWSER_WIDGET, d, ignore=shutil.ignore_patterns("track.json", "cost.jsonl"))
+    return d
 
 
 def _result(out) -> dict:
@@ -91,3 +103,55 @@ async def test_zu_run_reports_model_failure_cleanly(tmp_path):
     run = _result(await srv.call_tool("zu_run", {"task": task, "config": cfg}))
     assert run["ok"] is False
     assert "ZU_ABSENT_KEY" in run["error"]
+
+
+# --- the construction surface (offline, ~$0) ---------------------------------
+
+
+async def test_lists_construction_tools():
+    srv = build_server()
+    tools = {t.name for t in await srv.list_tools()}
+    assert {"zu_offline_run", "zu_build", "zu_harden", "zu_construct"} <= tools
+
+
+async def test_zu_offline_run_replays_the_bundle(tmp_path):
+    srv = build_server()
+    d = _copy_widget(tmp_path)
+    res = _result(await srv.call_tool("zu_offline_run", {"agent": str(d)}))
+    assert res["ok"] and res["status"] == "success"
+    assert res["value"] == {"name": "Acme Widget", "price": "$9.00"}
+
+
+async def test_zu_build_writes_track_and_scores(tmp_path):
+    srv = build_server()
+    d = _copy_widget(tmp_path)
+    res = _result(await srv.call_tool("zu_build", {"agent": str(d)}))
+    assert res["ok"]
+    assert [s["name"] for s in res["stages"]] == ["build", "track", "harden"]
+    assert res["track_path"] and (d / "track.json").is_file()
+    assert res["resilience"] == 1.0
+
+
+async def test_zu_harden_reports_resilience_and_grounding(tmp_path):
+    srv = build_server()
+    d = _copy_widget(tmp_path)
+    res = _result(await srv.call_tool("zu_harden", {"agent": str(d)}))
+    assert res["ok"] and res["resilience"] == 1.0
+    assert res["grounding_load_bearing"] is True
+
+
+async def test_zu_construct_gate_flags_single_selector(tmp_path):
+    srv = build_server()
+    d = _copy_widget(tmp_path)
+    res = _result(await srv.call_tool("zu_construct", {"agent": str(d)}))
+    # The minimal example trips G1 (a single-selector click), so it is not yet ready.
+    assert res["ok"] and res["ready"] is False
+    assert any(v["rule"] == "single-selector" for v in res["violations"])
+
+
+async def test_construction_tool_without_bundle_errors_cleanly(tmp_path):
+    srv = build_server()
+    (tmp_path / "agent.yaml").write_text(
+        (_BROWSER_WIDGET / "agent.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    res = _result(await srv.call_tool("zu_construct", {"agent": str(tmp_path)}))
+    assert res["ok"] is False and "zu capture" in res["error"]
