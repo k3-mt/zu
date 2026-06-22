@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import random
 import types
 from datetime import UTC, datetime, timedelta
 
-from zu_core.track import Track, TrackStep, record_track
+from zu_core.track import (
+    REPLAY_JITTER_MAX_MS,
+    Track,
+    TrackStep,
+    record_track,
+    replay_extra_delay_ms,
+)
 
 
 def _ev(type_, ts, **payload):
@@ -96,3 +103,52 @@ def test_matches_only_the_recorded_task() -> None:
     assert track.matches("find slots")
     assert not track.matches("something else")
     assert not Track(task="", steps=[]).matches("")   # empty task never matches
+
+
+# --- replay humanisation: upward-scaling random delays (run a track 0%→100%) ---
+
+
+def test_jitter_disabled_returns_zero() -> None:
+    rng = random.Random(0)
+    assert replay_extra_delay_ms(1.0, rng, max_extra_ms=0) == 0
+    assert replay_extra_delay_ms(1.0, rng, max_extra_ms=-100) == 0
+
+
+def test_jitter_zero_at_the_start_of_the_track() -> None:
+    # progress 0.0 → ceiling is 0 → no delay, however the rng is seeded
+    for seed in range(20):
+        assert replay_extra_delay_ms(0.0, random.Random(seed), max_extra_ms=5000) == 0
+
+
+def test_jitter_is_bounded_by_progress_times_max() -> None:
+    # at every progress p the delay stays within [0, max*p]
+    for p in (0.1, 0.25, 0.5, 0.75, 1.0):
+        for seed in range(50):
+            d = replay_extra_delay_ms(p, random.Random(seed), max_extra_ms=4000)
+            assert 0 <= d <= 4000 * p + 1  # +1 for the int() floor
+
+
+def test_jitter_ceiling_scales_upward_with_progress() -> None:
+    # The reachable ceiling grows with progress: sampling many seeds, the max delay
+    # seen near 100% far exceeds the max seen near the start.
+    def max_seen(p: float) -> int:
+        return max(replay_extra_delay_ms(p, random.Random(s), max_extra_ms=4000)
+                   for s in range(200))
+
+    early, mid, late = max_seen(0.1), max_seen(0.5), max_seen(1.0)
+    assert early < mid < late
+    assert late > 3000  # near 100% it approaches the full max
+
+
+def test_jitter_is_deterministic_for_a_seed() -> None:
+    # Same seeded rng → same sequence of delays across the track (a run replays
+    # with identical pacing).
+    def sequence() -> list[int]:
+        rng = random.Random("run-42")
+        return [replay_extra_delay_ms(i / 9, rng, max_extra_ms=2000) for i in range(10)]
+
+    assert sequence() == sequence()
+
+
+def test_default_max_constant_is_positive() -> None:
+    assert REPLAY_JITTER_MAX_MS > 0

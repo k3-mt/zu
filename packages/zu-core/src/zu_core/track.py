@@ -17,6 +17,7 @@ lives in the loop, where tool dispatch already is.
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,32 @@ from typing import Any
 # replayed click doesn't race a page that the model (by thinking) implicitly let
 # settle. So a recorded gap is capped to this on replay.
 MAX_REPLAY_WAIT_MS = 3000
+
+# Replay humanisation. A track driven at machine cadence — every step fired the
+# instant the last returned — is a tell: real use has growing, irregular pauses.
+# So, when running a track from 0% to 100%, add a RANDOM extra delay to each step
+# whose ceiling scales UPWARD with progress: the start is near-instant, the tail
+# is the most deliberate. This is the same realism move as the seeded pointer
+# path (§12) — bounded and seeded, so a run is reproducible and tested at $0.
+# The most extra delay any single step adds, reached as progress nears 100%.
+REPLAY_JITTER_MAX_MS = 1500
+
+
+def replay_extra_delay_ms(
+    progress: float, rng: random.Random, *, max_extra_ms: int = REPLAY_JITTER_MAX_MS
+) -> int:
+    """Extra delay (ms) to add before a replayed step, scaling upward with
+    ``progress`` (0.0 at the first step, 1.0 at the last) with seeded randomness.
+
+    At progress ``p`` the delay is uniform in ``[0, max_extra_ms * p]`` — so early
+    steps add ~nothing and late steps add up to ``max_extra_ms``. Pure and
+    deterministic in ``(progress, rng state)``: feed a seeded ``random.Random`` and
+    the same run replays with the same pacing. ``max_extra_ms <= 0`` disables it
+    (returns 0), which is how offline iteration and tests stay instant."""
+    if max_extra_ms <= 0:
+        return 0
+    p = min(1.0, max(0.0, progress))
+    return int(rng.uniform(0.0, max_extra_ms * p))
 
 
 @dataclass
