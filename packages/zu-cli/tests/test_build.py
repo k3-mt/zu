@@ -17,7 +17,10 @@ _BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / 
 
 def _copy_agent(tmp_path: Path) -> Path:
     dst = tmp_path / "agent"
-    shutil.copytree(_BROWSER_WIDGET, dst)
+    # Exclude runtime artifacts a local `zu run --offline`/`zu build` on the example
+    # leaves behind (both gitignored): copying them in would seed the temp agent with a
+    # stray track.json/cost.jsonl and break the "no track from a failed build" assertion.
+    shutil.copytree(_BROWSER_WIDGET, dst, ignore=shutil.ignore_patterns("track.json", "cost.jsonl"))
     return dst
 
 

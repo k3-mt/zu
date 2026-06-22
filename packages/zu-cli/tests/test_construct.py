@@ -28,7 +28,9 @@ _BROWSER_WIDGET = Path(__file__).resolve().parents[3] / "examples" / "agents" / 
 
 def _copy_agent(tmp_path: Path) -> Path:
     d = tmp_path / "agent"
-    shutil.copytree(_BROWSER_WIDGET, d)
+    # Skip runtime artifacts (gitignored track.json/cost.jsonl) a local run leaves in the
+    # example dir, so copying it never seeds the temp agent with stray state.
+    shutil.copytree(_BROWSER_WIDGET, d, ignore=shutil.ignore_patterns("track.json", "cost.jsonl"))
     return d
 
 

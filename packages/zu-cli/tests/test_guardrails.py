@@ -44,7 +44,7 @@ async def test_g1_single_selector_violation_on_minimal_example() -> None:
 
 async def test_guardrails_pass_with_alternate_locators(tmp_path: Path) -> None:
     d = tmp_path / "agent"
-    shutil.copytree(_BROWSER_WIDGET, d)
+    shutil.copytree(_BROWSER_WIDGET, d, ignore=shutil.ignore_patterns("track.json", "cost.jsonl"))
     spec, cfg = load_agent(str(d / "agent.yaml"))
     report = await enforce_guardrails(spec, cfg, _with_alternate_locators(_bundle()), d)
 
@@ -54,7 +54,7 @@ async def test_guardrails_pass_with_alternate_locators(tmp_path: Path) -> None:
 async def test_g3_hardcoded_answer_violation(tmp_path: Path) -> None:
     # An agent.yaml that embeds a captured answer value verbatim must be refused.
     d = tmp_path / "agent"
-    shutil.copytree(_BROWSER_WIDGET, d)
+    shutil.copytree(_BROWSER_WIDGET, d, ignore=shutil.ignore_patterns("track.json", "cost.jsonl"))
     (d / "agent.yaml").write_text(
         (d / "agent.yaml").read_text(encoding="utf-8") + '\n# cached answer: "$9.00"\n',
         encoding="utf-8")
@@ -69,7 +69,7 @@ async def test_g3_hardcoded_answer_violation(tmp_path: Path) -> None:
 async def test_g2_resilience_threshold_violation(tmp_path: Path) -> None:
     # An unreachable required resilience trips G2 (with G1 cleared so only G2 shows).
     d = tmp_path / "agent"
-    shutil.copytree(_BROWSER_WIDGET, d)
+    shutil.copytree(_BROWSER_WIDGET, d, ignore=shutil.ignore_patterns("track.json", "cost.jsonl"))
     spec, cfg = load_agent(str(d / "agent.yaml"))
 
     report = await enforce_guardrails(
