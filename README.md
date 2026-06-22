@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/zu-runtime/"><img alt="PyPI" src="https://img.shields.io/pypi/v/zu-runtime.svg"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
   <img alt="Tests passing" src="https://img.shields.io/badge/tests-passing-brightgreen.svg">
@@ -242,6 +243,7 @@ Architecture, philosophy, and red-team deep-dives are published separately. In t
 - [`AGENTS.md`](AGENTS.md) — how to navigate and extend this repo (for AI agents and new humans)
 - [`CLAUDE.md`](CLAUDE.md) — quick orientation for coding agents working in this repo
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up from a clone (`uv sync`), test, and submit changes
+- [`RELEASING.md`](RELEASING.md) — publish to PyPI (Trusted-Publishing setup + cutting a release)
 
 ## License
 
