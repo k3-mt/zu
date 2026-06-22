@@ -32,6 +32,7 @@ GROUPS = {
     "validators": "zu.validators",
     "backends": "zu.backends",
     "sinks": "zu.sinks",
+    "policies": "zu.policies",
 }
 
 
@@ -163,3 +164,4 @@ validator = _deco("validators")
 provider = _deco("providers")
 backend = _deco("backends")
 sink = _deco("sinks")
+policy = _deco("policies")
