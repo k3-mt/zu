@@ -4,6 +4,10 @@ Thanks for considering a contribution. Zu is built in the open, one small,
 testable step at a time. The bar for a change is simple: **the offline test
 suite stays green, mypy stays clean, and ruff stays clean.**
 
+Questions, ideas, or want to talk a change through before you build it? Join us on
+**[Discord](https://discord.gg/zRVHsjKv)** or open a
+[GitHub Discussion](https://github.com/k3-mt/zu/discussions) — both are good first stops.
+
 ## Setup
 
 Zu is a [uv](https://docs.astral.sh/uv/) workspace of small packages. One clone,
