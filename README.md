@@ -103,19 +103,27 @@ with zero setup. What remains is breadth behind the existing ports, not new core
 
 ## 🚀 Quickstart
 
-A lean base, plugins opt-in (dbt-style):
+New here? One line gets you everything:
 
 ```bash
-pip install zu-runtime            # base: core + CLI + import zu + provider adapters,
-                                  #       detectors, validators, sqlite event sink
-pip install 'zu-runtime[web]'     # + web tools (http_fetch, html_parse, render_dom)
-pip install 'zu-runtime[anthropic]'   # + Anthropic SDK     (also: [openai])
-pip install 'zu-runtime[serve]'       # + HTTP server (zu serve)
-pip install 'zu-runtime[all]'         # everything (web + both SDKs + server + Docker)
+pip install 'zu-runtime[all]'     # web tools, both model SDKs, server, Docker, MCP
 ```
 
-Each plugin is also a standalone package (`pip install zu-tools`, `zu-providers`, …),
-the way dbt ships adapters. `zu plugins` lists whatever you've installed.
+Or trim to what you need — a lean base, the heavy bits opt-in (dbt-style):
+
+```bash
+pip install zu-runtime                # base: import zu + the `zu` CLI + web tools
+                                      #   (http_fetch/html_parse/render_dom) + provider
+                                      #   adapters, detectors, validators, sqlite sink
+pip install 'zu-runtime[anthropic]'   # + the Anthropic SDK to call a real model (also: [openai])
+pip install 'zu-runtime[serve]'       # + the HTTP server (zu serve)
+pip install 'zu-runtime[docker]'      # + the Docker sandbox (tier-2 browser containment)
+pip install 'zu-runtime[mcp]'         # + the MCP server (zu mcp)
+```
+
+You almost never install the `zu-*` sub-packages individually — they're published standalone
+so *plugin authors* can depend on just `zu-core` (the dbt-adapter pattern). As a user, install
+`zu-runtime` (+ extras); `zu plugins` lists whatever you have.
 
 Prove it runs — `zu demo` runs against a **real model** (that's the point: prove
 runnability, not just wired logic):

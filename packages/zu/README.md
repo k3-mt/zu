@@ -3,20 +3,25 @@
 **An opinionated, backend-agnostic runtime for agents that work in production** —
 deterministic, auditable, and injection-resistant by construction.
 
-A lean base, plugins opt-in (dbt-style). `pip install zu-runtime` gives you
-`import zu`, the `zu` command, the model-provider adapters, detectors,
-validators, and a SQLite event sink. Add what you need:
+New here? One line:
 
 ```bash
-pip install zu-runtime              # runnable base
-pip install 'zu-runtime[web]'       # + web tools (http_fetch, html_parse, render_dom)
-pip install 'zu-runtime[anthropic]' # + Anthropic SDK     (also: [openai])
-pip install 'zu-runtime[serve]'     # + HTTP server (zu serve)
-pip install 'zu-runtime[all]'       # everything (web + both SDKs + server + Docker)
+pip install 'zu-runtime[all]'       # everything: web tools, both model SDKs, server, Docker, MCP
 ```
 
-Each plugin is also a standalone package (`pip install zu-tools`, …), the way
-dbt ships adapters.
+Prefer a lean install (dbt-style)? `pip install zu-runtime` gives you `import zu`, the `zu`
+command, the **web tools** (http_fetch/html_parse/render_dom), the model-provider adapters,
+detectors, validators, and a SQLite event sink. Add the heavy/situational bits as extras:
+
+```bash
+pip install 'zu-runtime[anthropic]' # + the Anthropic SDK to call a real model (also: [openai])
+pip install 'zu-runtime[serve]'     # + the HTTP server (zu serve)
+pip install 'zu-runtime[docker]'    # + the Docker sandbox (tier-2 browser)
+pip install 'zu-runtime[mcp]'       # + the MCP server (zu mcp)
+```
+
+The `zu-*` packages are also standalone on PyPI, but you rarely install them individually —
+that's for plugin authors depending on just `zu-core` (the dbt-adapter pattern).
 
 ## Embed it
 

@@ -16,25 +16,24 @@ classifiers = [
 ]
 readme = "README.md"
 keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", "event-sourcing"]
-# The minimal-runnable base (dbt-core style): `import zu`, the `zu` command, and
-# the lightweight plugins — model-provider adapters, detectors, validators, and
-# the sqlite event sink. Everything domain-specific or heavy is opt-in below.
-# The web tools, the real model SDKs, the HTTP server, and the Docker sandbox
-# are each an extra; every plugin is also installable standalone (pip install
-# zu-tools, …) for the ecosystem.
+# The runnable base (dbt-core style): `import zu`, the `zu` command, the web tools
+# (http_fetch/html_parse/render_dom — the common case, so they ship in the base), the
+# model-provider adapters, detectors, validators, and the sqlite event sink. The
+# heavy/situational bits below are opt-in extras (the real model SDKs, the HTTP server,
+# the Docker sandbox, MCP); every plugin is also installable standalone (pip install
+# zu-tools, …) so a plugin author can depend on just what they need (the ecosystem).
 dependencies = [
     "zu-cli==0.1.0",
     "zu-providers==0.1.0",
     "zu-checks==0.1.0",
     "zu-backends==0.1.0",
+    "zu-tools==0.1.0",       # web tools — the common case, so it ships in the base
 ]
 
 [project.optional-dependencies]
-# Web tools: http_fetch, html_parse, render_dom (the browser tier). Needed for
-# the killer demo and any web-extraction task.
+# The web tools now ship in the BASE; [web]/[demo] remain as no-op back-compat
+# aliases so an existing `pip install 'zu-runtime[web]'` / `[demo]` still resolves.
 web = ["zu-tools==0.1.0"]
-# Alias for [web], so the docs can say one clean thing: `pip install
-# 'zu-runtime[demo]'` then `zu demo` (the escalation demo uses the web tools).
 demo = ["zu-tools==0.1.0"]
 # Real model SDKs (the adapters ship in the base; these add the vendor client).
 anthropic = ["zu-providers[anthropic]==0.1.0"]
