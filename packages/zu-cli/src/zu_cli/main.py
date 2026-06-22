@@ -67,6 +67,75 @@ def _append_cost_ledger(path: str, *, agent: str, status: str, replayed: bool, s
         pass
 
 
+def _emit_gap_report(report, agent_dir, *, create: bool) -> bool:
+    """Write ``gap-report.md`` next to the agent, then either file the issue via ``gh`` or
+    print the ready command. gh is invoked with an explicit argv (``shell=False``) — the
+    title embeds a user-controlled agent path, so a string is never handed to a shell.
+    Returns False only when an attempted gh create failed. Shared by the failure offer
+    and the ``report-gap`` command."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from .contribute import GAP_LABEL, ZU_REPO
+
+    out = Path(agent_dir) / "gap-report.md"
+    out.write_text(report.body, encoding="utf-8")
+    typer.echo(f"wrote  : {out}")
+    if not report.has_repro:
+        typer.echo("note   : no fixtures/ bundle — capture one (`zu capture`) so the gap is replayable.")
+    if not create:
+        typer.echo(f"file it: {report.gh_command(str(out))}")
+        return True
+    if not shutil.which("gh"):
+        typer.echo(f"gh not found; file manually:\n  {report.gh_command(str(out))}", err=True)
+        return False
+    cmd = ["gh", "issue", "create", "--repo", ZU_REPO, "--label", GAP_LABEL,
+           "--title", report.title, "--body-file", str(out)]
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        typer.echo(proc.stdout.strip() or "issue created")
+        return True
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        typer.echo(f"gh failed: {detail.strip()}; file manually:\n  {report.gh_command(str(out))}", err=True)
+        return False
+
+
+def _offer_gap_report(agent: str, result: Result) -> None:
+    """A failed run is a candidate capability gap. On an interactive terminal, offer to
+    file one (reusing ``build_gap_report``); in CI / non-TTY, print a one-line hint and
+    return without prompting — the CLI must never block a scripted or scheduled run."""
+    import shutil
+    import sys
+    from pathlib import Path
+
+    from .contribute import build_gap_report
+
+    observed = result.reason or result.status.value
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo(
+            f'hint   : file this as a capability gap → zu report-gap --agent {agent} '
+            f'--summary "<what you were building>" --observed {observed!r}',
+            err=True,
+        )
+        return
+
+    if not typer.confirm("\nThis run did not succeed. File a capability-gap issue?", default=False):
+        return
+
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+    report = build_gap_report(
+        agent_dir,
+        summary=f"`zu run {agent}` ended in {result.status.value}",
+        expected="the run to succeed",
+        observed=observed,
+    )
+    create = bool(shutil.which("gh")) and typer.confirm("Create it on GitHub now via gh?", default=False)
+    _emit_gap_report(report, agent_dir, create=create)
+
+
 def _execute_once(
     agent: str, *, stream: bool = True, use_track: bool = True, offline: bool = False
 ) -> Result:
@@ -349,6 +418,7 @@ def run(
             typer.echo(f"config error: {exc}", err=True)
             raise typer.Exit(code=2) from None
         if result.status is not Status.SUCCESS:
+            _offer_gap_report(agent, result)
             raise typer.Exit(code=1) from None
         return
 
@@ -372,6 +442,49 @@ def run(
         if max_runs and n >= max_runs:
             break
         time.sleep(interval)
+
+
+@app.command("report-gap")
+def report_gap(
+    summary: str = typer.Option(
+        ..., "--summary", help="One line: what you were building when zu hit the wall."
+    ),
+    observed: str = typer.Option(
+        ..., "--observed", help="What zu actually did — the gap."
+    ),
+    agent: str = typer.Option(
+        "agent.yaml", "--agent", help="The agent (agent.yaml or a bundle dir) whose run hit the gap."
+    ),
+    expected: str = typer.Option(
+        "the run to succeed", "--expected", help="What you expected zu to do."
+    ),
+    proposed: str = typer.Option(
+        None, "--proposed",
+        help="Optional: the smallest GENERIC primitive that would close the gap.",
+    ),
+    create: bool = typer.Option(
+        False, "--create/--no-create",
+        help="File the issue now via gh (needs gh installed + authed). Default: print the command.",
+    ),
+) -> None:
+    """Turn a capability gap into a strong, reproducible GitHub issue — the CLI twin of the
+    ``zu_report_gap`` MCP tool.
+
+    Embeds the agent's config and points at its ``fixtures/`` bundle (replayed with
+    ``zu run --offline``), writes ``gap-report.md`` next to the agent, and prints a ready
+    ``gh issue create`` — or files it with --create.
+    """
+    from pathlib import Path
+
+    from .contribute import build_gap_report
+
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+    report = build_gap_report(
+        agent_dir, summary=summary, expected=expected, observed=observed, proposed=proposed
+    )
+    if not _emit_gap_report(report, agent_dir, create=create):
+        raise typer.Exit(code=1)
 
 
 @app.command()

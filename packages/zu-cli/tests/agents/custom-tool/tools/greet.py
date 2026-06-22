@@ -17,8 +17,8 @@ class Greet:
         },
     }
     prompt_fragment = "greet(name): return a greeting for a name."
-    capabilities = frozenset()   # pure CPU — no network, no filesystem
-    egress = frozenset()
+    capabilities: frozenset[str] = frozenset()   # pure CPU — no network, no filesystem
+    egress: frozenset[str] = frozenset()
 
     async def __call__(self, ctx, name: str) -> dict:
         return {"text": f"Hello, {name}!"}
