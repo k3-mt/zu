@@ -1,9 +1,22 @@
-<h1 align="center">Zu</h1>
+<h1 align="center">🦓 Zu</h1>
 
 <p align="center">
   <b>An opinionated, backend-agnostic runtime for agents that work in production.</b><br>
   Deterministic, auditable, and injection-resistant by construction — bring your own sandbox.
 </p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
+  <img alt="Tests passing" src="https://img.shields.io/badge/tests-passing-brightgreen.svg">
+  <img alt="mypy clean" src="https://img.shields.io/badge/mypy-clean-brightgreen.svg">
+</p>
+
+<p align="center"><i>a pack of agents — escalation by image swap, not improvisation</i></p>
+
+<!-- ▶ Hero demo: record `zu demo --offline --type escalation` (e.g. with vhs / asciinema),
+     save it to docs/assets/zu-demo.gif, then uncomment the line below for an animated hero. -->
+<!-- <p align="center"><img src="docs/assets/zu-demo.gif" alt="Zu: fetch → fail-on-JS → escalate → validated result" width="760"></p> -->
 
 ---
 
@@ -88,7 +101,7 @@ wires a whole run from a file, the model a one-line swap), and the **killer
 demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
 with zero setup. What remains is breadth behind the existing ports, not new core.
 
-## Quickstart
+## 🚀 Quickstart
 
 A lean base, plugins opt-in (dbt-style):
 
@@ -188,7 +201,7 @@ pillars in one run, deterministic with the fake model and saved fixtures. Drop
 `--offline` and add `--model claude-sonnet-4-6` (with a key) to watch a real model
 make the same escalation decision.
 
-## Architecture in one breath
+## 🏗️ Architecture in one breath
 
 A tiny, stable **core** (`zu-core`: contracts, ports, registry, loop, bus) depends
 only on the standard library and Pydantic — it physically cannot import a model SDK.
