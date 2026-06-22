@@ -1,6 +1,6 @@
 {
   "task": "Triage a capability gap reported against zu (offline replay fixture — proves the agent wiring + schema validator at $0).",
-  "model": "claude-sonnet-4-6",
+  "model": "offline-replay",
   "moves": [
     {
       "text": "{\"is_capability_gap\": true, \"root_cause\": \"The runtime lacks a generic primitive for the reported operation, so the agent cannot complete the task without a site-specific hardcode.\", \"proposed_capability\": \"Add a generic tool/detector behind the relevant zu_core.ports Protocol that exposes the missing primitive for the model to reason over — never a hardcoded constant.\", \"investigation_steps\": [\"Replay the attached bundle: zu run <agent> --offline\", \"Locate the missing primitive in zu_core.ports\", \"Add an adapter behind the port plus a scripted offline test\"], \"confidence\": \"medium\"}",

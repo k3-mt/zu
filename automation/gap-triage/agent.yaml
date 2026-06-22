@@ -16,9 +16,15 @@
 #   zu run automation/gap-triage/ --offline
 
 provider:
-  name: anthropic
-  model: claude-sonnet-4-6
-  api_key_env: ANTHROPIC_API_KEY      # consumed by the adapter; never put in the prompt
+  # Vendor-NEUTRAL by design (zu's whole premise): the operator points this at any
+  # OpenAI-compatible endpoint — OpenAI, OpenRouter, a local vLLM/Ollama, an
+  # Anthropic-compatible gateway, anything. No vendor is named or assumed.
+  name: openai-compatible
+  api_key_env: ZU_MODEL_API_KEY       # just a key — generic; consumed by the adapter, never in the prompt
+  base_url_env: ZU_MODEL_BASE_URL     # optional: your endpoint (adapter default used if unset)
+  # Placeholder so the agent constructs for offline replay; the workflow OVERRIDES it with
+  # the operator's real model id from the ZU_MODEL env var at render (see gap_triage.render_agent).
+  model: set-via-ZU_MODEL
 
 tiers:
   1: [recall]                         # reasoning + recall ONLY. No http_fetch/browser/render_dom.
