@@ -1,6 +1,6 @@
 [project]
 name = "zu-runtime"
-version = "0.1.0"
+version = "0.2.0"
 description = "An opinionated, backend-agnostic runtime for agents that work in production — deterministic, auditable, injection-resistant. Import as `zu`."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -23,39 +23,39 @@ keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", 
 # the Docker sandbox, MCP); every plugin is also installable standalone (pip install
 # zu-tools, …) so a plugin author can depend on just what they need (the ecosystem).
 dependencies = [
-    "zu-cli==0.1.0",
-    "zu-providers==0.1.0",
-    "zu-checks==0.1.0",
-    "zu-backends==0.1.0",
-    "zu-tools==0.1.0",       # web tools — the common case, so it ships in the base
+    "zu-cli==0.2.0",
+    "zu-providers==0.2.0",
+    "zu-checks==0.2.0",
+    "zu-backends==0.2.0",
+    "zu-tools==0.2.0",       # web tools — the common case, so it ships in the base
 ]
 
 [project.optional-dependencies]
 # The web tools now ship in the BASE; [web]/[demo] remain as no-op back-compat
 # aliases so an existing `pip install 'zu-runtime[web]'` / `[demo]` still resolves.
-web = ["zu-tools==0.1.0"]
-demo = ["zu-tools==0.1.0"]
+web = ["zu-tools==0.2.0"]
+demo = ["zu-tools==0.2.0"]
 # Real model SDKs (the adapters ship in the base; these add the vendor client).
-anthropic = ["zu-providers[anthropic]==0.1.0"]
-openai = ["zu-providers[openai]==0.1.0"]
+anthropic = ["zu-providers[anthropic]==0.2.0"]
+openai = ["zu-providers[openai]==0.2.0"]
 # The HTTP server (`zu serve`) and the Docker sandbox client (tier-2 browser).
-serve = ["zu-cli[serve]==0.1.0"]
-docker = ["zu-backends[docker]==0.1.0"]
+serve = ["zu-cli[serve]==0.2.0"]
+docker = ["zu-backends[docker]==0.2.0"]
 # The MCP server (`zu mcp`) — integrate with coding agents (Claude Code, Cursor).
-mcp = ["zu-cli[mcp]==0.1.0"]
+mcp = ["zu-cli[mcp]==0.2.0"]
 # The plugin-test gate + adversarial red team (`zu test-plugin`) — a contributor
 # / CI tool for proving a plugin cooperates and withstands attack.
-test = ["zu-cli[test]==0.1.0"]
+test = ["zu-cli[test]==0.2.0"]
 # Everything: web tools, both model SDKs, the server, the Docker sandbox, MCP,
 # and the test gate.
 all = [
-    "zu-tools==0.1.0",
-    "zu-providers[anthropic]==0.1.0",
-    "zu-providers[openai]==0.1.0",
-    "zu-cli[serve]==0.1.0",
-    "zu-cli[mcp]==0.1.0",
-    "zu-cli[test]==0.1.0",
-    "zu-backends[docker]==0.1.0",
+    "zu-tools==0.2.0",
+    "zu-providers[anthropic]==0.2.0",
+    "zu-providers[openai]==0.2.0",
+    "zu-cli[serve]==0.2.0",
+    "zu-cli[mcp]==0.2.0",
+    "zu-cli[test]==0.2.0",
+    "zu-backends[docker]==0.2.0",
 ]
 
 [project.urls]
