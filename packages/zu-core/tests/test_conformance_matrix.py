@@ -36,6 +36,11 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-EXT-2": ("docs/TCB.md", None),
     "ZU-EXT-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
     "ZU-EXT-4": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),
+    # ZU-RAIL — the rail mechanisms a delegated-action consumer needs.
+    "ZU-RAIL-1": ("packages/zu-core/tests/test_rail.py", "test_unapproved_rail_is_refused_before_any_step"),
+    "ZU-RAIL-2": ("packages/zu-core/tests/test_rail.py", "test_explore_mode_disarms_capability_bearing_call"),
+    "ZU-RAIL-3": ("packages/zu-core/tests/test_rail.py", "test_arbiter_escalates_high_step_to_human"),
+    "ZU-RAIL-4": ("packages/zu-core/tests/test_rail.py", "test_annotations_reach_the_replayed_tool_invoked_ctx"),
 }
 
 
@@ -53,4 +58,4 @@ def test_every_requirement_has_a_proof() -> None:
 
 def test_matrix_covers_all_requirement_families() -> None:
     families = {req.rsplit("-", 1)[0] for req in MATRIX}
-    assert families == {"ZU-CORE", "ZU-NET", "ZU-CD", "ZU-AUDIT", "ZU-EXT"}
+    assert families == {"ZU-CORE", "ZU-NET", "ZU-CD", "ZU-AUDIT", "ZU-EXT", "ZU-RAIL"}

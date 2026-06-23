@@ -44,6 +44,7 @@ GROUPS = {
     "channels": "zu.channels",
     "workload_identity": "zu.workload_identity",
     "egress_enforcement": "zu.egress_enforcement",
+    "replay_arbiters": "zu.replay_arbiters",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind
@@ -265,3 +266,4 @@ policy = kind_decorator("policies")
 trigger = kind_decorator("triggers")
 gate = kind_decorator("gates")
 channel = kind_decorator("channels")
+arbiter = kind_decorator("replay_arbiters")

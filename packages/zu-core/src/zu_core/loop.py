@@ -43,6 +43,7 @@ from .ports import (
     Finish,
     ModelProvider,
     ModelRequest,
+    ReplayDecision,
     RunContext,
     Scope,
     Severity,
@@ -52,7 +53,7 @@ from .ports import (
 )
 from .registry import REGISTRY, Registry
 from .security import SecurityBlock, _needs_containment, enforce_containment
-from .track import MAX_REPLAY_WAIT_MS, Track, replay_extra_delay_ms
+from .track import MAX_REPLAY_WAIT_MS, Track, TrackStep, replay_extra_delay_ms
 
 log = logging.getLogger("zu.loop")
 
@@ -511,6 +512,9 @@ class _Run:
         # Run-level taint (ZU-CD-3): seeded from the spec (a caller folding hostile
         # trigger input sets ``spec.tainted``); a tool can also flip it mid-run.
         self.tainted: bool = bool(getattr(spec, "tainted", False))
+        # Run mode (ZU-RAIL-2): "execute" (default) or "explore". In explore the
+        # loop disarms capability-bearing tool calls (stub instead of execute).
+        self.mode: str = str(getattr(spec, "mode", "execute") or "execute")
         # Durable per-grant state (ZU-CD-4): the injected store or the in-memory
         # default (a cache over ``harness.grant.updated`` events).
         self.grant_state: Any = grants if grants is not None else InMemoryGrantStore()
@@ -529,6 +533,7 @@ class _Run:
         self._ctx.events = _EventsView(self.events)
         self._ctx.grants = self.grant_state
         self._ctx.tainted = self.tainted
+        self._ctx.mode = self.mode
         self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
 
     async def emit(
@@ -548,18 +553,21 @@ class _Run:
         return event.event_id
 
     def ctx(
-        self, observation: Any = None, *, invocation: Any = None, idempotency_key: str | None = None
+        self, observation: Any = None, *, invocation: Any = None,
+        idempotency_key: str | None = None, annotations: dict | None = None,
     ) -> RunContext:
         # Reuse the single context object; just point it at the current
         # observation. Detectors/validators read it as a read-only view. The gate
-        # receives the pending ``invocation``; a tool receives its
-        # ``idempotency_key``. Both reset to None outside their checkpoint so they
-        # never leak across calls; ``tainted`` is refreshed so a mid-run flip is
-        # visible at the gate.
+        # receives the pending ``invocation`` and the rail step's ``annotations``
+        # (ZU-RAIL-4); a tool receives its ``idempotency_key``. All reset to None
+        # outside their checkpoint so they never leak across calls; ``tainted`` and
+        # ``mode`` are refreshed so a mid-run flip is visible at the gate.
         self._ctx.observation = observation
         self._ctx.invocation = invocation
         self._ctx.idempotency_key = idempotency_key
+        self._ctx.annotations = annotations
         self._ctx.tainted = self.tainted
+        self._ctx.mode = self.mode
         return self._ctx
 
     def raise_taint(self, source: str, detail: str | None = None) -> bool:
@@ -646,16 +654,64 @@ async def _replay_climb_to(run: _Run, ladder: _Ladder, tools: dict, step: Any) -
     )
 
 
+_REPLAY_DECISION_RANK = {
+    ReplayDecision.CONTINUE: 0,
+    ReplayDecision.HANDOFF: 1,
+    ReplayDecision.ESCALATE: 2,
+    ReplayDecision.STOP: 3,
+}
+
+
+def _step_annotations(step: TrackStep) -> dict | None:
+    """The rail step's blessed annotations (ZU-RAIL-4) as a ctx dict, or None."""
+    ann: dict = {}
+    if step.consequence is not None:
+        ann["consequence"] = step.consequence
+    if step.destination is not None:
+        ann["destination"] = step.destination
+    return ann or None
+
+
+def _arbitrate(arbiters: list | tuple, step: TrackStep, observation: Any, ctx: RunContext) -> ReplayDecision:
+    """Ask every ReplayArbiter and take the *strongest* decision (STOP > ESCALATE >
+    HANDOFF > CONTINUE). A raising arbiter is isolated (logged, treated as CONTINUE)
+    so a buggy arbiter cannot crash a replay — its job is to *raise* the bar, never
+    to be load-bearing for safety on its own."""
+    worst = ReplayDecision.CONTINUE
+    for a in arbiters:
+        try:
+            d = a.decide(step, observation, ctx)
+        except Exception as exc:  # noqa: BLE001 - a broken arbiter must not crash replay
+            log.warning("replay arbiter %r raised %s: %s", getattr(a, "name", a),
+                        type(exc).__name__, exc)
+            continue
+        if _REPLAY_DECISION_RANK.get(d, 0) > _REPLAY_DECISION_RANK[worst]:
+            worst = d
+    return worst
+
+
 async def _replay_track(
     run: _Run, track: Track, tools: dict, messages: list[dict], ladder: _Ladder, *,
     wall_time_s: float, start: float, max_observation_chars: int | None,
     jitter_median_ms: int = 0, gates: list | tuple = (),
-) -> bool:
+    arbiters: list | tuple = (), tokens: int = 0,
+) -> tuple[bool, Result | None]:
     """Drive the recorded path deterministically — re-issue each tool call in order,
     with NO model call — appending the same assistant/tool message pair the loop
-    would, so the model has consistent history if it takes over. Stops (returning
-    True) at the first challenge; returns False when the whole track replayed. Paced
-    by the recorded gaps (capped), and bounded by the run's wall-time.
+    would, so the model has consistent history if it takes over. Returns
+    ``(diverged, result)``: ``diverged=True`` hands the frontier to the model;
+    ``result`` is set (and returned by ``run_task`` immediately) when a
+    ``ReplayArbiter`` paused for a human or stopped the run. Paced by the recorded
+    gaps (capped), and bounded by the run's wall-time.
+
+    **The replay-divergence arbiter (ZU-RAIL-3):** before issuing each step, every
+    registered arbiter is shown the recorded ``step`` and the *prior* step's live
+    observation (the page state the step is about to act on) and returns
+    CONTINUE / HANDOFF / ESCALATE / STOP. ESCALATE pauses for a HUMAN (reusing the
+    ZU-CD-1/2/5 pause/resume — the step becomes the pending, human-approved
+    invocation), STOP ends the run, HANDOFF gives the frontier to the model (Zu's
+    existing default), CONTINUE proceeds on rails. With **no** arbiter registered,
+    the existing challenge/soft-miss → hand-to-model behaviour below is unchanged.
 
     ``jitter_median_ms`` humanises the pacing of a live run: the recorded gap is the
     absolute floor and each step adds a stationary, heavy-tailed (log-normal) extra
@@ -675,13 +731,34 @@ async def _replay_track(
     NOT end replay: the path is still on track. Only a RUN of consecutive soft misses
     (``_REPLAY_MAX_SOFT_MISSES``) means the page really diverged — then hand off."""
     soft_streak = 0
+    last_obs: Any = None  # the prior step's observation — the page the next step acts on
     # Seeded from the run's trace_id so the humanised pacing is reproducible for a
     # given run (and a fixed trace_id in tests), varied across runs.
     jitter_rng = random.Random(str(run.trace_id))
     for i, step in enumerate(track.steps):
         if wall_time_s - (time.monotonic() - start) <= 0:
-            return True  # out of time; let the model loop end the run cleanly
+            return True, None  # out of time; let the model loop end the run cleanly
         await _replay_climb_to(run, ladder, tools, step)
+        # Replay-divergence arbitration (ZU-RAIL-3): consult BEFORE issuing the
+        # step, on the prior observation, so an ESCALATE pauses for a human BEFORE a
+        # consequential action runs (and resume executes that exact approved step).
+        annotations = _step_annotations(step)
+        if arbiters:
+            decision = _arbitrate(arbiters, step, last_obs, run.ctx(observation=last_obs, annotations=annotations))
+            if decision is ReplayDecision.STOP:
+                return False, await run.terminal("replay.arbiter.stop")
+            if decision is ReplayDecision.ESCALATE:
+                idem = str(uuid5(
+                    run.trace_id, f"replay:{i}:{step.tool}:{json.dumps(step.args, sort_keys=True, default=str)}"))
+                verdict = Verdict(severity=Severity.ESCALATE, detector="replay_arbiter",
+                                  detail="consequential replay divergence", kind="human")
+                result = await _pause_for_human(
+                    run, ladder, tokens, i, ToolCall(name=step.tool, args=step.args), verdict, idem,
+                    annotations=annotations)
+                return False, result
+            if decision is ReplayDecision.HANDOFF:
+                return True, None  # arbiter hands the frontier to the model
+            # CONTINUE: proceed on rails.
         if jitter_median_ms > 0:
             # Live run: the recorded gap is the absolute FLOOR (honoured in full),
             # plus a stationary, heavy-tailed extra — most steps a little, the
@@ -696,7 +773,8 @@ async def _replay_track(
         turn = await run.emit(ev.TURN_STARTED, {"step": i + 1, "replay": True}, parent=run.root)
         remaining = max(0.0, wall_time_s - (time.monotonic() - start))
         try:
-            obs = await _invoke(run, turn, tools, step.tool, step.args, gates=gates, timeout=remaining)
+            obs = await _invoke(run, turn, tools, step.tool, step.args,
+                                gates=gates, timeout=remaining, annotations=annotations)
         except _GateEscalation as esc:
             # A gate intervened on a replayed step (ZU-CORE-2): the recorded path
             # is no longer free to proceed unattended — hand the frontier to the
@@ -709,7 +787,8 @@ async def _replay_track(
                 {"role": "tool", "name": step.tool,
                  "content": json.dumps({"escalated": esc.verdict.detail or esc.verdict.detector})}
             )
-            return True
+            return True, None
+        last_obs = obs
         messages.append(
             {"role": "assistant", "content": f"(replay step {i + 1})",
              "tool_calls": [{"name": step.tool, "args": step.args}]}
@@ -719,14 +798,14 @@ async def _replay_track(
              "content": json.dumps(_observation_for_model(obs, max_observation_chars), default=str)}
         )
         if _is_challenge(obs):
-            return True  # diverged — hand the frontier to the model from here
+            return True, None  # diverged — hand the frontier to the model from here
         if _is_soft_miss(obs):
             soft_streak += 1
             if soft_streak >= _REPLAY_MAX_SOFT_MISSES:
-                return True  # too many no-ops in a row — the path really diverged
+                return True, None  # too many no-ops in a row — the path really diverged
         else:
             soft_streak = 0
-    return False
+    return False, None
 
 
 async def run_task(
@@ -747,6 +826,7 @@ async def run_task(
     replay_jitter_median_ms: int = 0,
     grants: Any = None,
     resume_from: Sequence[Event] | None = None,
+    approved_rail_hash: str | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -804,6 +884,10 @@ async def run_task(
     # The pre-execution gate set (ZU-CORE-2). Empty by default, so a run with no
     # registered gate behaves exactly as before — the seam is inert until used.
     gates = [_materialize(registry.get("gates", n)) for n in registry.names("gates")]
+    # The replay-divergence arbiters (ZU-RAIL-3). Empty by default ⇒ the navigator's
+    # existing challenge/soft-miss → hand-to-model behaviour is unchanged.
+    arbiters = [_materialize(registry.get("replay_arbiters", n))
+                for n in registry.names("replay_arbiters")]
 
     # Fail-closed containment floor: refuse before anything runs if a tool needs a
     # sandbox we're not inside. Raised (not a Result) — a misconfigured posture is
@@ -819,7 +903,7 @@ async def run_task(
     if resume_from is None:
         run.root = await run.emit(
             ev.TASK_STARTED,
-            {"query": spec.query, "target": spec.target, "tainted": run.tainted},
+            {"query": spec.query, "target": spec.target, "tainted": run.tainted, "mode": run.mode},
         )
 
         # Record each tool's declared capability envelope onto the log at run
@@ -858,14 +942,37 @@ async def run_task(
     finishing = False
     if replaying and resume_from is None:
         assert track is not None  # `replaying` already established this
+        # Rail integrity (ZU-RAIL-1): if the caller pinned an approved content hash,
+        # verify the track being replayed IS that exact human-approved rail BEFORE
+        # any step runs. A mismatch refuses to replay (an unapproved/tampered rail
+        # is never run); a match is recorded. The signature/scope behind the
+        # approval is the consumer's policy (ride it in payload["ctx"]).
+        if approved_rail_hash is not None:
+            actual = track.content_hash()
+            if actual != approved_rail_hash:
+                await run.emit(
+                    ev.DEFENSE_BLOCKED,
+                    {"kind": "rail_unapproved", "detail": "track content hash does not match the "
+                     "approved rail", "expected": approved_rail_hash, "actual": actual},
+                    parent=run.root,
+                )
+                return await run.terminal("rail.unapproved")
+            await run.emit(ev.RAIL_VERIFIED, {"rail_hash": actual}, parent=run.root)
         # The navigator climbs the ladder as the recorded path did (emitting the
         # same escalation events), so when the model takes over at the frontier it
         # inherits the ladder exactly where the path left it — its remembered tier,
         # not a blanket jump to the ceiling.
-        diverged = await _replay_track(run, track, tools, messages, ladder,
-                                       wall_time_s=budget.wall_time_s, start=start,
-                                       max_observation_chars=max_observation_chars,
-                                       jitter_median_ms=replay_jitter_median_ms, gates=gates)
+        diverged, replay_result = await _replay_track(
+            run, track, tools, messages, ladder,
+            wall_time_s=budget.wall_time_s, start=start,
+            max_observation_chars=max_observation_chars,
+            jitter_median_ms=replay_jitter_median_ms, gates=gates,
+            arbiters=arbiters, tokens=tokens,
+        )
+        # An arbiter (ZU-RAIL-3) may have paused for a human or stopped the run —
+        # that Result is the run's outcome, returned immediately.
+        if replay_result is not None:
+            return replay_result
         # Replay reached the frontier cleanly (no challenge): what's left is usually
         # just the final extraction, so a cheap finish_provider can close it out. A
         # divergence means real re-pathfinding — keep the strong provider for that.
@@ -1079,6 +1186,7 @@ async def _invoke(
     gates: list | tuple = (),
     timeout: float | None = None,
     approved_key: str | None = None,
+    annotations: dict | None = None,
 ) -> dict:
     """Dispatch one tool call to an observation. A missing tool or a raising
     tool (e.g. an SSRF block) becomes an error observation, never a crash —
@@ -1114,9 +1222,13 @@ async def _invoke(
         idem = str(
             uuid5(run.trace_id, f"{run._call_seq}:{name}:{json.dumps(args, sort_keys=True, default=str)}")
         )
-    invoked_id = await run.emit(
-        ev.TOOL_INVOKED, {"tool": name, "args": args, "idempotency_key": idem}, parent=turn, source=name
-    )
+    invoked_payload: dict = {"tool": name, "args": args, "idempotency_key": idem}
+    if annotations:
+        # Carry the rail step's blessed annotations (ZU-RAIL-4) under the
+        # consumer-field convention (payload["ctx"], ZU-AUDIT-3) so they round-trip
+        # capture→replay and are queryable/replayable.
+        invoked_payload["ctx"] = dict(annotations)
+    invoked_id = await run.emit(ev.TOOL_INVOKED, invoked_payload, parent=turn, source=name)
     call = ToolCall(name=name, args=args)
     if approved_key is not None:
         # Resumed after a human approval (ZU-CD-5): the gate is satisfied by the
@@ -1136,7 +1248,8 @@ async def _invoke(
         gate_target = tools.get(name)
         fail_closed = gate_target is not None and _needs_containment(gate_target)
         worst = await _gate_checkpoint(
-            run, gates, call, invoked_id=invoked_id, turn=turn, fail_closed=fail_closed
+            run, gates, call, invoked_id=invoked_id, turn=turn,
+            fail_closed=fail_closed, annotations=annotations,
         )
         if worst is not None and worst.severity is Severity.DENY:
             await run.emit(
@@ -1154,11 +1267,21 @@ async def _invoke(
         if worst is not None and worst.severity is Severity.ESCALATE:
             raise _GateEscalation(call, worst, idem)
     tool = tools.get(name)
+    # Explore-mode disarm (ZU-RAIL-2): a capability-bearing / tier-≥2 tool is NOT
+    # executed during pathfinding — return a stub so a model loose on a hostile
+    # surface is never armed with a live instrument. Same predicate as the
+    # containment floor and the fail-closed gate. Inert tier-1 tools run normally.
+    if tool is not None and run.mode == "explore" and _needs_containment(tool):
+        await run.emit(ev.RAIL_DISARMED, {"tool": name}, parent=invoked_id, source=name)
+        obs = {"stubbed": True, "explore": True, "tool": name,
+               "detail": "capability-bearing call disarmed in explore mode (ZU-RAIL-2)"}
+        await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
+        return obs
     if tool is None:
         obs = {"error": f"unknown tool: {name}"}
     else:
         try:
-            coro = tool(run.ctx(idempotency_key=idem), **args)
+            coro = tool(run.ctx(idempotency_key=idem, annotations=annotations), **args)
             obs = await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
         except TimeoutError:
             log.warning("tool %r exceeded its %.3fs deadline; rejecting it", name, timeout or 0.0)
@@ -1260,7 +1383,7 @@ async def _detector_checkpoint(
 
 async def _gate_checkpoint(
     run: _Run, gates: list | tuple, call: ToolCall, *, invoked_id: UUID, turn: UUID,
-    fail_closed: bool,
+    fail_closed: bool, annotations: dict | None = None,
 ) -> Verdict | None:
     """Run every InvocationGate against the pending call BEFORE it executes
     (ZU-CORE-2), emit a ``harness.gate.decided`` per verdict (parented to the
@@ -1274,8 +1397,10 @@ async def _gate_checkpoint(
     judging such a call, a crashed scope-checker must not be a bypass: synthesize a
     DENY (rule ``gate.crashed.fail_closed``). For an inert tier-1 call the crash is
     tolerated so a broken gate cannot break an ordinary fetch — but never silently:
-    a ``gate.crashed.skipped`` decision is recorded either way."""
-    ctx = run.ctx(invocation=call)
+    a ``gate.crashed.skipped`` decision is recorded either way. ``annotations`` are
+    the rail step's blessed consequence/destination (ZU-RAIL-4), surfaced on the
+    ctx so a gate can gate by consequence."""
+    ctx = run.ctx(invocation=call, annotations=annotations)
     verdicts: list[Verdict] = []
     for g in gates:
         verdict, crash = _safe_gate(g, call, ctx)
@@ -1326,14 +1451,20 @@ async def _gate_checkpoint(
 
 
 async def _pause_for_human(
-    run: _Run, ladder: _Ladder, tokens: int, step: int, call: ToolCall, verdict: Verdict, idem: str
+    run: _Run, ladder: _Ladder, tokens: int, step: int, call: ToolCall, verdict: Verdict, idem: str,
+    *, annotations: dict | None = None,
 ) -> Result:
     """Suspend the run for a human to approve a specific invocation. The approval
     record shows the LITERAL invocation parameters the harness holds (ground
     truth, never model narration — ZU-CD-1), and the resumable snapshot persists
     the gate-relevant state (tier, tokens, taint, the pending call + its
-    idempotency key) so resume stays bounded (ZU-CD-5)."""
+    idempotency key, and any rail-step ``annotations``) so resume stays bounded
+    (ZU-CD-5) and the approved action carries its consequence/destination on the
+    log when it finally executes (ZU-RAIL-4)."""
     approval_id = str(uuid5(run.trace_id, f"approval:{idem}"))
+    pending: dict = {"tool": call.name, "args": call.args, "idempotency_key": idem}
+    if annotations:
+        pending["annotations"] = dict(annotations)
     await run.emit(
         ev.APPROVAL_REQUESTED,
         {
@@ -1355,7 +1486,7 @@ async def _pause_for_human(
             "tokens": tokens,
             "tainted": run.tainted,
             "step": step,
-            "pending": {"tool": call.name, "args": call.args, "idempotency_key": idem},
+            "pending": pending,
         },
         parent=run.root,
     )
@@ -1460,10 +1591,12 @@ async def _resume_from_log(
     )
     if approved:
         # Execute ONLY the approved invocation, unchanged, bound to its exact key.
+        # Carry the rail step's annotations (ZU-RAIL-4) so the approved action's
+        # consequence/destination land on the log when it finally executes.
         obs = await _invoke(
             run, turn, ladder.active(), pending["tool"], pending["args"],
             gates=gates, approved_key=pending["idempotency_key"],
-            timeout=spec.budget.wall_time_s,
+            timeout=spec.budget.wall_time_s, annotations=pending.get("annotations"),
         )
         model_obs = await _shrink_for_model(
             obs, max_chars=max_observation_chars, strategy=observation_strategy,
