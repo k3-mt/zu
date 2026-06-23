@@ -22,12 +22,16 @@ from .eventstore import event_matches, validate_filter
 class MemoryEventSink:
     name = "memory"
 
-    def __init__(self) -> None:
+    def __init__(self, *, sign_key: bytes | None = None) -> None:
         self._events: list[Event] = []  # insertion order == seq (1-based)
         # event_id -> stored (linked) Event, for idempotency.
         self._seen: dict[Any, Event] = {}
         # Per-trace chain head: trace_id -> last event's hash (ZU-AUDIT-1).
         self._heads: dict[Any, str | None] = {}
+        # Optional HMAC signing key (ZU-AUDIT-1): when set, the chain is signed so
+        # a content edit fails verification even after a re-link by an attacker who
+        # lacks the key. Absent ⇒ an unsigned chain, byte-for-byte as before.
+        self._sign_key = sign_key
         # Serialises append's check-then-act (the idempotency guard is not atomic
         # on its own: two coroutines could both pass the ``in self._seen`` check
         # before either inserts) and gives reads a consistent snapshot, so a bus
@@ -44,7 +48,7 @@ class MemoryEventSink:
             if event.event_id in self._seen:
                 return self._seen[event.event_id]  # idempotent no-op
             if event.hash is None:
-                event = link(event, self._heads.get(event.trace_id))
+                event = link(event, self._heads.get(event.trace_id), key=self._sign_key)
             self._heads[event.trace_id] = event.hash
             self._seen[event.event_id] = event
             self._events.append(event)

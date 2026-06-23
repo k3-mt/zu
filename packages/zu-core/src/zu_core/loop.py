@@ -51,7 +51,7 @@ from .ports import (
     declared_envelope,
 )
 from .registry import REGISTRY, Registry
-from .security import SecurityBlock, enforce_containment
+from .security import SecurityBlock, _needs_containment, enforce_containment
 from .track import MAX_REPLAY_WAIT_MS, Track, replay_extra_delay_ms
 
 log = logging.getLogger("zu.loop")
@@ -429,21 +429,26 @@ class _GateEscalation(Exception):
         super().__init__(f"gate {verdict.detector} escalated {call.name}")
 
 
-def _safe_gate(gate: Any, call: ToolCall, ctx: RunContext) -> Verdict | None:
-    """Run one InvocationGate in isolation: a raising third-party gate is logged
-    and skipped (it does not fail the run), the same isolation detectors get.
-    A gate that crashes is treated as 'no verdict' — fail-open for a *broken*
-    gate, while a gate that returns DENY is of course honoured (fail-closed on
-    an explicit refusal, not on a bug)."""
+def _safe_gate(
+    gate: Any, call: ToolCall, ctx: RunContext
+) -> tuple[Verdict | None, Exception | None]:
+    """Run one InvocationGate in isolation and REPORT the outcome as
+    ``(verdict, crash)``. The crash is no longer swallowed into a silent "no
+    verdict": the caller decides what a crash means per ZU-CORE-2 — **fail closed**
+    (synthesize a DENY) for a capability-bearing / tier-≥2 call, where a crashed
+    scope-checker must never be a bypass, and **fail-open-but-logged** for an inert
+    tier-1 call, where a broken gate must not break an ordinary web fetch. An
+    explicit verdict (incl. DENY) is returned with ``crash=None`` and honoured as
+    before. The exception is still logged here; it is not discarded."""
     try:
         verdict: Verdict | None = gate.check(call, ctx)
-        return verdict
+        return verdict, None
     except Exception as exc:  # noqa: BLE001 - a broken gate must not crash the run
         log.warning(
-            "gate %r raised %s: %s — skipping it",
+            "gate %r raised %s: %s",
             getattr(gate, "name", gate), type(exc).__name__, exc,
         )
-        return None
+        return None, exc
 
 
 def _tier_of(tool: Any) -> int:
@@ -1123,7 +1128,16 @@ async def _invoke(
             source="human",
         )
     elif gates:
-        worst = await _gate_checkpoint(run, gates, call, invoked_id=invoked_id, turn=turn)
+        # "Capability-bearing" for the fail-closed decision is the same predicate
+        # the containment floor uses (declares any capability/egress, or tier ≥ 2)
+        # — read from the target tool already in scope here, so a crashed gate on
+        # such a call fails closed (ZU-CORE-2). Unknown tool ⇒ not capability-bearing
+        # (it won't execute anyway).
+        gate_target = tools.get(name)
+        fail_closed = gate_target is not None and _needs_containment(gate_target)
+        worst = await _gate_checkpoint(
+            run, gates, call, invoked_id=invoked_id, turn=turn, fail_closed=fail_closed
+        )
         if worst is not None and worst.severity is Severity.DENY:
             await run.emit(
                 ev.DEFENSE_BLOCKED,
@@ -1245,32 +1259,63 @@ async def _detector_checkpoint(
 
 
 async def _gate_checkpoint(
-    run: _Run, gates: list | tuple, call: ToolCall, *, invoked_id: UUID, turn: UUID
+    run: _Run, gates: list | tuple, call: ToolCall, *, invoked_id: UUID, turn: UUID,
+    fail_closed: bool,
 ) -> Verdict | None:
     """Run every InvocationGate against the pending call BEFORE it executes
     (ZU-CORE-2), emit a ``harness.gate.decided`` per verdict (parented to the
     tool.invoked event so replay can reconstruct which rule decided each action —
     ZU-AUDIT-2), drain any durable-state writes the gates made (ZU-CD-4), and
     return the worst verdict for ``_invoke`` to act on. Allow is the inert
-    default (no verdict)."""
+    default (no verdict).
+
+    ``fail_closed`` is set by the caller from the target tool's capability
+    envelope (declares any capability/egress, or tier ≥ 2). When a gate *crashes*
+    judging such a call, a crashed scope-checker must not be a bypass: synthesize a
+    DENY (rule ``gate.crashed.fail_closed``). For an inert tier-1 call the crash is
+    tolerated so a broken gate cannot break an ordinary fetch — but never silently:
+    a ``gate.crashed.skipped`` decision is recorded either way."""
     ctx = run.ctx(invocation=call)
     verdicts: list[Verdict] = []
     for g in gates:
-        v = _safe_gate(g, call, ctx)
-        if v is None:
+        verdict, crash = _safe_gate(g, call, ctx)
+        if crash is not None:
+            gname = getattr(g, "name", "gate")
+            detail = f"gate crashed ({type(crash).__name__}: {crash})"
+            if fail_closed:
+                # Capability-bearing / tier-≥2: fail CLOSED — the crashed gate
+                # becomes a DENY so the call is blocked, not bypassed (ZU-CORE-2).
+                await run.emit(
+                    ev.GATE_DECIDED,
+                    {"action_ref": str(invoked_id), "tool": call.name, "decision": "deny",
+                     "gate": gname, "rule_id": "gate.crashed.fail_closed", "detail": detail},
+                    parent=invoked_id, source=gname,
+                )
+                verdicts.append(Verdict(severity=Severity.DENY, detector=gname, detail=detail))
+            else:
+                # Inert tier-1: tolerate (a broken gate must not break a plain
+                # fetch) but record the skip — never a silent fail-open.
+                await run.emit(
+                    ev.GATE_DECIDED,
+                    {"action_ref": str(invoked_id), "tool": call.name, "decision": "skipped",
+                     "gate": gname, "rule_id": "gate.crashed.skipped", "detail": detail},
+                    parent=invoked_id, source=gname,
+                )
+            continue
+        if verdict is None:
             continue
         payload = {
             "action_ref": str(invoked_id),
             "tool": call.name,
-            "decision": v.severity.value,
-            "gate": v.detector,
-            "rule_id": v.detector,
-            "detail": v.detail,
+            "decision": verdict.severity.value,
+            "gate": verdict.detector,
+            "rule_id": verdict.detector,
+            "detail": verdict.detail,
         }
-        if v.kind:
-            payload["kind"] = v.kind
-        await run.emit(ev.GATE_DECIDED, payload, parent=invoked_id, source=v.detector)
-        verdicts.append(v)
+        if verdict.kind:
+            payload["kind"] = verdict.kind
+        await run.emit(ev.GATE_DECIDED, payload, parent=invoked_id, source=verdict.detector)
+        verdicts.append(verdict)
     # A gate may have written cumulative state (e.g. a velocity counter); record
     # those writes to the log now so a pause/resume rebuilds them.
     await run.flush_grants(parent=turn)

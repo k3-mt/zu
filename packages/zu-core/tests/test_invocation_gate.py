@@ -243,3 +243,77 @@ async def test_velocity_limit_via_grant_store() -> None:
     assert tool.calls == [1, 2]  # third was denied before executing
     updates = [e for e in await bus.query() if e.type == ev.GRANT_UPDATED]
     assert [e.payload["value"] for e in updates] == [1, 2, 3]
+
+
+# --- ZU-CORE-2: a crashing gate must fail CLOSED for a capability-bearing call ---
+
+
+class _CrashGate:
+    """A gate whose scope-check raises — the malformed-call bypass attempt."""
+
+    name = "crasher"
+
+    def check(self, call, ctx):
+        raise ValueError("scope-checker blew up on a malformed call")
+
+
+class NetTool:
+    """A capability-bearing tool (declares egress) — would run absent the gate."""
+
+    name = "net_call"
+    tier = 1
+    schema = {"name": "net_call", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "net_call()"
+    capabilities: frozenset[str] = frozenset({"net"})
+    egress: frozenset[str] = frozenset({"*"})
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    async def __call__(self, ctx) -> dict:
+        self.calls.append(1)
+        return {"ok": True}
+
+
+async def test_crashing_gate_fails_closed_for_capability_bearing_call() -> None:
+    tool = NetTool()
+    reg = Registry()
+    reg.register("tools", "net_call", tool)
+    reg.register("gates", "crasher", _CrashGate())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "net_call", "args": {}}, {"text": '{"done": true}', "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="q"), provider, reg, bus)
+
+    assert result.status == Status.SUCCESS
+    assert tool.calls == []  # the crashed gate did NOT become a bypass — no side effect
+    events = await bus.query()
+    decided = [e for e in events if e.type == ev.GATE_DECIDED]
+    assert any(
+        e.payload.get("rule_id") == "gate.crashed.fail_closed" and e.payload.get("decision") == "deny"
+        for e in decided
+    )
+    assert any(e.type == ev.DEFENSE_BLOCKED and e.payload.get("kind") == "gate_denied" for e in events)
+
+
+async def test_crashing_gate_fails_open_but_logged_for_inert_tier1_call() -> None:
+    # An inert tier-1 tool (no capability/egress): a broken gate must not break it,
+    # so it still runs — but the skip is recorded, never silent.
+    tool = WireTransfer()  # tier 1, empty capabilities + egress
+    reg = Registry()
+    reg.register("tools", "wire_transfer", tool)
+    reg.register("gates", "crasher", _CrashGate())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "wire_transfer", "args": {"amount": 5}}, {"text": "{}", "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="q"), provider, reg, bus)
+
+    assert result.status == Status.SUCCESS
+    assert tool.calls == [5]  # fail-open: the tool ran despite the crashed gate
+    decided = [e for e in await bus.query() if e.type == ev.GATE_DECIDED]
+    assert any(
+        e.payload.get("rule_id") == "gate.crashed.skipped" and e.payload.get("decision") == "skipped"
+        for e in decided
+    )  # but the skip is on the log
