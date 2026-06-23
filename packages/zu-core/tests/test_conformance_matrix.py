@@ -1,0 +1,56 @@
+"""The conformance matrix guard.
+
+Maps every ZU-* requirement to the concrete, offline proof that exercises it, and
+asserts each proof exists — so a dropped or renamed proof is caught here rather
+than silently leaving a requirement unverified. The human-readable matrix lives
+in ``zu-upstream-conformance.md`` §9; this is its executable backstop.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[3]
+
+# requirement id -> (repo-relative path, symbol that must appear in it).
+# A doc requirement (ZU-EXT-2) maps to its document with symbol None.
+MATRIX: dict[str, tuple[str, str | None]] = {
+    "ZU-CORE-1": ("packages/zu-core/tests/test_capability_acquisition.py", "test_call_to_ungranted_tool_reaches_nothing"),
+    "ZU-CORE-2": ("packages/zu-core/tests/test_invocation_gate.py", "test_gate_deny_blocks_the_call_no_side_effect"),
+    "ZU-CORE-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),
+    "ZU-CORE-4": ("packages/zu-core/tests/test_invocation_gate.py", "test_idempotency_key_is_deterministic_across_replay"),
+    "ZU-NET-1": ("packages/zu-backends/tests/test_egress_enforce.py", "test_mechanism_is_swappable_without_core_change"),
+    "ZU-NET-2": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
+    "ZU-NET-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),
+    "ZU-NET-4": ("packages/zu-backends/tests/test_identity.py", "test_present_verify_roundtrip"),
+    "ZU-NET-5": ("packages/zu-backends/tests/test_identity.py", "test_attestation_measurement_enforced_when_required"),
+    "ZU-CD-1": ("packages/zu-core/tests/test_pause_resume.py", "test_pause_renders_ground_truth_then_resume_executes_once"),
+    "ZU-CD-2": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_with_wrong_key_is_rejected"),
+    "ZU-CD-3": ("packages/zu-core/tests/test_invocation_gate.py", "test_taint_recorded_and_readable_at_the_gate"),
+    "ZU-CD-4": ("packages/zu-core/tests/test_invocation_gate.py", "test_velocity_limit_via_grant_store"),
+    "ZU-CD-5": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_without_resolution_stays_paused"),
+    "ZU-AUDIT-1": ("packages/zu-core/tests/test_chain.py", "test_content_tamper_detected"),
+    "ZU-AUDIT-2": ("packages/zu-core/tests/test_invocation_gate.py", "test_gate_deny_blocks_the_call_no_side_effect"),
+    "ZU-AUDIT-3": ("packages/zu-core/tests/test_chain.py", "test_consumer_field_is_queryable"),
+    "ZU-EXT-1": ("packages/zu-core/tests/test_registry.py", "test_consumer_registers_new_kind_without_core_edit"),
+    "ZU-EXT-2": ("docs/TCB.md", None),
+    "ZU-EXT-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
+    "ZU-EXT-4": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),
+}
+
+
+def test_every_requirement_has_a_proof() -> None:
+    missing: list[str] = []
+    for req, (rel, symbol) in MATRIX.items():
+        path = _ROOT / rel
+        if not path.exists():
+            missing.append(f"{req}: missing {rel}")
+            continue
+        if symbol is not None and symbol not in path.read_text():
+            missing.append(f"{req}: {rel} has no '{symbol}'")
+    assert not missing, "conformance proofs missing:\n" + "\n".join(missing)
+
+
+def test_matrix_covers_all_requirement_families() -> None:
+    families = {req.rsplit("-", 1)[0] for req in MATRIX}
+    assert families == {"ZU-CORE", "ZU-NET", "ZU-CD", "ZU-AUDIT", "ZU-EXT"}

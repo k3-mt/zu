@@ -19,6 +19,11 @@ class Status(str, Enum):
     SUCCESS = "success"
     ESCALATE = "escalate"
     TERMINAL = "terminal"
+    # The run suspended at a human-in-the-loop ESCALATE (ZU-CD-1/2/5): a gate or
+    # detector requested approval of a specific invocation. The run is NOT
+    # finished — its resumable state is on the log (``harness.run.paused``), and
+    # ``run_task(resume_from=...)`` continues it once a human resolution lands.
+    PAUSED = "paused"
 
 
 class Budget(BaseModel):
@@ -37,6 +42,13 @@ class TaskSpec(BaseModel):
     output_schema: dict = Field(default_factory=dict)  # JSON schema the result must satisfy
     budget: Budget = Field(default_factory=Budget)
     max_tier: int = 2
+    # Run-level taint (ZU-CD-3): set when this run ingests untrusted/hostile
+    # input (e.g. a caller folding a ``TriggerEvent`` whose ``hostile`` flag is
+    # set into the query). The loop records it on ``harness.task.started`` and
+    # exposes it to gates/validators via ``RunContext.tainted`` so a gate can
+    # force-escalate a high-consequence action once the run is tainted. It is a
+    # coarse, mechanical, run-level flag — never a policy self-report.
+    tainted: bool = False
 
 
 class Result(BaseModel):
@@ -61,6 +73,20 @@ class Event(BaseModel):
     hot path and copying/freezing them per event is too costly. The invariant is
     therefore: **treat a published event's payload as read-only.** Do not mutate
     it in place; the canonical on-disk copy is already immutable regardless.
+
+    Two fields carry the tamper-evidence chain (ZU-AUDIT-1): ``prev_hash`` and
+    ``hash``. They default to ``None`` and are **set by the canonical sink at
+    append time** (see ``zu_core.chain``), not by an emitter — the sink is the
+    single ordering authority, so the chain is computed where order is decided.
+    A run/replay verifies integrity with ``chain.verify_chain``; a break means
+    an event was reordered, inserted, deleted, or its content edited.
+
+    Consumer-defined fields convention (ZU-AUDIT-3): a consumer layering its own
+    chain on Zu (e.g. ``grant_id``, ``consent_ref``, ``capability_id``, the
+    verified peer identity, ``idempotency_key``) puts them under a reserved
+    ``payload["ctx"]`` sub-dict, so they never collide with harness payload keys
+    and a sink can index the subset the consumer registers
+    (``eventstore.register_event_filter``).
     """
 
     model_config = {"frozen": True}
@@ -74,6 +100,11 @@ class Event(BaseModel):
     source: str
     payload: dict = Field(default_factory=dict)
     schema_version: int = 1
+    # Tamper-evidence chain (ZU-AUDIT-1), set by the canonical sink at append:
+    # ``hash`` is sha256 over this event's canonical content + ``prev_hash``;
+    # ``prev_hash`` is the predecessor's ``hash`` in this event's trace chain.
+    prev_hash: str | None = None
+    hash: str | None = None
 
     @field_validator("type")
     @classmethod

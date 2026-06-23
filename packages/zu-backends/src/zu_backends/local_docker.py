@@ -246,6 +246,13 @@ class LocalDockerBackend:
             run_kwargs["network_disabled"] = False
         else:
             run_kwargs["network_disabled"] = not network
+        # DNS gating (ZU-NET-1): when an EgressEnforcement supplies ``dns`` (e.g.
+        # a non-resolving nameserver so the embedded resolver cannot be used as a
+        # covert egress channel), set it on the container — the proxy is reached by
+        # its pinned ``extra_hosts`` IP, so name resolution is unnecessary. Omitted
+        # ⇒ Docker's default, so existing runs are unchanged.
+        if spec.get("dns"):
+            run_kwargs["dns"] = list(spec["dns"])
         # Optional seccomp profile: the audit profile (redteam-audit.json) LOGs
         # sensitive syscalls; the blocking profile (redteam-block.json) ERRNOs the
         # escape primitives. Appended to security_opt. NOTE: the docker SDK passes

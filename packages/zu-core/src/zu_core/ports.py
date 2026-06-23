@@ -14,7 +14,7 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from .content import Action, Observation
-from .contracts import Result
+from .contracts import Event, Result
 
 # --- interface versioning (MLR §6) ---------------------------------------
 #
@@ -36,6 +36,12 @@ INTERFACE_VERSION: dict[str, int] = {
     "sinks": 1,
     "policies": 1,
     "triggers": 1,
+    # Security-conformance ports (the port shapes live in this module; the
+    # implementations are plugins, several in sibling packages):
+    "gates": 1,  # InvocationGate — the pre-execution gate (ZU-CORE-2)
+    "channels": 1,  # Channel — a harness-owned external channel (ZU-NET-2)
+    "workload_identity": 1,  # WorkloadIdentity — attestable identity (ZU-NET-4)
+    "egress_enforcement": 1,  # EgressEnforcement — pluggable default-deny (ZU-NET-1)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -178,6 +184,11 @@ class Severity(str, Enum):
     WARN = "warn"
     RETRY = "retry"
     ESCALATE = "escalate"
+    # Block THIS one invocation (ZU-CORE-2): unlike TERMINAL (which ends the whole
+    # run), DENY refuses a single tool call — the tool never executes, the model
+    # gets an error observation and may try something else. Ranks above ESCALATE,
+    # below TERMINAL in the loop's verdict ranking.
+    DENY = "deny"
     TERMINAL = "terminal"
 
 
@@ -185,6 +196,12 @@ class Verdict(BaseModel):
     severity: Severity
     detector: str
     detail: str | None = None
+    # Discriminates the *kind* of escalation (ZU-CD-1/2). ``None`` (the default)
+    # keeps the existing behaviour — an ESCALATE climbs the capability tier.
+    # ``"human"`` requests a human-in-the-loop pause on the specific invocation:
+    # the run suspends and emits the literal invocation for approval. Backward
+    # compatible: every existing detector/validator leaves this ``None``.
+    kind: str | None = None
 
 
 class RunContext(BaseModel):
@@ -205,6 +222,18 @@ class RunContext(BaseModel):
     # context (see ``loop._EventsView``). Typed ``Sequence`` to make that
     # read-only contract explicit rather than convention.
     events: Sequence = Field(default_factory=list)
+    # --- security seams the gate/validators read at decision time --------------
+    # Run-level taint (ZU-CD-3): True once this run ingested hostile input.
+    tainted: bool = False
+    # Durable per-grant state handle (ZU-CD-4): a ``GrantStore`` (kept ``Any`` so
+    # the contract stays a thin value object, matching ``spec``/``observation``).
+    grants: Any = None
+    # The ``ToolCall`` currently under pre-execution check (ZU-CORE-2); ``None``
+    # outside an InvocationGate ``check``.
+    invocation: Any = None
+    # The idempotency key minted for the invocation in flight (ZU-CORE-4); a tool
+    # reads it to dedupe a retried side effect. ``None`` outside a tool call.
+    idempotency_key: str | None = None
 
 
 @runtime_checkable
@@ -243,6 +272,48 @@ class Validator(Protocol):
     name: str
 
     def check(self, result: Result, ctx: RunContext) -> Verdict | None: ...
+
+
+# --- the pre-execution gate (ZU-CORE-2) ----------------------------------
+#
+# Detectors and validators are *post-hoc*: they judge an observation that already
+# exists (i.e. the tool already ran) or the final result. An ``InvocationGate``
+# is the missing *pre-execution* seam — the harness runs every registered gate
+# inside ``_invoke`` BEFORE the tool body executes, against the literal
+# ``ToolCall``. This is what lets a consumer enforce ``invocation ⊆ grant ⊆
+# consent`` + limits *beneath* the policy, on every call, before the side effect
+# fires. The gate cannot be bypassed or disabled: the loop always iterates the
+# gate list and the model only produces the ``ToolCall`` that is the gate's
+# input, never its control. ``check`` returns ``None`` (allow — the inert
+# default, exactly like a detector that does not fire), a ``DENY`` verdict (block
+# this call, no side effect), or an ``ESCALATE`` verdict (route to the tier-climb
+# or, with ``kind="human"``, the human-approval pause).
+
+
+@runtime_checkable
+class InvocationGate(Protocol):
+    name: str
+
+    def check(self, call: ToolCall, ctx: RunContext) -> Verdict | None: ...
+
+
+# --- durable per-grant state for the gate/validators (ZU-CD-4) ------------
+#
+# Cumulative limits ("$X/hour", "N transactions/window") need state that
+# persists across invocations, not just the single call. ``GrantStore`` is a
+# deliberately tiny keyed get/put scoped by a ``grant_id`` the consumer supplies
+# — NOT a database (no query, no iteration, no transactions); that poverty is
+# what keeps it from bloating the core. The in-memory default
+# (``zu_core.grants.InMemoryGrantStore``) is a cache over ``harness.grant.updated``
+# events (the log stays the source of truth, so resume rebuilds counters); a
+# durable backing (SQL/Redis) is a plugin the harness injects.
+
+
+@runtime_checkable
+class GrantStore(Protocol):
+    def get(self, grant_id: str, key: str, default: Any = None) -> Any: ...
+
+    def put(self, grant_id: str, key: str, value: Any) -> None: ...
 
 
 # --- infrastructure ports ------------------------------------------------
@@ -336,13 +407,98 @@ class HostEffectMonitor(Protocol):
     async def collect(self, sandbox: Any, backend: Any) -> list[dict]: ...
 
 
+# --- the generalised harness-owned channel (ZU-NET-2) --------------------
+#
+# Zu already owns one external channel: inference. The model key is held inside
+# the provider adapter (resolved from env at call time), never placed in the
+# model's context; the policy emits a typed ``ModelRequest`` and gets a
+# ``ModelResponse`` but cannot read or reconfigure the channel. ``Channel``
+# generalises exactly that ownership to an *arbitrary* typed external endpoint —
+# the credential broker being the motivating case. The harness/operator
+# constructs the channel with an env-named secret; the policy emits a typed
+# ``ChannelRequest`` (a verb + args) and gets a ``ChannelResponse``, and can
+# neither read the credential nor change the channel's destination. ``endpoint``
+# is an opaque label for the log, NEVER the credential. ``ModelProvider`` is the
+# special case kept as its own hot-path port; ``Channel`` is the general seam for
+# non-inference harness-owned endpoints. An out-of-process broker is a
+# ``Channel`` whose secret lives in a separate process (see ``zu_core.rpc``).
+
+
+class ChannelRequest(BaseModel):
+    op: str  # the endpoint verb, e.g. "mint" | "exchange" | "introspect"
+    args: dict = Field(default_factory=dict)
+
+
+class ChannelResponse(BaseModel):
+    ok: bool = True
+    data: dict = Field(default_factory=dict)
+    error: str | None = None
+
+
+@runtime_checkable
+class Channel(Protocol):
+    endpoint: str  # opaque label for the log; never the credential
+
+    async def call(self, req: ChannelRequest) -> ChannelResponse: ...
+
+
+# --- workload identity (ZU-NET-4) ----------------------------------------
+#
+# The harness presents an attestable identity on a channel; the peer verifies it;
+# the verified peer principal is recorded per action (under ``payload["ctx"]
+# ["peer"]``, the ZU-AUDIT-3 convention). Workload identity is a *precondition*
+# for authorization, never a substitute for it — the consumer's grant remains the
+# authority. The mechanism is pluggable: a static-mTLS reference impl now, SPIFFE
+# later, each a plugin. ``IdentityProof.proof`` is opaque and scheme-specific and
+# MUST NOT carry a private key. ``proof`` MAY carry an attestation measurement
+# (ZU-NET-5, SHOULD); a verifier degrades to identity-only when absent.
+
+
+class IdentityProof(BaseModel):
+    scheme: str  # "static-mtls" | "spiffe" | ...
+    principal: str  # e.g. "spiffe://zu/agent/vet" or a cert subject
+    proof: dict = Field(default_factory=dict)  # opaque; no private key
+
+
+@runtime_checkable
+class WorkloadIdentity(Protocol):
+    scheme: str
+
+    def present(self) -> IdentityProof: ...
+
+    def verify(self, proof: IdentityProof) -> str | None: ...
+
+
+# --- pluggable egress enforcement (ZU-NET-1) -----------------------------
+#
+# Distinct from ``EgressProxy`` (which *observes* and *allows*): this is the
+# network policy that *prevents bypass* — the default-DROP that makes the proxy
+# the only path off-box. Making it a port means the *mechanism* (Docker internal
+# network, nftables, WireGuard) is interchangeable without writing a whole new
+# SandboxBackend. ``apply`` installs the policy for one run against ``spec``
+# ({"allowlist", "dns": "pin"|"deny"|[hosts], "proxy": {...}}) and returns a
+# handle; ``revoke`` tears it down. Gating DNS is part of the contract — the
+# embedded resolver is a covert egress channel L3 routing alone won't catch.
+
+
+@runtime_checkable
+class EgressEnforcement(Protocol):
+    async def apply(self, spec: dict) -> Any: ...
+
+    async def revoke(self, handle: Any) -> None: ...
+
+
 @runtime_checkable
 class EventSink(Protocol):
     """The canonical event store — the single source of truth for a run.
 
     ``append`` is idempotent on ``event_id`` (re-appending the same event is a
-    no-op), so a retried publish never duplicates a record. A filter value of
-    ``None`` matches ``IS NULL`` (e.g. ``{"parent_id": None}`` selects roots).
+    no-op), so a retried publish never duplicates a record. It returns the stored
+    event — the canonical store links it into the per-trace hash chain (ZU-AUDIT-1)
+    and returns the *linked* copy so the bus fans that out to shippers; a sink
+    that does not link may return ``None`` and the bus keeps the input event. A
+    filter value of ``None`` matches ``IS NULL`` (e.g. ``{"parent_id": None}``
+    selects roots).
 
     Reads come in two shapes so a large log never has to be materialised at
     once: ``query`` for a bounded window (always pass ``limit`` for big logs),
@@ -350,7 +506,7 @@ class EventSink(Protocol):
     pagination.
     """
 
-    async def append(self, event: Any) -> None: ...
+    async def append(self, event: Any) -> Event | None: ...
 
     async def query(
         self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0
@@ -384,6 +540,12 @@ class TriggerEvent(BaseModel):
 
     source: str  # 'email' | 'webhook' | 'queue' | 'schedule' | 'object-store' | ...
     payload: dict = Field(default_factory=dict)
+    # Tag a source as HOSTILE (ZU-CD-3). The core loop has no TriggerEvent
+    # ingress — the caller bridges a trigger to a run — so this is a typed tag the
+    # bridge maps onto ``TaskSpec.tainted``. All trigger payloads are untrusted by
+    # contract regardless; ``hostile`` marks the stronger "treat as adversarial,
+    # force high-consequence actions to escalate" stance for that source.
+    hostile: bool = False
 
 
 @runtime_checkable

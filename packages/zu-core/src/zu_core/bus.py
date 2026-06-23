@@ -101,7 +101,13 @@ class EventBus:
 
     async def publish(self, event: Event) -> None:
         # 1. canonical store first; a failure here propagates (source of truth).
-        await self.sink.append(event)
+        #    The canonical store links the event into its trace's hash chain
+        #    (ZU-AUDIT-1) and returns the linked copy; fan THAT out so every
+        #    shipper records the same hashes (link once, not per-sink). A sink
+        #    that returns None (does not link) leaves the input event as-is.
+        stored = await self.sink.append(event)
+        if stored is not None:
+            event = stored
 
         # 2. fan out to destinations, isolating any crash.
         for fn in self._subscribers:

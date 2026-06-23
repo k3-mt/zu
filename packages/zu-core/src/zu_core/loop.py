@@ -33,11 +33,12 @@ import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from . import events as ev
 from .bus import EventBus
 from .contracts import Budget, Event, Result, Status, TaskSpec
+from .grants import InMemoryGrantStore
 from .ports import (
     Finish,
     ModelProvider,
@@ -45,6 +46,7 @@ from .ports import (
     RunContext,
     Scope,
     Severity,
+    ToolCall,
     Verdict,
     declared_envelope,
 )
@@ -55,7 +57,13 @@ from .track import MAX_REPLAY_WAIT_MS, Track, replay_extra_delay_ms
 log = logging.getLogger("zu.loop")
 
 # Severity ordering for picking the worst verdict at a checkpoint.
-_RANK = {Severity.WARN: 0, Severity.RETRY: 1, Severity.ESCALATE: 2, Severity.TERMINAL: 3}
+_RANK = {
+    Severity.WARN: 0,
+    Severity.RETRY: 1,
+    Severity.ESCALATE: 2,
+    Severity.DENY: 3,
+    Severity.TERMINAL: 4,
+}
 
 # How many consecutive SOFT misses (no-op actions) the replay navigator tolerates
 # before deciding the recorded path has truly diverged and handing off to the model.
@@ -406,6 +414,38 @@ def _safe_check(validator: Any, result: Result, ctx: RunContext) -> Verdict | No
         return None
 
 
+class _GateEscalation(Exception):
+    """Raised inside ``_invoke`` when a pre-execution gate returns an ESCALATE
+    verdict (ZU-CORE-2). It carries the literal ``call`` and the ``verdict`` so
+    the dispatch site — which owns the ladder, the message list, and (Phase 4)
+    the human-pause — decides whether to climb a tier or pause for approval. The
+    tool body never ran, so there is no observation to return; this keeps
+    ``_invoke``'s return type ``dict`` for the allow/deny cases."""
+
+    def __init__(self, call: ToolCall, verdict: Verdict, idempotency_key: str) -> None:
+        self.call = call
+        self.verdict = verdict
+        self.idempotency_key = idempotency_key
+        super().__init__(f"gate {verdict.detector} escalated {call.name}")
+
+
+def _safe_gate(gate: Any, call: ToolCall, ctx: RunContext) -> Verdict | None:
+    """Run one InvocationGate in isolation: a raising third-party gate is logged
+    and skipped (it does not fail the run), the same isolation detectors get.
+    A gate that crashes is treated as 'no verdict' — fail-open for a *broken*
+    gate, while a gate that returns DENY is of course honoured (fail-closed on
+    an explicit refusal, not on a bug)."""
+    try:
+        verdict: Verdict | None = gate.check(call, ctx)
+        return verdict
+    except Exception as exc:  # noqa: BLE001 - a broken gate must not crash the run
+        log.warning(
+            "gate %r raised %s: %s — skipping it",
+            getattr(gate, "name", gate), type(exc).__name__, exc,
+        )
+        return None
+
+
 def _tier_of(tool: Any) -> int:
     """A tool's tier; defaults to 1 so a tool that omits it is the cheap tier."""
     return int(getattr(tool, "tier", 1))
@@ -447,7 +487,14 @@ class _Ladder:
 class _Run:
     """Per-run state: one trace id, the growing event list, and the emitter."""
 
-    def __init__(self, spec: TaskSpec, bus: EventBus, trace_id: UUID | None = None) -> None:
+    def __init__(
+        self,
+        spec: TaskSpec,
+        bus: EventBus,
+        trace_id: UUID | None = None,
+        *,
+        grants: Any = None,
+    ) -> None:
         self.spec = spec
         self.bus = bus
         # ``trace_id`` correlates a run's events. It defaults to the task id (one
@@ -456,6 +503,12 @@ class _Run:
         # per-phase ``task_id`` stays distinct, so a phase is still queryable alone.
         self.trace_id = trace_id if trace_id is not None else spec.task_id
         self.task_id = spec.task_id
+        # Run-level taint (ZU-CD-3): seeded from the spec (a caller folding hostile
+        # trigger input sets ``spec.tainted``); a tool can also flip it mid-run.
+        self.tainted: bool = bool(getattr(spec, "tainted", False))
+        # Durable per-grant state (ZU-CD-4): the injected store or the in-memory
+        # default (a cache over ``harness.grant.updated`` events).
+        self.grant_state: Any = grants if grants is not None else InMemoryGrantStore()
         # One RunContext reused for the whole run: ``observation`` is updated
         # per checkpoint — so a checkpoint is O(1), not an O(n) copy of the log.
         # Plugins (tools/detectors/validators) receive ``ctx.events`` as a
@@ -463,8 +516,14 @@ class _Run:
         # (no copy) but a misbehaving plugin cannot mutate or corrupt the
         # canonical record through it. The loop appends to ``self.events``.
         self.events: list[Event] = []
+        # Monotonic per-run dispatch counter — the deterministic basis for the
+        # idempotency key (ZU-CORE-4). It depends only on call position, not on a
+        # random event_id, so a replay of the same trace mints the same keys.
+        self._call_seq = 0
         self._ctx = RunContext(spec=spec, observation=None, events=[])
         self._ctx.events = _EventsView(self.events)
+        self._ctx.grants = self.grant_state
+        self._ctx.tainted = self.tainted
         self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
 
     async def emit(
@@ -483,11 +542,44 @@ class _Run:
         self.events.append(event)
         return event.event_id
 
-    def ctx(self, observation: Any = None) -> RunContext:
+    def ctx(
+        self, observation: Any = None, *, invocation: Any = None, idempotency_key: str | None = None
+    ) -> RunContext:
         # Reuse the single context object; just point it at the current
-        # observation. Detectors/validators read it as a read-only view.
+        # observation. Detectors/validators read it as a read-only view. The gate
+        # receives the pending ``invocation``; a tool receives its
+        # ``idempotency_key``. Both reset to None outside their checkpoint so they
+        # never leak across calls; ``tainted`` is refreshed so a mid-run flip is
+        # visible at the gate.
         self._ctx.observation = observation
+        self._ctx.invocation = invocation
+        self._ctx.idempotency_key = idempotency_key
+        self._ctx.tainted = self.tainted
         return self._ctx
+
+    def raise_taint(self, source: str, detail: str | None = None) -> bool:
+        """Flip the run-level taint flag on (ZU-CD-3). Returns True if it changed
+        false->true (the caller then emits ``harness.taint.raised``)."""
+        if self.tainted:
+            return False
+        self.tainted = True
+        self._ctx.tainted = True
+        return True
+
+    async def flush_grants(self, parent: UUID | None = None) -> None:
+        """Drain the in-memory grant store's journal and record each write as a
+        ``harness.grant.updated`` event (ZU-CD-4), so a paused run rebuilds its
+        cumulative counters from the log on resume. A durable/plugin store with no
+        journal is a no-op (it persists itself)."""
+        drain = getattr(self.grant_state, "drain", None)
+        if drain is None:
+            return
+        for grant_id, key, value in drain():
+            await self.emit(
+                ev.GRANT_UPDATED,
+                {"grant_id": grant_id, "key": key, "value": value},
+                parent=parent or self.root,
+            )
 
     async def terminal(self, reason: str) -> Result:
         await self.emit(ev.TASK_TERMINAL, {"reason": reason}, parent=self.root)
@@ -552,7 +644,7 @@ async def _replay_climb_to(run: _Run, ladder: _Ladder, tools: dict, step: Any) -
 async def _replay_track(
     run: _Run, track: Track, tools: dict, messages: list[dict], ladder: _Ladder, *,
     wall_time_s: float, start: float, max_observation_chars: int | None,
-    jitter_median_ms: int = 0,
+    jitter_median_ms: int = 0, gates: list | tuple = (),
 ) -> bool:
     """Drive the recorded path deterministically — re-issue each tool call in order,
     with NO model call — appending the same assistant/tool message pair the loop
@@ -598,7 +690,21 @@ async def _replay_track(
             await asyncio.sleep(wait_ms / 1000)
         turn = await run.emit(ev.TURN_STARTED, {"step": i + 1, "replay": True}, parent=run.root)
         remaining = max(0.0, wall_time_s - (time.monotonic() - start))
-        obs = await _invoke(run, turn, tools, step.tool, step.args, timeout=remaining)
+        try:
+            obs = await _invoke(run, turn, tools, step.tool, step.args, gates=gates, timeout=remaining)
+        except _GateEscalation as esc:
+            # A gate intervened on a replayed step (ZU-CORE-2): the recorded path
+            # is no longer free to proceed unattended — hand the frontier to the
+            # live model, which re-encounters the gate under full control.
+            messages.append(
+                {"role": "assistant", "content": f"(replay step {i + 1})",
+                 "tool_calls": [{"name": step.tool, "args": step.args}]}
+            )
+            messages.append(
+                {"role": "tool", "name": step.tool,
+                 "content": json.dumps({"escalated": esc.verdict.detail or esc.verdict.detector})}
+            )
+            return True
         messages.append(
             {"role": "assistant", "content": f"(replay step {i + 1})",
              "tool_calls": [{"name": step.tool, "args": step.args}]}
@@ -634,6 +740,8 @@ async def run_task(
     replay_budget: Budget | None = None,
     finish_provider: ModelProvider | None = None,
     replay_jitter_median_ms: int = 0,
+    grants: Any = None,
+    resume_from: Sequence[Event] | None = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -678,7 +786,7 @@ async def run_task(
     by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
-    run = _Run(spec, bus, trace_id=trace_id)
+    run = _Run(spec, bus, trace_id=trace_id, grants=grants)
     # At maturity a matching track makes the run a deterministic replay: apply the
     # tight replay budget (a broken track then fails fast, not at full pathfinding
     # cost). The pathfinding budget still governs a fresh/--no-track run.
@@ -688,6 +796,9 @@ async def run_task(
     tools = {name: _materialize(registry.get("tools", name)) for name in registry.names("tools")}
     detectors = [_materialize(registry.get("detectors", n)) for n in registry.names("detectors")]
     validators = [_materialize(registry.get("validators", n)) for n in registry.names("validators")]
+    # The pre-execution gate set (ZU-CORE-2). Empty by default, so a run with no
+    # registered gate behaves exactly as before — the seam is inert until used.
+    gates = [_materialize(registry.get("gates", n)) for n in registry.names("gates")]
 
     # Fail-closed containment floor: refuse before anything runs if a tool needs a
     # sandbox we're not inside. Raised (not a Result) — a misconfigured posture is
@@ -697,33 +808,50 @@ async def run_task(
     # The tier ladder gates which tools the model sees; the run starts at tier 1.
     ladder = _Ladder(tools, spec.max_tier)
 
-    run.root = await run.emit(ev.TASK_STARTED, {"query": spec.query, "target": spec.target})
-
-    # Record each tool's declared capability envelope onto the log at run start,
-    # so the out-of-band verdict observers (the gate, and the always-on runtime
-    # checks) can judge observed behaviour against what each plugin declared.
-    await run.emit(
-        ev.ENVELOPE_DECLARED,
-        {
-            "tools": {
-                name: {"tier": _tier_of(t), **declared_envelope(t)}
-                for name, t in tools.items()
-            }
-        },
-        parent=run.root,
-    )
-
-    messages = _initial_messages(spec, ladder.active().values())
-
     start = time.monotonic()
     tokens = 0
+
+    if resume_from is None:
+        run.root = await run.emit(
+            ev.TASK_STARTED,
+            {"query": spec.query, "target": spec.target, "tainted": run.tainted},
+        )
+
+        # Record each tool's declared capability envelope onto the log at run
+        # start, so the out-of-band verdict observers (the gate, and the always-on
+        # runtime checks) can judge observed behaviour against what each plugin
+        # declared.
+        await run.emit(
+            ev.ENVELOPE_DECLARED,
+            {
+                "tools": {
+                    name: {"tier": _tier_of(t), **declared_envelope(t)}
+                    for name, t in tools.items()
+                }
+            },
+            parent=run.root,
+        )
+        messages = _initial_messages(spec, ladder.active().values())
+    else:
+        # --- resume a paused run from its log (ZU-CD-5) -----------------------
+        # Rebuild the run's security spine — tier, tokens, taint, durable grant
+        # counters, the dispatch counter — from the prior events, so the resumed
+        # run stays bounded by the same gate, taint, and limits. Then resolve the
+        # pending human approval and execute ONLY that exact invocation.
+        paused, tokens, messages = await _resume_from_log(
+            run, resume_from, ladder, gates, spec,
+            max_observation_chars=max_observation_chars,
+            observation_strategy=observation_strategy, provider=provider,
+        )
+        if paused is not None:
+            return paused  # still awaiting a human resolution -> stay paused
 
     # --- replay a recorded track first (the navigator): drive the model's known
     # path deterministically, with NO model calls, until a step challenges (errors)
     # or the track runs out. The model loop below then takes over at that frontier,
     # sharing the same tools (and live browser session) and message history.
     finishing = False
-    if replaying:
+    if replaying and resume_from is None:
         assert track is not None  # `replaying` already established this
         # The navigator climbs the ladder as the recorded path did (emitting the
         # same escalation events), so when the model takes over at the frontier it
@@ -732,7 +860,7 @@ async def run_task(
         diverged = await _replay_track(run, track, tools, messages, ladder,
                                        wall_time_s=budget.wall_time_s, start=start,
                                        max_observation_chars=max_observation_chars,
-                                       jitter_median_ms=replay_jitter_median_ms)
+                                       jitter_median_ms=replay_jitter_median_ms, gates=gates)
         # Replay reached the frontier cleanly (no challenge): what's left is usually
         # just the final extraction, so a cheap finish_provider can close it out. A
         # divergence means real re-pathfinding — keep the strong provider for that.
@@ -827,9 +955,23 @@ async def run_task(
                 # Bound each tool call by the run's remaining wall-time, so a hung
                 # tool cannot overrun the deadline the way a hung provider can't.
                 tool_remaining = max(0.0, budget.wall_time_s - (time.monotonic() - start))
-                obs = await _invoke(
-                    run, turn, active, call.name, call.args, timeout=tool_remaining
-                )
+                try:
+                    obs = await _invoke(
+                        run, turn, active, call.name, call.args,
+                        gates=gates, timeout=tool_remaining,
+                    )
+                except _GateEscalation as esc:
+                    # A gate escalated this specific call (ZU-CORE-2): the tool did
+                    # not run. ``kind="human"`` pauses the run for approval of the
+                    # exact invocation (ZU-CD-1/2); any other escalation routes to
+                    # the tier ladder via the halting block below (the skipped-calls
+                    # loop appends this call's tool-result message).
+                    if esc.verdict.kind == "human":
+                        return await _pause_for_human(
+                            run, ladder, tokens, step, esc.call, esc.verdict, esc.idempotency_key
+                        )
+                    halting = esc.verdict
+                    break
                 model_obs = await _shrink_for_model(
                     obs, max_chars=max_observation_chars, strategy=observation_strategy,
                     provider=provider, query=spec.query,
@@ -923,7 +1065,15 @@ def _initial_messages(spec: TaskSpec, tools: Iterable[Any]) -> list[dict]:
 
 
 async def _invoke(
-    run: _Run, turn: UUID, tools: dict, name: str, args: dict, *, timeout: float | None = None
+    run: _Run,
+    turn: UUID,
+    tools: dict,
+    name: str,
+    args: dict,
+    *,
+    gates: list | tuple = (),
+    timeout: float | None = None,
+    approved_key: str | None = None,
 ) -> dict:
     """Dispatch one tool call to an observation. A missing tool or a raising
     tool (e.g. an SSRF block) becomes an error observation, never a crash —
@@ -934,19 +1084,68 @@ async def _invoke(
     that hasn't been unlocked yet falls into the unknown-tool branch — the
     ladder is enforced on dispatch, not just on what the model is shown.
 
+    ``gates`` is the registered ``InvocationGate`` set (ZU-CORE-2): every gate
+    runs HERE, before the tool body, against the literal call. A DENY blocks the
+    call (the tool never executes) and returns an error observation; an ESCALATE
+    raises ``_GateEscalation`` for the dispatch site to climb a tier or pause for
+    a human. ``approved_key`` is the idempotency key of a human-approved call on
+    resume (ZU-CD-5): the matching call skips the gate (the human already
+    approved it) but still records that it was approved.
+
     ``timeout`` bounds the tool call (the run's remaining wall-time): tools are
     the untrusted/3rd-party surface, and without this a tool hung on a dead
     socket would block forever and defeat ``wall_time_s`` (which is otherwise
     only re-checked between turns). A timeout becomes an error observation — the
     same isolation a raise gets — and the next budget checkpoint ends the run."""
-    await run.emit(ev.TOOL_INVOKED, {"tool": name, "args": args}, parent=turn, source=name)
+    # Idempotency key (ZU-CORE-4). A human-approved resume passes the EXACT key the
+    # approval was bound to (``approved_key``) so the executed call is provably the
+    # one approved; otherwise mint it deterministically over (trace, call-position,
+    # tool, args) — the per-run dispatch counter, NOT the random turn event_id, so
+    # a replay of the same trace mints the same key.
+    if approved_key is not None:
+        idem = approved_key
+    else:
+        run._call_seq += 1
+        idem = str(
+            uuid5(run.trace_id, f"{run._call_seq}:{name}:{json.dumps(args, sort_keys=True, default=str)}")
+        )
+    invoked_id = await run.emit(
+        ev.TOOL_INVOKED, {"tool": name, "args": args, "idempotency_key": idem}, parent=turn, source=name
+    )
+    call = ToolCall(name=name, args=args)
+    if approved_key is not None:
+        # Resumed after a human approval (ZU-CD-5): the gate is satisfied by the
+        # recorded resolution bound to this exact key; record that and execute.
+        await run.emit(
+            ev.GATE_DECIDED,
+            {"action_ref": str(invoked_id), "tool": name, "decision": "approved_by_human", "gate": "human"},
+            parent=invoked_id,
+            source="human",
+        )
+    elif gates:
+        worst = await _gate_checkpoint(run, gates, call, invoked_id=invoked_id, turn=turn)
+        if worst is not None and worst.severity is Severity.DENY:
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": "gate_denied", "tool": name, "gate": worst.detector, "detail": worst.detail},
+                parent=invoked_id,
+                source=worst.detector,
+            )
+            obs: dict = {
+                "error": f"blocked by gate {worst.detector}: {worst.detail or 'denied'}",
+                "blocked": "gate_denied",
+            }
+            await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
+            return obs
+        if worst is not None and worst.severity is Severity.ESCALATE:
+            raise _GateEscalation(call, worst, idem)
     tool = tools.get(name)
     if tool is None:
-        obs: dict = {"error": f"unknown tool: {name}"}
+        obs = {"error": f"unknown tool: {name}"}
     else:
         try:
-            call = tool(run.ctx(), **args)
-            obs = await (asyncio.wait_for(call, timeout) if timeout is not None else call)
+            coro = tool(run.ctx(idempotency_key=idem), **args)
+            obs = await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
         except TimeoutError:
             log.warning("tool %r exceeded its %.3fs deadline; rejecting it", name, timeout or 0.0)
             await run.emit(
@@ -985,6 +1184,18 @@ async def _invoke(
             log.warning("tool %r returned an oversized observation; rejecting it", name)
             obs = {"error": "tool observation exceeds the size limit and was rejected",
                    "blocked": "oversized_observation"}
+    # Run-level taint (ZU-CD-3): a tool flags hostile content by returning a
+    # truthy ``_taint`` key. Flip the run flag (mechanical, not a policy
+    # self-report) and record it; pop the key so it never leaks into the model's
+    # observation or the stored content. The check is on shape, not tool name.
+    if isinstance(obs, dict) and obs.pop("_taint", False):
+        if run.raise_taint(name):
+            await run.emit(
+                ev.TAINT_RAISED,
+                {"source": name, "detail": "tool flagged hostile content"},
+                parent=turn,
+                source=name,
+            )
     # When the observation carried retrieved content, store it once in a data
     # event (the provenance grounding reads in step 6) and summarise it in the
     # tool.returned event, so a fetched page isn't duplicated in the log. The
@@ -1031,6 +1242,205 @@ async def _detector_checkpoint(
     if worst is not None and worst.severity in (Severity.ESCALATE, Severity.TERMINAL):
         return worst
     return None
+
+
+async def _gate_checkpoint(
+    run: _Run, gates: list | tuple, call: ToolCall, *, invoked_id: UUID, turn: UUID
+) -> Verdict | None:
+    """Run every InvocationGate against the pending call BEFORE it executes
+    (ZU-CORE-2), emit a ``harness.gate.decided`` per verdict (parented to the
+    tool.invoked event so replay can reconstruct which rule decided each action —
+    ZU-AUDIT-2), drain any durable-state writes the gates made (ZU-CD-4), and
+    return the worst verdict for ``_invoke`` to act on. Allow is the inert
+    default (no verdict)."""
+    ctx = run.ctx(invocation=call)
+    verdicts: list[Verdict] = []
+    for g in gates:
+        v = _safe_gate(g, call, ctx)
+        if v is None:
+            continue
+        payload = {
+            "action_ref": str(invoked_id),
+            "tool": call.name,
+            "decision": v.severity.value,
+            "gate": v.detector,
+            "rule_id": v.detector,
+            "detail": v.detail,
+        }
+        if v.kind:
+            payload["kind"] = v.kind
+        await run.emit(ev.GATE_DECIDED, payload, parent=invoked_id, source=v.detector)
+        verdicts.append(v)
+    # A gate may have written cumulative state (e.g. a velocity counter); record
+    # those writes to the log now so a pause/resume rebuilds them.
+    await run.flush_grants(parent=turn)
+    return _worst(verdicts)
+
+
+# --- human-in-the-loop ESCALATE: pause / resume (ZU-CD-1/2/5) -------------
+
+
+async def _pause_for_human(
+    run: _Run, ladder: _Ladder, tokens: int, step: int, call: ToolCall, verdict: Verdict, idem: str
+) -> Result:
+    """Suspend the run for a human to approve a specific invocation. The approval
+    record shows the LITERAL invocation parameters the harness holds (ground
+    truth, never model narration — ZU-CD-1), and the resumable snapshot persists
+    the gate-relevant state (tier, tokens, taint, the pending call + its
+    idempotency key) so resume stays bounded (ZU-CD-5)."""
+    approval_id = str(uuid5(run.trace_id, f"approval:{idem}"))
+    await run.emit(
+        ev.APPROVAL_REQUESTED,
+        {
+            "approval_id": approval_id,
+            "tool": call.name,
+            "args": call.args,  # the harness's literal parameters, not model text
+            "idempotency_key": idem,
+            "reason": verdict.detector,
+            "detail": verdict.detail,
+        },
+        parent=run.root,
+        source=verdict.detector,
+    )
+    await run.emit(
+        ev.RUN_PAUSED,
+        {
+            "approval_id": approval_id,
+            "tier": ladder.current,
+            "tokens": tokens,
+            "tainted": run.tainted,
+            "step": step,
+            "pending": {"tool": call.name, "args": call.args, "idempotency_key": idem},
+        },
+        parent=run.root,
+    )
+    return Result(status=Status.PAUSED, reason=approval_id)
+
+
+def _rebuild_run_state(events: Sequence[Event]) -> dict:
+    """Fold a paused run's event log back into its resumable state (ZU-CD-5):
+    the root, tier, tokens, taint flag, dispatch counter, durable grant writes,
+    and the latest pending approval with its human resolution (if any)."""
+    root: UUID | None = None
+    tier = 1
+    tokens = 0
+    tainted = False
+    call_seq = 0
+    grant_updates: list[tuple[str, str, Any]] = []
+    pending: dict | None = None
+    resolutions: dict[str, dict] = {}
+    for e in events:
+        t, p = e.type, e.payload
+        if t == ev.TASK_STARTED:
+            root = e.event_id
+            tainted = bool(p.get("tainted", False))
+        elif t == ev.TAINT_RAISED:
+            tainted = True
+        elif t == ev.TASK_ESCALATED and "to_tier" in p:
+            tier = max(tier, int(p["to_tier"]))
+        elif t == ev.GRANT_UPDATED:
+            grant_updates.append((p["grant_id"], p["key"], p["value"]))
+        elif t == ev.TOOL_INVOKED:
+            call_seq += 1
+        elif t == ev.RUN_PAUSED:
+            tier = max(tier, int(p.get("tier", tier)))
+            tokens = int(p.get("tokens", tokens))
+            tainted = tainted or bool(p.get("tainted", False))
+            pend = p.get("pending")
+            pending = {**pend, "approval_id": p.get("approval_id")} if pend else None
+        elif t == ev.APPROVAL_RESOLVED:
+            aid = p.get("approval_id")
+            if aid is not None:
+                resolutions[aid] = p
+    resolution = resolutions.get(pending["approval_id"]) if pending else None
+    return {
+        "root": root,
+        "tier": tier,
+        "tokens": tokens,
+        "tainted": tainted,
+        "call_seq": call_seq,
+        "grant_updates": grant_updates,
+        "pending": pending,
+        "resolution": resolution,
+    }
+
+
+async def _resume_from_log(
+    run: _Run,
+    events: Sequence[Event],
+    ladder: _Ladder,
+    gates: list | tuple,
+    spec: TaskSpec,
+    *,
+    max_observation_chars: int | None,
+    observation_strategy: str,
+    provider: ModelProvider,
+) -> tuple[Result | None, int, list[dict]]:
+    """Resume a paused run from its log (ZU-CD-5). Rebuilds the security spine,
+    then resolves the pending approval: an ``approve`` whose idempotency key
+    matches the paused invocation executes that EXACT call (ZU-CD-2), unchanged;
+    a ``deny`` or a key mismatch blocks it; no resolution yet keeps the run
+    paused. Returns ``(paused_or_None, tokens, messages)``."""
+    state = _rebuild_run_state(events)
+    run.root = state["root"]
+    # Restore the gate-relevant spine so the resumed run stays bounded.
+    ladder.current = max(ladder.current, int(state["tier"]))
+    run.tainted = bool(state["tainted"])
+    run._ctx.tainted = run.tainted
+    run._call_seq = int(state["call_seq"])
+    loader = getattr(run.grant_state, "load", None)
+    if loader is not None:
+        for grant_id, key, value in state["grant_updates"]:
+            loader(grant_id, key, value)
+    tokens = int(state["tokens"])
+    messages = _initial_messages(spec, ladder.active().values())
+
+    pending = state["pending"]
+    resolution = state["resolution"]
+    await run.emit(
+        ev.RUN_RESUMED,
+        {"approval_id": pending["approval_id"] if pending else None},
+        parent=run.root,
+    )
+    if pending is None:
+        return None, tokens, messages  # nothing pending; just continue the run
+    if resolution is None:
+        # No human decision yet: stay paused (idempotent — re-resuming re-pauses).
+        return Result(status=Status.PAUSED, reason=pending["approval_id"]), tokens, messages
+
+    turn = await run.emit(ev.TURN_STARTED, {"step": 0, "resumed": True}, parent=run.root)
+    approved = (
+        resolution.get("decision") == "approve"
+        and resolution.get("idempotency_key") == pending["idempotency_key"]
+    )
+    if approved:
+        # Execute ONLY the approved invocation, unchanged, bound to its exact key.
+        obs = await _invoke(
+            run, turn, ladder.active(), pending["tool"], pending["args"],
+            gates=gates, approved_key=pending["idempotency_key"],
+            timeout=spec.budget.wall_time_s,
+        )
+        model_obs = await _shrink_for_model(
+            obs, max_chars=max_observation_chars, strategy=observation_strategy,
+            provider=provider, query=spec.query,
+        )
+        messages.append(
+            {"role": "tool", "name": pending["tool"], "content": json.dumps(model_obs, default=str)}
+        )
+    else:
+        # Denied, or the resolution's key does not bind to this invocation
+        # (approve-then-swap defeated): record the block, never execute it.
+        await run.emit(
+            ev.DEFENSE_BLOCKED,
+            {"kind": "human_denied", "tool": pending["tool"],
+             "detail": "approval denied or binding mismatch"},
+            parent=run.root,
+            source="human",
+        )
+        messages.append(
+            {"role": "tool", "name": pending["tool"], "content": json.dumps({"blocked": "human_denied"})}
+        )
+    return None, tokens, messages
 
 
 async def _escalate(

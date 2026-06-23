@@ -137,6 +137,30 @@ async def test_extra_hosts_dns_pin_is_passed_to_docker() -> None:
     assert kw is not None and kw["extra_hosts"] == {"shop.test": "93.184.216.34"}
 
 
+async def test_dns_gate_is_passed_to_docker() -> None:
+    # ZU-NET-1: an EgressEnforcement's DNS gate reaches the container as `dns`, so
+    # the embedded resolver cannot be used as a covert egress channel.
+    container = _FakeContainer(exit_code=0, output=b"{}")
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch(
+        {"image": "img", "network": "isolated", "network_name": "net",
+         "extra_hosts": {"proxy": "10.0.0.5"}, "dns": ["127.0.0.1"]}
+    )
+    kw = client.containers.run_kwargs
+    assert kw is not None and kw["dns"] == ["127.0.0.1"]
+
+
+async def test_no_dns_key_leaves_docker_default() -> None:
+    # Backward-compatible: omitting `dns` means the kwarg is not set at all.
+    container = _FakeContainer(exit_code=0, output=b"{}")
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "network": True})
+    kw = client.containers.run_kwargs
+    assert kw is not None and "dns" not in kw
+
+
 async def test_container_is_hardened_by_default() -> None:
     # The tier-2 container runs an untrusted, model-chosen URL: it must drop all
     # caps, forbid privilege escalation, and bound pids by default.

@@ -73,5 +73,14 @@ server — `zu_scaffold/validate/run/traces`, `zu_explore/explore_save`,
   `construct.py` (the meta-agent driver + `LiveStrategist`), `construct_sandbox.py`,
   `explore.py`, `contribute.py`, `mcp_server.py`.
 - Per-package details: each `packages/zu-*/README.md`. Ports + recipes: AGENTS.md.
+- **Upstream conformance** (the mechanical guarantees a credential/capability
+  consumer builds on): the pre-execution gate (`InvocationGate`), idempotency,
+  run-level taint, durable grant state, human-pause/resume, the hash-chained audit
+  log, harness-owned `Channel`s, out-of-process plugins (`zu_core.rpc` +
+  `zu_backends.oop_launcher`), `WorkloadIdentity`, and `EgressEnforcement`. Spec +
+  status matrix: [`zu-upstream-conformance.md`](zu-upstream-conformance.md);
+  trusted-base enumeration: [`docs/TCB.md`](docs/TCB.md); every requirement has a
+  named offline proof, guarded by
+  `packages/zu-core/tests/test_conformance_matrix.py`.
 - Outside the package workspace: **`automation/gap-triage/`** (zu maintaining zu — the
   CI triage agent + `zu_cli.gap_triage`) and **`community/discord-bot/`** (community infra).
