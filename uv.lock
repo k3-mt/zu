@@ -2293,6 +2293,7 @@ dependencies = [
 all = [
     { name = "zu-backends", extra = ["docker"] },
     { name = "zu-cli", extra = ["mcp", "serve", "test"] },
+    { name = "zu-huggingface", extra = ["hosted"] },
     { name = "zu-providers", extra = ["anthropic", "openai"] },
     { name = "zu-tools" },
 ]
@@ -2304,6 +2305,9 @@ demo = [
 ]
 docker = [
     { name = "zu-backends", extra = ["docker"] },
+]
+huggingface = [
+    { name = "zu-huggingface", extra = ["hosted"] },
 ]
 mcp = [
     { name = "zu-cli", extra = ["mcp"] },
@@ -2334,6 +2338,8 @@ requires-dist = [
     { name = "zu-cli", extras = ["serve"], marker = "extra == 'serve'", editable = "packages/zu-cli" },
     { name = "zu-cli", extras = ["test"], marker = "extra == 'all'", editable = "packages/zu-cli" },
     { name = "zu-cli", extras = ["test"], marker = "extra == 'test'", editable = "packages/zu-cli" },
+    { name = "zu-huggingface", extras = ["hosted"], marker = "extra == 'all'", editable = "packages/zu-huggingface" },
+    { name = "zu-huggingface", extras = ["hosted"], marker = "extra == 'huggingface'", editable = "packages/zu-huggingface" },
     { name = "zu-providers", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'all'", editable = "packages/zu-providers" },
     { name = "zu-providers", extras = ["anthropic"], marker = "extra == 'anthropic'", editable = "packages/zu-providers" },
@@ -2344,7 +2350,7 @@ requires-dist = [
     { name = "zu-tools", marker = "extra == 'demo'", editable = "packages/zu-tools" },
     { name = "zu-tools", marker = "extra == 'web'", editable = "packages/zu-tools" },
 ]
-provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "mcp", "test", "all"]
+provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "mcp", "test", "huggingface", "all"]
 
 [[package]]
 name = "zu-testing"
