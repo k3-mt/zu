@@ -7,6 +7,37 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-06-23
+
+### Added — the upstream-conformance layer (five pillars) + the rail mechanisms
+
+Zu's trusted core now mechanically provides the guarantees a credential/capability
+consumer builds on — spec in `zu-upstream-conformance.md`, trusted-base enumeration
+in `docs/TCB.md`, every requirement guarded by a named offline proof in
+`packages/zu-core/tests/test_conformance_matrix.py`:
+
+- **ZU-CORE** — a deterministic pre-execution `InvocationGate` (allow/deny/escalate
+  on every call, **fail-closed on its own crash** for capability-bearing/tier-≥2
+  calls) and end-to-end tool-call idempotency keys.
+- **ZU-NET** — harness-owned `Channel`s, out-of-process plugins (`zu_core.rpc` +
+  `zu_backends.OutOfProcessLauncher`, a real memory boundary), `WorkloadIdentity`
+  (static-mTLS reference + attestation hook), and pluggable `EgressEnforcement`
+  with embedded-DNS gating.
+- **ZU-CD** — run-level taint, a durable per-grant `GrantStore`, and
+  human-in-the-loop ESCALATE (pause/resume bound to the exact approved invocation).
+- **ZU-AUDIT** — a tamper-evident per-trace hash chain (`zu_core.chain`) with
+  external anchoring + optional HMAC signing, gate/approval decision provenance,
+  and consumer-defined `payload["ctx"]` fields.
+- **ZU-EXT** — `Registry.register_kind` (consumers add new port types without
+  forking the core) and the `docs/TCB.md` trusted/untrusted boundary.
+- **ZU-RAIL** — rail content-hash approval (`Track.content_hash` +
+  `approved_rail_hash`), `explore`-mode instrument disarm (`TaskSpec.mode`), the
+  `ReplayArbiter` port (escalate consequential replay divergence to a **human**),
+  and `consequence`/`destination` step annotations carried capture→replay.
+
+All additive and backward-compatible; `zu-core` stays stdlib + Pydantic (no new
+dependency).
+
 ### Added — dormant-pivot probe: the last red-team gap is closed (RED_TEAM.md §6.1)
 
 The supply-chain logic bomb — a plugin benign in CI that pivots on a production
