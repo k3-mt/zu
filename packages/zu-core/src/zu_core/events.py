@@ -91,6 +91,14 @@ APPROVAL_RESOLVED = "harness.approval.resolved"
 # resumed run re-entering the loop from a prior log.
 RUN_PAUSED = "harness.run.paused"
 RUN_RESUMED = "harness.run.resumed"
+# A replayed track was verified against a human-approved content hash (ZU-RAIL-1):
+# {"rail_hash"}. The run refuses to replay an unapproved rail (a content-hash
+# mismatch is recorded as harness.defense.blocked {kind:"rail_unapproved"}).
+RAIL_VERIFIED = "harness.rail.verified"
+# A capability-bearing tool call was DISARMED in explore mode (ZU-RAIL-2):
+# {"tool"}. The tool did not execute — a stub observation was returned instead, so
+# pathfinding on a hostile surface is never armed with live instruments.
+RAIL_DISARMED = "harness.rail.disarmed"
 
 # --- harness.pipeline.* — multi-phase orchestration (zu.Pipeline) ------------
 # A pipeline chains runs under ONE shared trace_id; these record its boundaries
@@ -130,6 +138,8 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         APPROVAL_RESOLVED,
         RUN_PAUSED,
         RUN_RESUMED,
+        RAIL_VERIFIED,
+        RAIL_DISARMED,
         PIPELINE_STARTED,
         PIPELINE_PHASE_STARTED,
         PIPELINE_PHASE_COMPLETED,

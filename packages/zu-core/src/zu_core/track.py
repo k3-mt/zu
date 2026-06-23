@@ -16,6 +16,7 @@ lives in the loop, where tool dispatch already is.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -78,12 +79,33 @@ class TrackStep:
     (ms since the previous call was issued — the model's pacing, capped on replay),
     and the ladder ``tier`` the call ran at. The tier lets the track REMEMBER its
     own escalation: a step recorded at tier 2 means the path had climbed there, so
-    the navigator re-climbs (emitting the escalation) before re-issuing it."""
+    the navigator re-climbs (emitting the escalation) before re-issuing it.
+
+    ``consequence`` and ``destination`` are blessed consumer annotations (ZU-RAIL-4):
+    a content-free consequence class (e.g. ``"LOW"``/``"HIGH"``) and a destination
+    descriptor (merchant/recipient/origin). Zu does not interpret them — the
+    *classifier* and the values' meaning are the consumer's policy — but it carries
+    them across capture→replay and re-stamps them into the replayed
+    ``harness.tool.invoked`` ``payload["ctx"]`` so a gate or a ``ReplayArbiter`` reads
+    them uniformly to gate divergence by consequence."""
 
     tool: str
     args: dict
     wait_ms: int = 0
     tier: int = 1
+    consequence: str | None = None
+    destination: str | None = None
+
+
+def _step_to_dict(s: TrackStep) -> dict:
+    """Serialise a step, omitting the optional annotations when absent so a track
+    with no consequence/destination is byte-identical to a pre-RAIL-4 track."""
+    d: dict = {"tool": s.tool, "args": s.args, "wait_ms": s.wait_ms, "tier": s.tier}
+    if s.consequence is not None:
+        d["consequence"] = s.consequence
+    if s.destination is not None:
+        d["destination"] = s.destination
+    return d
 
 
 @dataclass
@@ -101,8 +123,7 @@ class Track:
         return json.dumps(
             {"task": self.task,
              "model": self.model,
-             "steps": [{"tool": s.tool, "args": s.args, "wait_ms": s.wait_ms, "tier": s.tier}
-                       for s in self.steps]},
+             "steps": [_step_to_dict(s) for s in self.steps]},
             indent=2,
         )
 
@@ -113,9 +134,25 @@ class Track:
             task=data.get("task", ""),
             model=data.get("model"),
             steps=[TrackStep(tool=s["tool"], args=s.get("args", {}),
-                             wait_ms=int(s.get("wait_ms", 0)), tier=int(s.get("tier", 1)))
+                             wait_ms=int(s.get("wait_ms", 0)), tier=int(s.get("tier", 1)),
+                             consequence=s.get("consequence"), destination=s.get("destination"))
                    for s in data.get("steps", [])],
         )
+
+    def content_hash(self) -> str:
+        """A deterministic sha256 over the rail's ordered **semantic** steps — the
+        identity a human approval is bound to (ZU-RAIL-1), so replay can verify it
+        is running *that exact rail*. Hashes ``tool``/``args``/``tier`` and the
+        ``consequence``/``destination`` annotations; **excludes ``wait_ms``**, which
+        is cosmetic pacing (humanised per run) and must not invalidate an approved
+        rail. Canonical JSON like ``zu_core.chain`` — stdlib only."""
+        body = [
+            {"tool": s.tool, "args": s.args, "tier": s.tier,
+             "consequence": s.consequence, "destination": s.destination}
+            for s in self.steps
+        ]
+        blob = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
 
     def save(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as fh:
@@ -163,6 +200,13 @@ def record_track(events: list[Any], *, task: str, model: str | None = None) -> T
         if prev_ts is not None and ts is not None:
             wait_ms = max(0, int((ts - prev_ts).total_seconds() * 1000))
         prev_ts = ts
+        # Carry the blessed step annotations (ZU-RAIL-4) if the consumer stamped
+        # them into the call's payload["ctx"] during pathfinding, so consequence/
+        # destination round-trip capture→replay. Zu never sets them itself.
+        raw_ctx = payload.get("ctx")
+        ctx: dict = raw_ctx if isinstance(raw_ctx, dict) else {}
         steps.append(TrackStep(tool=tool, args=dict(payload.get("args", {})),
-                               wait_ms=wait_ms, tier=tier))
+                               wait_ms=wait_ms, tier=tier,
+                               consequence=ctx.get("consequence"),
+                               destination=ctx.get("destination")))
     return Track(task=task, steps=steps, model=model)

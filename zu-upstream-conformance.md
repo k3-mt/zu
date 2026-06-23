@@ -183,6 +183,71 @@ A compromised or buggy plugin MUST NOT be able to acquire capabilities beyond th
 
 ---
 
+## 6b. Rail mechanisms (`ZU-RAIL`) — for delegated-action consumers
+
+The fifth pillar, added for a delegated-action consumer that generalizes Zu's capture→
+replay machine (`Track` + the navigator + model-at-frontier) into *delegated
+action on rails*: pathfind a task once, approve the captured rail, then replay it
+as the user with models pinned to the edges. Zu's rail machine is already the
+right one; these four are small **extensions of existing mechanisms**, each keeping
+policy (the diff metric, the consequence classifier, the router thresholds, scope
+vocabularies) in the consumer per `ZU-NOT`. All are additive — default behavior is
+unchanged until a consumer opts in.
+
+### ZU-RAIL-1 — A captured rail is bound to a human approval over its content hash **(MUST)**
+A whole captured `Track` is approvable as a durable scoped grant, pinned to a content
+hash so replay verifies it is running *that exact rail*.
+- **Mechanism (Zu):** `Track.content_hash()` (over the ordered semantic steps —
+  `tool`/`args`/`tier`/annotations; `wait_ms` excluded as cosmetic pacing) and
+  `run_task(approved_rail_hash=…)` which verifies the hash **before any step runs**
+  (mismatch → terminal `rail.unapproved` + `harness.defense.blocked`; match →
+  `harness.rail.verified`). **Policy (consumer):** the approval signature, the
+  scope/`consent_ref` it carries (in `payload["ctx"]`), the human presentation.
+- **Conformance test:** a rail replays only when its hash matches the approved one;
+  a tampered step is refused before execution.
+
+### ZU-RAIL-2 — A run carries a mode; `explore` mechanically disarms instruments **(MUST)**
+"Exploration is never armed with live instruments" made mechanical, not convention.
+- **Mechanism (Zu):** `TaskSpec.mode` (`"execute"`/`"explore"`), exposed on
+  `RunContext.mode` and recorded on `harness.task.started`; in `explore` the loop
+  refuses/stubs any capability-bearing / tier-≥2 tool call (`harness.rail.disarmed`),
+  using the same `_needs_containment` predicate as the containment floor. **Policy
+  (consumer):** what a stub returns; when to flip explore→execute.
+- **Conformance test:** in explore mode a capability-bearing tool does not execute
+  (stub + disarmed event); an inert tier-1 tool still runs; execute mode runs it.
+
+### ZU-RAIL-3 — Consequence-weighted replay divergence, escalatable to a human **(MUST)**
+The substrate for the consumer's edge router. Zu's built-in divergence handling is
+coarse and escalates to the *model* (tier climb); a delegated-action consumer must
+surface the recorded step **and** the live observation to its own decision component
+and escalate a *consequential* drift to a **human**.
+- **Mechanism (Zu):** the `ReplayArbiter` port (`decide(step, observation, ctx) ->
+  CONTINUE|HANDOFF|ESCALATE|STOP`), consulted per replayed step (a new registrable
+  kind); the loop honors **ESCALATE → pause for a human** (reusing the ZU-CD-1/2/5
+  pause/resume — the step is the pending, human-approved invocation), STOP →
+  terminal, HANDOFF → today's hand-to-model. No arbiter ⇒ unchanged behavior.
+  **Policy (consumer):** the structural-diff magnitude, novelty test, origin match,
+  thresholds, patch-validation — kept downstream because the metric is gameable and
+  must iterate outside the trusted core.
+- **Conformance test:** a scripted arbiter escalates a HIGH step → run pauses with
+  the literal step args; STOP → terminal; CONTINUE → replay proceeds.
+
+### ZU-RAIL-4 — Steps carry `consequence`/`destination` annotations read at the gate **(MUST)**
+- **Mechanism (Zu):** `TrackStep.consequence`/`destination`, carried across
+  capture→replay (`record_track` reads them from `payload["ctx"]`, the navigator
+  re-stamps them into the replayed `harness.tool.invoked` `payload["ctx"]` and onto
+  `RunContext`) so a gate/arbiter reads them uniformly. **Policy (consumer):** the
+  classifier and what the values mean.
+- **Conformance test:** annotations round-trip record→serialize and appear in the
+  replayed call's `payload["ctx"]`.
+
+**Division of labor:** Zu provides the hooks — approval binding, run-mode disarm,
+divergence surfacing + escalate-to-human, annotation carriage. The consumer keeps
+the judgment. The most consequential is ZU-RAIL-3's escalate-to-a-**human** (Zu's
+default escalates a broken path to the *model*).
+
+---
+
 ## 7. Explicit non-requirements (`ZU-NOT`)
 
 This is a deliberate request that Zu **not** absorb the consumer's domain, so Zu's trusted core stays minimal. A good upstream contract bounds what it asks for.
@@ -242,6 +307,10 @@ implementations are plugins.
 | ZU-EXT-2 | Trusted/untrusted boundary explicit & documented | MUST | **Satisfied** | [`docs/TCB.md`](docs/TCB.md) |
 | ZU-EXT-3 | Port framework supports narrow typed contracts | SHOULD | **Satisfied** | typed Protocols + narrow broker verbs (mint/introspect); `test_oop_channel.py` |
 | ZU-EXT-4 | Plugin failure contained; no self-privilege-escalation | MUST | **Satisfied** | envelope + OOP memory boundary + gate; `test_oop_channel.py` |
+| ZU-RAIL-1 | Captured rail bound to a human approval over its content hash | MUST | **Satisfied** | `Track.content_hash()` + `run_task(approved_rail_hash=…)` verify-before-replay; `test_rail.py` |
+| ZU-RAIL-2 | Run mode; `explore` mechanically disarms capability-bearing calls | MUST | **Satisfied** | `TaskSpec.mode`; `_invoke` stubs a capability-bearing call in explore; `test_rail.py` |
+| ZU-RAIL-3 | Consequence-weighted replay divergence, escalatable to a human | MUST | **Satisfied** | `ReplayArbiter` port + `_replay_track` consult → pause-for-human/stop/handoff; `test_rail.py` |
+| ZU-RAIL-4 | Steps carry `consequence`/`destination` annotations, read at the gate | MUST | **Satisfied** | `TrackStep` annotations round-trip + stamped to `payload["ctx"]`/`RunContext`; `test_rail.py` |
 
 ---
 

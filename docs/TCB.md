@@ -61,6 +61,7 @@ Consumers add new kinds with `register_kind` **without editing the core**
 | `channels` (`zu.channels`) | `Channel` | Harness-owned external channel; holds its credential inside; exposes typed verbs, never the secret. |
 | `workload_identity` (`zu.workload_identity`) | `WorkloadIdentity` | Presents/verifies an attestable identity; the proof carries no private key. A precondition for authz, never the authority. |
 | `egress_enforcement` (`zu.egress_enforcement`) | `EgressEnforcement` | Installs default-deny network policy and gates DNS; prevents bypass beneath the policy. |
+| `replay_arbiters` (`zu.replay_arbiters`) | `ReplayArbiter` | Decides per replayed rail step (CONTINUE/HANDOFF/ESCALATE/STOP) from the recorded step + live observation (ZU-RAIL-3); the loop honors escalate-to-**human**. The diff metric/thresholds are the consumer's policy. |
 
 ---
 

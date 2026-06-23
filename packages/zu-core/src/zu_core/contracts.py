@@ -49,6 +49,13 @@ class TaskSpec(BaseModel):
     # force-escalate a high-consequence action once the run is tainted. It is a
     # coarse, mechanical, run-level flag — never a policy self-report.
     tainted: bool = False
+    # Run mode (ZU-RAIL-2): ``"execute"`` (default — unchanged behavior) or
+    # ``"explore"``. In ``explore`` the loop mechanically DISARMS capability-bearing
+    # tool calls (it stubs/refuses them instead of executing) so a model loose on a
+    # hostile surface during pathfinding is never armed with live instruments. The
+    # loop reads it; what a stub returns and when to flip explore→execute is the
+    # consumer's policy.
+    mode: str = "execute"
 
 
 class Result(BaseModel):

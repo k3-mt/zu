@@ -42,6 +42,7 @@ INTERFACE_VERSION: dict[str, int] = {
     "channels": 1,  # Channel — a harness-owned external channel (ZU-NET-2)
     "workload_identity": 1,  # WorkloadIdentity — attestable identity (ZU-NET-4)
     "egress_enforcement": 1,  # EgressEnforcement — pluggable default-deny (ZU-NET-1)
+    "replay_arbiters": 1,  # ReplayArbiter — replay-divergence decision (ZU-RAIL-3)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -225,6 +226,9 @@ class RunContext(BaseModel):
     # --- security seams the gate/validators read at decision time --------------
     # Run-level taint (ZU-CD-3): True once this run ingested hostile input.
     tainted: bool = False
+    # Run mode (ZU-RAIL-2): "execute" (default) or "explore"; a gate/tool reads it
+    # to disarm in exploration. The loop also enforces it mechanically.
+    mode: str = "execute"
     # Durable per-grant state handle (ZU-CD-4): a ``GrantStore`` (kept ``Any`` so
     # the contract stays a thin value object, matching ``spec``/``observation``).
     grants: Any = None
@@ -234,6 +238,11 @@ class RunContext(BaseModel):
     # The idempotency key minted for the invocation in flight (ZU-CORE-4); a tool
     # reads it to dedupe a retried side effect. ``None`` outside a tool call.
     idempotency_key: str | None = None
+    # The blessed step annotations for the invocation in flight (ZU-RAIL-4):
+    # ``{"consequence", "destination"}`` carried from the replayed rail step, so a
+    # gate can gate divergence/instruments by the rail's content-free consequence
+    # class without reading hostile content. ``None`` outside a replayed call.
+    annotations: dict | None = None
 
 
 @runtime_checkable
@@ -314,6 +323,38 @@ class GrantStore(Protocol):
     def get(self, grant_id: str, key: str, default: Any = None) -> Any: ...
 
     def put(self, grant_id: str, key: str, value: Any) -> None: ...
+
+
+# --- the replay-divergence arbiter (ZU-RAIL-3) ---------------------------
+#
+# When a recorded rail (``Track``) is replayed and a step's live observation
+# diverges from the recorded path, *something* must decide what to do. Zu's
+# built-in divergence handling is coarse and one-directional: a hard challenge
+# hands the frontier to the MODEL (tier climb). A consumer running delegated
+# action needs more — to surface BOTH the recorded step and the live observation
+# to its own decision component and to escalate a *consequential* drift to a
+# HUMAN, not the model. ``ReplayArbiter`` is that seam: the loop calls ``decide``
+# per replayed step with the recorded ``step``, the live ``observation``, and the
+# run ``ctx`` (which carries the step's consequence/destination annotations and
+# the taint/mode flags), and HONOURS the returned outcome — including pausing for
+# a human. The arbiter holds the *policy* (the structural-diff metric, the novelty
+# test, the thresholds, patch-validation) — deliberately downstream, because that
+# judgment is domain-specific and gameable and must iterate outside the trusted
+# core. With no arbiter registered the loop's existing behaviour is unchanged.
+
+
+class ReplayDecision(str, Enum):
+    CONTINUE = "continue"  # the drift is within the rail; keep replaying
+    HANDOFF = "handoff"  # hand the frontier to the model (Zu's existing default)
+    ESCALATE = "escalate"  # pause for a HUMAN to approve this exact step
+    STOP = "stop"  # abort the run (terminal)
+
+
+@runtime_checkable
+class ReplayArbiter(Protocol):
+    name: str
+
+    def decide(self, step: Any, observation: Any, ctx: RunContext) -> ReplayDecision: ...
 
 
 # --- infrastructure ports ------------------------------------------------
