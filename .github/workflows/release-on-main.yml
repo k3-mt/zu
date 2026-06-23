@@ -47,9 +47,17 @@ jobs:
         if: steps.precheck.outputs.ok == 'true'
         run: uv build --all-packages
 
+      # zu-testing is dev-only and must NEVER be published — drop it so the
+      # upload doesn't keep trying to create that project on PyPI.
+      - name: Drop the dev-only distribution
+        if: steps.precheck.outputs.ok == 'true'
+        run: rm -f dist/zu_testing-*
+
       - name: Upload new versions (skip already-published)
         if: steps.precheck.outputs.ok == 'true'
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        # --skip-existing makes this idempotent; re-run if PyPI's new-project
+        # creation rate limit (HTTP 429) interrupts a first-time project upload.
         run: uvx twine upload --skip-existing --non-interactive dist/*

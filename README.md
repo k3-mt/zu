@@ -141,6 +141,9 @@ pip install 'zu-runtime[anthropic]'   # + the Anthropic SDK to call a real model
 pip install 'zu-runtime[serve]'       # + the HTTP server (zu serve)
 pip install 'zu-runtime[docker]'      # + the Docker sandbox (tier-2 browser containment)
 pip install 'zu-runtime[mcp]'         # + the MCP server (zu mcp)
+pip install 'zu-runtime[huggingface]' # + HuggingFace task models as typed tools/detectors
+                                      #   (hosted router; for local pipelines:
+                                      #   pip install 'zu-huggingface[local]')
 ```
 
 You almost never install the `zu-*` sub-packages individually — they're published standalone
@@ -247,6 +250,7 @@ zu/
     zu-tools/       # http_fetch, html_parse, render_dom
     zu-checks/      # detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)
     zu-backends/    # local-docker sandbox + sqlite/jsonl event sinks
+    zu-huggingface/ # HuggingFace task models as typed tools/detectors/validators
     zu-redteam/     # the plugin-test gate + adversarial red team (zu test-plugin)
     zu-cli/         # the `zu` command + `zu serve` (HTTP)
     zu/             # the `import zu` embed facade (published as zu-runtime)

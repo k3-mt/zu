@@ -46,8 +46,13 @@ mcp = ["zu-cli[mcp]==0.2.0"]
 # The plugin-test gate + adversarial red team (`zu test-plugin`) — a contributor
 # / CI tool for proving a plugin cooperates and withstands attack.
 test = ["zu-cli[test]==0.2.0"]
+# HuggingFace task models as typed tools/detectors/validators (behind the
+# supply-chain guards). [huggingface] pulls the hosted Inference Providers
+# router; for local pipelines install `zu-huggingface[local]` (transformers + a
+# backend) directly.
+huggingface = ["zu-huggingface[hosted]==0.2.0"]
 # Everything: web tools, both model SDKs, the server, the Docker sandbox, MCP,
-# and the test gate.
+# the test gate, and the HuggingFace adapter.
 all = [
     "zu-tools==0.2.0",
     "zu-providers[anthropic]==0.2.0",
@@ -56,6 +61,7 @@ all = [
     "zu-cli[mcp]==0.2.0",
     "zu-cli[test]==0.2.0",
     "zu-backends[docker]==0.2.0",
+    "zu-huggingface[hosted]==0.2.0",
 ]
 
 [project.urls]
