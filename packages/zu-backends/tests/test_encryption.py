@@ -67,8 +67,8 @@ def test_tampered_ciphertext_is_rejected() -> None:
 async def test_sink_roundtrip_with_encryption() -> None:
     sink = SqliteSink(":memory:", codec=AesGcmCodec(_KEY))
     ev = _event(uuid4())
-    await sink.append(ev)
-    assert await sink.query({"task_id": ev.task_id}) == [ev]  # decrypts cleanly
+    stored = await sink.append(ev)  # linked + encrypted
+    assert await sink.query({"task_id": ev.task_id}) == [stored]  # decrypts cleanly
 
 
 async def test_payload_is_ciphertext_on_disk(tmp_path) -> None:
@@ -167,8 +167,8 @@ async def test_sink_roundtrip_with_managed_codec() -> None:
     kp = _DictKeyProvider({"k1": os.urandom(32)}, current="k1")
     sink = SqliteSink(":memory:", codec=ManagedAesGcmCodec(kp))
     ev = _event(uuid4())
-    await sink.append(ev)
-    assert await sink.query({"task_id": ev.task_id}) == [ev]
+    stored = await sink.append(ev)
+    assert await sink.query({"task_id": ev.task_id}) == [stored]
 
 
 async def test_tampered_index_column_fails_to_decrypt(tmp_path) -> None:

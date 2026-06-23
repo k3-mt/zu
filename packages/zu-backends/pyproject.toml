@@ -29,10 +29,26 @@ zu-egress-proxy = "zu_backends.egress_proxy:main"
 
 [project.entry-points."zu.backends"]
 local-docker = "zu_backends.local_docker:LocalDockerBackend"
+oop-launcher = "zu_backends.oop_launcher:OutOfProcessLauncher"
 
 [project.entry-points."zu.sinks"]
 sqlite = "zu_backends.sqlite_sink:SqliteSink"
 jsonl = "zu_backends.jsonl_sink:JsonlSink"
+
+# A harness-owned channel to an external endpoint (ZU-NET-2): the reference
+# credential broker. Run out-of-process via the oop-launcher for a real
+# memory boundary (ZU-NET-3).
+[project.entry-points."zu.channels"]
+credential-broker = "zu_backends.broker:CredentialBroker"
+
+# Attestable workload identity (ZU-NET-4/5): the stdlib-only static reference.
+[project.entry-points."zu.workload_identity"]
+static = "zu_backends.identity:StaticIdentity"
+
+# Pluggable egress enforcement (ZU-NET-1): default-DROP + DNS gating mechanisms.
+[project.entry-points."zu.egress_enforcement"]
+docker-internal-net = "zu_backends.egress_enforce:DockerInternalNetEnforcement"
+nftables = "zu_backends.egress_enforce:NftablesEnforcement"
 
 [project.entry-points."zu.triggers"]
 webhook = "zu_backends.triggers:WebhookTrigger"

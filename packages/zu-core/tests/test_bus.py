@@ -95,7 +95,10 @@ async def test_one_crashing_destination_doesnt_stop_the_rest() -> None:
     assert reached == ["before", "after"]
     assert len(bus.subscriber_failures) == 1
     f = bus.subscriber_failures[0]
-    assert f.event == ev and isinstance(f.error, RuntimeError)
+    # The bus fans out the linked (hash-chained) event from the canonical store,
+    # so it's the same record (same id) carrying the chain, not the input object.
+    assert f.event.event_id == ev.event_id and f.event.hash is not None
+    assert isinstance(f.error, RuntimeError)
 
 
 async def test_sink_failure_propagates() -> None:

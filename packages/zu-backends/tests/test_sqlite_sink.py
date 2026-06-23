@@ -30,18 +30,20 @@ def _event(task_id, type="harness.task.started", parent=None, **payload) -> Even
 async def test_read_back_is_identical() -> None:
     sink = SqliteSink(":memory:")
     ev = _event(uuid4())
-    await sink.append(ev)
+    stored = await sink.append(ev)  # the linked (hash-chained) event that persists
+    assert stored is not None and stored.hash is not None  # ZU-AUDIT-1
     back = await sink.query({"task_id": ev.task_id})
-    assert back == [ev]  # full equality: id, ts (tz-aware), payload, everything
+    assert back == [stored]  # full equality: id, ts (tz-aware), payload, chain
 
 
 async def test_append_is_idempotent() -> None:
     sink = SqliteSink(":memory:")
     ev = _event(uuid4())
-    await sink.append(ev)
-    await sink.append(ev)  # ON CONFLICT(event_id) DO NOTHING
+    stored = await sink.append(ev)
+    again = await sink.append(ev)  # ON CONFLICT(event_id) DO NOTHING
     assert await sink.count() == 1
-    assert await sink.query({"event_id": ev.event_id}) == [ev]
+    assert again == stored  # idempotent re-append returns the stored linked copy
+    assert await sink.query({"event_id": ev.event_id}) == [stored]
 
 
 async def test_filter_by_parent_id_null() -> None:
@@ -97,6 +99,47 @@ async def test_query_rejects_unknown_filter() -> None:
         await sink.query({"payload": "anything"})
 
 
+async def test_chain_persists_and_verifies_across_connections(tmp_path) -> None:
+    # ZU-AUDIT-1: the per-trace hash chain survives a reopen and verifies; a new
+    # connection seeds its head from the DB so the chain keeps extending.
+    from zu_core.chain import verify_chain
+
+    db = str(tmp_path / "chain.db")
+    trace, task = uuid4(), uuid4()
+
+    def ev() -> Event:
+        return Event(trace_id=trace, task_id=task, type="harness.task.started", source="loop")
+
+    s1 = SqliteSink(db)
+    for _ in range(3):
+        await s1.append(ev())
+    s1.close()
+
+    s2 = SqliteSink(db)
+    await s2.append(ev())  # extends the chain after restart
+    events = await s2.query({"trace_id": trace})
+    s2.close()
+    assert len(events) == 4
+    assert verify_chain(events) == []
+
+
+async def test_consumer_field_indexed_and_queryable() -> None:
+    # ZU-AUDIT-3: a registered payload["ctx"] field is queryable via the side
+    # index on the durable sink; an unregistered field is still rejected.
+    from zu_core.eventstore import register_event_filter
+
+    register_event_filter("consent_ref")
+    sink = SqliteSink(":memory:")
+    task = uuid4()
+    await sink.append(_event(task, ctx={"consent_ref": "C-1"}))
+    await sink.append(_event(task, ctx={"consent_ref": "C-2"}))
+    await sink.append(_event(task, ctx={"consent_ref": "C-1"}))
+    rows = await sink.query({"consent_ref": "C-1"})
+    assert len(rows) == 2
+    with pytest.raises(ValueError):
+        await sink.query({"not_registered": "x"})
+
+
 def test_concurrent_threads_do_not_corrupt(tmp_path) -> None:
     """The shared connection (check_same_thread=False) is serialised by an
     internal lock, so appends from many threads — each on its own event loop,
@@ -127,10 +170,10 @@ async def test_persists_across_connections(tmp_path) -> None:
     db = str(tmp_path / "zu.db")
     ev = _event(uuid4())
     s1 = SqliteSink(db)
-    await s1.append(ev)
+    stored = await s1.append(ev)
     s1.close()
 
     s2 = SqliteSink(db)  # fresh connection, same file
     back = await s2.query({"task_id": ev.task_id})
     s2.close()
-    assert back == [ev]
+    assert back == [stored]

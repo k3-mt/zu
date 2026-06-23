@@ -80,6 +80,21 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 | an event sink (storage)     | `zu-backends`    | `zu.sinks`        | `EventSink`     |
 | a policy (the decision-maker) | `zu-providers` | `zu.policies`     | `Policy`        |
 | a trigger (inbound event)   | `zu-backends`    | `zu.triggers`     | `Trigger`       |
+| a pre-execution gate        | (your pkg)       | `zu.gates`        | `InvocationGate`|
+| a harness-owned channel     | `zu-backends`    | `zu.channels`     | `Channel`       |
+| a workload identity         | `zu-backends`    | `zu.workload_identity` | `WorkloadIdentity`|
+| egress enforcement          | `zu-backends`    | `zu.egress_enforcement`| `EgressEnforcement`|
+
+The last four are the **upstream-conformance** seams (see
+[`zu-upstream-conformance.md`](zu-upstream-conformance.md) and the trusted-base
+enumeration in [`docs/TCB.md`](docs/TCB.md)): a deterministic pre-execution gate
+(`InvocationGate`, ZU-CORE-2) that returns allow/deny/escalate before a tool
+runs; a generalised harness-owned `Channel` (ZU-NET-2) — the credential broker is
+the proof case, run out-of-process via `zu_backends.oop_launcher` for a real
+memory boundary (ZU-NET-3); attestable `WorkloadIdentity` (ZU-NET-4/5); and
+pluggable `EgressEnforcement` (ZU-NET-1). New port *kinds* register at runtime via
+`Registry.register_kind` (or the `zu.kinds` entry-point group) **without editing
+the core** (ZU-EXT-1).
 
 The last two are the policy-agnostic seams (Engineering Design §9.2, §4.4):
 `Policy` (`act(observation, tools) -> Action`) is the generalisation of the

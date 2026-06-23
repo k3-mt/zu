@@ -24,9 +24,15 @@ import sqlite3
 import threading
 from collections.abc import AsyncIterator
 
+from zu_core.chain import link as chain_link
 from zu_core.codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from zu_core.contracts import Event
-from zu_core.eventstore import validate_filter
+from zu_core.eventstore import (
+    ALLOWED_EVENT_FILTERS,
+    allowed_filters,
+    is_extra_filter,
+    validate_filter,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -42,6 +48,16 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_task  ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_trace ON events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_events_type  ON events(type);
+-- Side index for consumer-defined fields (ZU-AUDIT-3): a registered
+-- payload["ctx"] field -> value, so "every action under grant X" is one query
+-- without widening the core event schema or scanning every blob.
+CREATE TABLE IF NOT EXISTS event_index (
+    event_id       TEXT NOT NULL,
+    field          TEXT NOT NULL,
+    value          TEXT,
+    PRIMARY KEY (event_id, field)
+);
+CREATE INDEX IF NOT EXISTS idx_event_index_fv ON event_index(field, value);
 """
 
 
@@ -85,22 +101,52 @@ class SqliteSink:
         self._codec: PayloadCodec = codec or IdentityCodec()
         self._registry: dict[int, PayloadCodec] = {0: IdentityCodec()}
         self._registry[self._codec.version] = self._codec
+        # Per-trace hash-chain head (ZU-AUDIT-1): trace_id -> last event hash.
+        # Seeded lazily from the DB on the first append for a trace, so the chain
+        # survives a process restart.
+        self._heads: dict[str, str] = {}
 
-    async def append(self, event: Event) -> None:
-        event_id = str(event.event_id)
-        aad = _aad(event_id, str(event.trace_id), str(event.task_id), event.type, event.source)
-        blob = encode_payload(self._codec, event.model_dump_json(), aad)
+    async def append(self, event: Event) -> Event | None:
         # The sqlite3 calls are synchronous and ``synchronous=FULL`` makes each
         # commit an fsync — seconds under load. Run off the event loop so a write
         # never blocks the loop (and every other coroutine: the bus awaits this
         # append before fan-out, so a blocking write would stall SSE streams and
         # all in-flight requests under ``zu serve``). The lock still serialises
         # the single connection across whatever worker thread runs the call.
-        await asyncio.to_thread(self._sync_append, event, event_id, blob)
+        # Linking happens inside the lock so the per-trace head and the row commit
+        # advance atomically. Returns the stored (linked) event for the bus.
+        return await asyncio.to_thread(self._sync_append, event)
 
-    def _sync_append(self, event: Event, event_id: str, blob: bytes) -> None:
-        # Idempotent: a duplicate event_id is a no-op (scoped to that constraint).
+    def _last_hash_for_trace(self, trace: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT event_id, trace_id, task_id, type, source, data FROM events "
+            "WHERE trace_id = ? ORDER BY seq DESC LIMIT 1",
+            (trace,),
+        ).fetchone()
+        return self._row_to_event(row).hash if row is not None else None
+
+    def _sync_append(self, event: Event) -> Event:
+        event_id = str(event.event_id)
         with self._lock:
+            # Idempotent: a duplicate event_id returns the already-stored (linked)
+            # copy and does NOT advance the chain head.
+            existing = self._conn.execute(
+                "SELECT event_id, trace_id, task_id, type, source, data FROM events "
+                "WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if existing is not None:
+                return self._row_to_event(existing)
+            trace = str(event.trace_id)
+            # Link into the trace chain unless the event already arrived linked
+            # (this sink acting as a secondary destination behind the bus).
+            if event.hash is None:
+                prev = self._heads.get(trace)
+                if prev is None:
+                    prev = self._last_hash_for_trace(trace)
+                event = chain_link(event, prev)
+            aad = _aad(event_id, trace, str(event.task_id), event.type, event.source)
+            blob = encode_payload(self._codec, event.model_dump_json(), aad)
             self._conn.execute(
                 "INSERT INTO events "
                 "(event_id, trace_id, task_id, parent_id, type, source, data) "
@@ -108,7 +154,7 @@ class SqliteSink:
                 "ON CONFLICT(event_id) DO NOTHING",
                 (
                     event_id,
-                    str(event.trace_id),
+                    trace,
                     str(event.task_id),
                     str(event.parent_id) if event.parent_id is not None else None,
                     event.type,
@@ -116,14 +162,48 @@ class SqliteSink:
                     blob,
                 ),
             )
+            self._index_ctx_fields(event_id, event)
             self._conn.commit()
+            if event.hash is not None:
+                self._heads[trace] = event.hash
+            return event
+
+    def _index_ctx_fields(self, event_id: str, event: Event) -> None:
+        """Populate ``event_index`` with this event's registered consumer fields
+        (ZU-AUDIT-3), read from ``payload["ctx"]``. Only fields registered via
+        ``register_event_filter`` are indexed; unregistered ctx keys are ignored."""
+        ctx = event.payload.get("ctx") if isinstance(event.payload, dict) else None
+        if not isinstance(ctx, dict):
+            return
+        for field in allowed_filters() - ALLOWED_EVENT_FILTERS:
+            if field in ctx:
+                self._conn.execute(
+                    "INSERT INTO event_index (event_id, field, value) VALUES (?, ?, ?) "
+                    "ON CONFLICT(event_id, field) DO NOTHING",
+                    (event_id, field, str(ctx[field])),
+                )
 
     def _where(self, flt: dict) -> tuple[str, list]:
         validate_filter(flt)
         clauses: list[str] = []
         params: list = []
         for key, value in flt.items():
-            if value is None:
+            if is_extra_filter(key):
+                # A consumer field (ZU-AUDIT-3): resolve via the side index. The
+                # field name is bound as a parameter, never interpolated — no
+                # injection even though it is not a column.
+                if value is None:
+                    clauses.append(
+                        "event_id NOT IN (SELECT event_id FROM event_index WHERE field = ?)"
+                    )
+                    params.append(key)
+                else:
+                    clauses.append(
+                        "event_id IN (SELECT event_id FROM event_index "
+                        "WHERE field = ? AND value = ?)"
+                    )
+                    params.extend([key, str(value)])
+            elif value is None:
                 clauses.append(f"{key} IS NULL")  # column from allowlist
             else:
                 clauses.append(f"{key} = ?")

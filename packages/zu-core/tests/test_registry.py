@@ -184,3 +184,71 @@ def test_discovery_isolates_an_incompatible_plugin(monkeypatch) -> None:
     assert len(failures) == 1 and failures[0].name == "future_tool"
     from zu_core.registry import IncompatibleInterfaceError
     assert isinstance(failures[0].error, IncompatibleInterfaceError)
+
+
+# --- ZU-EXT-1: consumers register new port kinds without forking the core ----
+
+
+def test_consumer_registers_new_kind_without_core_edit() -> None:
+    """A consumer can introduce a brand-new typed port (e.g. CredentialBroker)
+    and register implementations through the one registry the loop reads, with
+    zero edits to zu_core — the ZU-EXT-1 conformance test."""
+    reg = Registry()
+    assert "credential_brokers" not in reg.kinds()
+
+    reg.register_kind("credential_brokers", "zu.credential_brokers")
+    assert "credential_brokers" in reg.kinds()
+
+    class FakeBroker:
+        name = "fake"
+
+    reg.register("credential_brokers", "fake", FakeBroker)
+    assert reg.get("credential_brokers", "fake") is FakeBroker
+    assert "fake" in reg.names("credential_brokers")
+
+
+def test_register_kind_is_idempotent_but_refuses_group_conflict() -> None:
+    reg = Registry()
+    reg.register_kind("brokers", "zu.brokers")
+    reg.register_kind("brokers", "zu.brokers")  # idempotent, no error
+    with pytest.raises(ValueError):
+        reg.register_kind("brokers", "zu.other_group")
+
+
+def test_interface_gate_applies_to_a_new_kind() -> None:
+    """The interface-major gate works for consumer kinds too, not just built-ins."""
+    from zu_core.registry import IncompatibleInterfaceError
+
+    reg = Registry()
+    reg.register_kind("brokers", "zu.brokers", interface_major=1)
+
+    class V2:
+        name = "v2"
+        __zu_interface__ = 2
+
+    with pytest.raises(IncompatibleInterfaceError):
+        reg.register("brokers", "v2", V2)
+
+
+def test_new_kind_discovered_via_zu_kinds_group(monkeypatch) -> None:
+    """A package declaring a kind via the ``zu.kinds`` entry-point group makes
+    that kind (and its plugins) discoverable with no core edit."""
+    from zu_core.registry import KINDS_GROUP, KindSpec
+
+    spec = KindSpec("brokers", "zu.brokers")
+    kind_ep = _FakeEP("brokers", lambda: spec)
+    impl_ep = _FakeEP("acme", lambda: "ACME_BROKER")
+
+    def fake_entry_points(group: str):
+        if group == KINDS_GROUP:
+            return [kind_ep]
+        if group == "zu.brokers":
+            return [impl_ep]
+        return []
+
+    monkeypatch.setattr(registry_mod, "entry_points", fake_entry_points)
+    reg = Registry()
+    reg.discover()
+
+    assert "brokers" in reg.kinds()
+    assert reg.get("brokers", "acme") == "ACME_BROKER"

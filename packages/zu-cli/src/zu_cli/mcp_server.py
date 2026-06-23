@@ -36,7 +36,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from zu_core.loop import run_task
-from zu_core.registry import GROUPS, Registry
+from zu_core.registry import Registry
 
 from .config import ConfigError, RunConfig, assemble, coerce_config, coerce_task
 from .trace import format_event
@@ -52,7 +52,9 @@ log = logging.getLogger("zu.mcp")
 def _discovered() -> dict[str, list[str]]:
     reg = Registry()
     reg.discover()
-    return {kind: reg.names(kind) for kind in GROUPS}
+    # ``reg.kinds()`` (not a fixed list) so a consumer-registered port type
+    # surfaces here too (ZU-EXT-1).
+    return {kind: reg.names(kind) for kind in reg.kinds()}
 
 
 def _load_for_construction(agent: str) -> tuple[Any, Any, Any, Any]:

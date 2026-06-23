@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
+from .chain import link
 from .contracts import Event
 from .eventstore import event_matches, validate_filter
 
@@ -22,19 +24,31 @@ class MemoryEventSink:
 
     def __init__(self) -> None:
         self._events: list[Event] = []  # insertion order == seq (1-based)
-        self._seen: set = set()  # event_ids, for idempotency
+        # event_id -> stored (linked) Event, for idempotency.
+        self._seen: dict[Any, Event] = {}
+        # Per-trace chain head: trace_id -> last event's hash (ZU-AUDIT-1).
+        self._heads: dict[Any, str | None] = {}
         # Serialises append's check-then-act (the idempotency guard is not atomic
         # on its own: two coroutines could both pass the ``in self._seen`` check
         # before either inserts) and gives reads a consistent snapshot, so a bus
         # shared across concurrent runs can't duplicate a record or tear a read.
         self._lock = asyncio.Lock()
 
-    async def append(self, event: Event) -> None:
+    async def append(self, event: Event) -> Event:
+        """Append, linking the event into its trace's hash chain, and return the
+        stored (linked) event so the bus fans the *linked* copy out to shippers.
+        Idempotent on ``event_id`` (returns the already-stored copy). An event
+        that arrives already linked (``hash`` set — i.e. this sink is a secondary
+        destination) is stored as-is, never re-linked."""
         async with self._lock:
             if event.event_id in self._seen:
-                return  # idempotent: re-appending the same event is a no-op
-            self._seen.add(event.event_id)
+                return self._seen[event.event_id]  # idempotent no-op
+            if event.hash is None:
+                event = link(event, self._heads.get(event.trace_id))
+            self._heads[event.trace_id] = event.hash
+            self._seen[event.event_id] = event
             self._events.append(event)
+            return event
 
     async def query(
         self, flt: dict | None = None, *, limit: int | None = None, after_seq: int = 0

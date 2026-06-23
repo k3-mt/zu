@@ -11,18 +11,44 @@ from __future__ import annotations
 
 from typing import Any
 
-# Only these fields may be filtered on. For the SQLite sink this is also the
-# injection guard: column names come from here, never from caller input.
+# The core filterable fields — direct columns on the event. For the SQLite sink
+# this is also the injection guard: column names come from here, never from
+# caller input.
 ALLOWED_EVENT_FILTERS: frozenset[str] = frozenset(
     {"event_id", "trace_id", "task_id", "parent_id", "type", "source"}
 )
 
+# Consumer-registered filterable fields (ZU-AUDIT-3). A consumer's chain fields
+# (``grant_id``, ``consent_ref``, ``capability_id``, ``peer``, ``idempotency_key``)
+# live under ``payload["ctx"]``; registering one makes it filterable so "every
+# action under grant X" is one query. A sink indexes these out of ``payload["ctx"]``
+# (the SQLite sink via a side index table; memory/jsonl via ``event_matches``).
+_EXTRA_FILTERS: set[str] = set()
+
+
+def register_event_filter(field: str) -> None:
+    """Register a consumer-defined ``payload["ctx"]`` field as filterable
+    (ZU-AUDIT-3). Register before appending events you want indexed."""
+    _EXTRA_FILTERS.add(field)
+
+
+def allowed_filters() -> frozenset[str]:
+    """Every filterable field: the core columns plus registered ctx fields."""
+    return ALLOWED_EVENT_FILTERS | frozenset(_EXTRA_FILTERS)
+
+
+def is_extra_filter(key: str) -> bool:
+    """True if ``key`` is a registered consumer field (lives in payload['ctx']),
+    not a core event column."""
+    return key not in ALLOWED_EVENT_FILTERS and key in _EXTRA_FILTERS
+
 
 def validate_filter(flt: dict[str, Any]) -> None:
+    allowed = allowed_filters()
     for key in flt:
-        if key not in ALLOWED_EVENT_FILTERS:
+        if key not in allowed:
             raise ValueError(
-                f"unknown filter field: {key!r}; allowed: {sorted(ALLOWED_EVENT_FILTERS)}"
+                f"unknown filter field: {key!r}; allowed: {sorted(allowed)}"
             )
 
 
@@ -38,7 +64,13 @@ def event_matches(event: Any, flt: dict[str, Any]) -> bool:
     this: it would need type-aware comparison on both sides.
     """
     for key, value in flt.items():
-        actual = getattr(event, key, None)
+        if is_extra_filter(key):
+            # A consumer field lives under payload["ctx"] (ZU-AUDIT-3), not as a
+            # direct attribute.
+            ctx = getattr(event, "payload", {}).get("ctx", {})
+            actual = ctx.get(key)
+        else:
+            actual = getattr(event, key, None)
         if value is None:
             if actual is not None:
                 return False

@@ -21,7 +21,24 @@ log). These are the durable/isolation seams the core defers behind a port.
 
 The payload codec seam (`zu_core.codec`) lets a sink encrypt payloads at rest;
 an AES-256-GCM codec ships behind the optional `[encryption]` extra
-(`zu_backends.encryption`).
+(`zu_backends.encryption`). Every sink links each event into its trace's
+tamper-evidence hash chain (`zu_core.chain`, ZU-AUDIT-1).
+
+### Upstream-conformance reference plugins
+
+Dependency-light reference implementations of the conformance ports (spec:
+[`zu-upstream-conformance.md`](../../zu-upstream-conformance.md), trusted base:
+[`docs/TCB.md`](../../docs/TCB.md)):
+
+| Kind | Name | Class | Notes |
+|------|------|-------|-------|
+| `zu.channels` | `credential-broker` | `broker:CredentialBroker` | A harness-owned `Channel` (ZU-NET-2): secret read inside the adapter, narrow verbs (`mint`/`introspect`) return a *derived* token, never the secret. |
+| `zu.backends` | `oop-launcher` | `oop_launcher:OutOfProcessLauncher` | Runs a plugin (e.g. the broker) in a separate process/uid over the `zu_core.rpc` socket contract (ZU-NET-3 / ZU-CORE-3): a harness compromise yields the socket, not the secret. |
+| `zu.workload_identity` | `static` | `identity:StaticIdentity` | Attestable identity (ZU-NET-4/5): HMAC-signed principal + optional attestation measurement; stdlib-only. mTLS/SPIFFE are follow-ons behind the same port. |
+| `zu.egress_enforcement` | `docker-internal-net`, `nftables` | `egress_enforce:*` | Pluggable default-deny + DNS gating port (ZU-NET-1). The `SandboxLauncher` routes through it: pin the proxy by IP + gate the embedded resolver so DNS isn't a covert channel. `ScriptedEnforcement` proves swappability offline; `nftables` is the Linux-native mechanism; live behavior is validated under `--run-docker`. |
+
+`broker.py`'s narrow verbs are the worked example for ZU-EXT-3 (many narrow
+typed ports, not one wide "send this request" proxy).
 
 ## Extend
 

@@ -42,6 +42,17 @@ from zu_core.loop import run_task
 from zu_core.security import SANDBOX_ENV
 
 
+def _proxy_ip(proxy: Any, network_name: str) -> str | None:
+    """The proxy container's IP on the internal network, read from its attrs after
+    a reload. Used to pin the proxy in the target's /etc/hosts so the target needs
+    no DNS resolver to reach it (ZU-NET-1)."""
+    try:
+        nets = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
+        return nets.get(network_name, {}).get("IPAddress") or None
+    except Exception:  # noqa: BLE001 - best-effort; absence just keeps the old DNS path
+        return None
+
+
 def _seccomp_block_profile() -> str:
     """The host path of the shipped blocking seccomp profile (Docker reads the
     profile from the client host). Resolved lazily so importing this module never
@@ -140,6 +151,10 @@ class SandboxLauncher:
     seccomp: str | None = None          # None -> the shipped blocking profile
     exec_timeout_s: float | None = None
     ready_timeout_s: float = 20.0
+    # The pluggable egress-enforcement mechanism (ZU-NET-1). Defaults to the
+    # Docker internal-network policy (pin the proxy by IP + gate DNS); swap for
+    # nftables/WireGuard with no change here.
+    egress_enforcement: Any = None
 
     async def run(
         self, task: dict, config: dict, *, allowlist: list[str], bundle_dir: str | None = None
@@ -172,6 +187,14 @@ class SandboxLauncher:
         net = await asyncio.to_thread(client.networks.create, self.network_name, internal=True)
         proxy = None
         sandbox = None
+        enforcement = self.egress_enforcement
+        if enforcement is None:
+            # Lazy import (the zu-cli convention): zu-backends is only needed on the
+            # contained-run path, which requires it anyway.
+            from zu_backends.egress_enforce import DockerInternalNetEnforcement
+
+            enforcement = DockerInternalNetEnforcement()
+        egress_handle = None
         try:
             # The egress-proxy sidecar: a STABLE name (so the target resolves it via
             # the internal network's embedded DNS), on the internal network, plus a
@@ -190,6 +213,21 @@ class SandboxLauncher:
             await asyncio.to_thread(bridge.connect, proxy)
             await self._await_proxy_ready(proxy)
 
+            # Egress enforcement (ZU-NET-1): pin the proxy by IP + gate DNS so the
+            # embedded resolver can't be a covert egress channel. Only applied when
+            # the proxy's IP is known — otherwise fall back to the embedded-DNS path
+            # (the proxy must stay reachable by name), so this is a safe tightening.
+            proxy_ip = _proxy_ip(proxy, self.network_name)
+            policy: dict = {}
+            if proxy_ip is not None:
+                egress_handle = await enforcement.apply({
+                    "allowlist": allowlist,
+                    "proxy": {"host": proxy_name, "ip": proxy_ip, "port": self.proxy_port},
+                    "dns": "pin",
+                })
+                if isinstance(egress_handle, dict):
+                    policy = egress_handle.get("policy", {}) or {}
+
             # The target: internal-only (the proxy is the only route off-box), caps
             # dropped + blocking seccomp, kept alive so we exec the entrypoint into it.
             target_spec: dict = {
@@ -200,6 +238,7 @@ class SandboxLauncher:
                 "seccomp": self.seccomp or _seccomp_block_profile(),
                 "command": ["sleep", "infinity"],
             }
+            target_spec.update(policy)  # extra_hosts (proxy IP pin) + dns gate
             # A bundle's own tools/ are not in the image — mount the bundle dir
             # READ-ONLY at /bundle so the agent's `tools.x:Class` import-refs
             # resolve inside the box. The user owns this code; the mount is ro and
@@ -235,6 +274,11 @@ class SandboxLauncher:
         finally:
             if sandbox is not None:
                 await self.backend.destroy(sandbox)
+            if egress_handle is not None:
+                try:
+                    await enforcement.revoke(egress_handle)
+                except Exception:  # noqa: BLE001 - teardown must not raise over the result
+                    pass
             await self._best_effort(proxy, "remove", force=True)
             await self._best_effort(net, "remove")
 

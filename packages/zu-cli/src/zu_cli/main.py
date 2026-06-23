@@ -17,7 +17,7 @@ import typer
 
 from zu_core.contracts import Result, Status
 from zu_core.loop import run_task
-from zu_core.registry import GROUPS, REGISTRY
+from zu_core.registry import REGISTRY
 
 from .config import ConfigError, assemble, load_agent, load_config
 
@@ -1231,10 +1231,12 @@ def plugins() -> None:
     # (entry points plus any decorator-registered in-process).
     reg = REGISTRY
     failures = reg.discover()
-    for kind in GROUPS:
+    # Iterate the registry's live kinds (ZU-EXT-1) so a consumer-registered port
+    # type — declared via the ``zu.kinds`` entry-point group — is listed too.
+    for kind in reg.kinds():
         names = reg.names(kind)
         listed = ", ".join(names) if names else "—"
-        typer.echo(f"{kind:11} {listed}")
+        typer.echo(f"{kind:19} {listed}")
     for f in failures:
         typer.echo(f"  ! failed to load {f.kind}:{f.name} — {f.error}", err=True)
 

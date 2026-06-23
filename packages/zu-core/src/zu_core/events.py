@@ -61,6 +61,37 @@ DEFENSE_BLOCKED = "harness.defense.blocked"
 EGRESS_OBSERVED = "harness.egress.observed"
 HOST_EFFECT_OBSERVED = "harness.host_effect.observed"
 
+# --- the security gate, taint, durable state, and human escalation -----------
+# The pre-execution gate's auditable decision (ZU-CORE-2 / ZU-AUDIT-2): emitted
+# for every non-None InvocationGate verdict, BEFORE the tool runs. Payload:
+# {"action_ref": <event_id of harness.tool.invoked>, "decision":
+# "allow"|"escalate"|"deny"|"approved_by_human", "gate", "rule_id", "detail",
+# "escalation_id"?}. ``action_ref`` (and parent_id) join action -> the rule that
+# decided it, so replay reconstructs "which rule allowed/blocked this call".
+GATE_DECIDED = "harness.gate.decided"
+# Run-level taint flipped false->true mid-run (ZU-CD-3): {"source", "detail"}.
+# Run-start taint rides on harness.task.started's payload ("tainted": bool); this
+# records a later flip so rebuild-from-log reconstructs the flag on resume.
+TAINT_RAISED = "harness.taint.raised"
+# A durable per-grant state write (ZU-CD-4): {"grant_id", "key", "value"}. The
+# in-memory GrantStore is a cache over these events; resume folds them to rebuild
+# cumulative counters (velocity / spend-so-far) so limits survive pause/resume.
+GRANT_UPDATED = "harness.grant.updated"
+# Human-in-the-loop ESCALATE (ZU-CD-1/2). ``approval.requested`` carries the
+# LITERAL harness-held invocation as ground truth (NOT model narration):
+# {"approval_id", "tool", "args", "idempotency_key", "reason", "detail"}.
+# ``approval.resolved`` is the event-sourced human decision, bound to the exact
+# invocation by approval_id AND idempotency_key: {"approval_id", "decision":
+# "approve"|"deny", "by", "idempotency_key", "binding_ref"?}.
+APPROVAL_REQUESTED = "harness.approval.requested"
+APPROVAL_RESOLVED = "harness.approval.resolved"
+# Pause/resume snapshot + marker (ZU-CD-5). ``run.paused`` carries the resumable
+# state rebuilt on resume: {"approval_id", "tier", "tokens", "tainted", "step",
+# "pending": {"tool", "args", "idempotency_key"}}. ``run.resumed`` marks a
+# resumed run re-entering the loop from a prior log.
+RUN_PAUSED = "harness.run.paused"
+RUN_RESUMED = "harness.run.resumed"
+
 # --- harness.pipeline.* — multi-phase orchestration (zu.Pipeline) ------------
 # A pipeline chains runs under ONE shared trace_id; these record its boundaries
 # so the whole multi-phase run is itself lossless and replayable. ``phase.skipped``
@@ -92,6 +123,13 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         DEFENSE_BLOCKED,
         EGRESS_OBSERVED,
         HOST_EFFECT_OBSERVED,
+        GATE_DECIDED,
+        TAINT_RAISED,
+        GRANT_UPDATED,
+        APPROVAL_REQUESTED,
+        APPROVAL_RESOLVED,
+        RUN_PAUSED,
+        RUN_RESUMED,
         PIPELINE_STARTED,
         PIPELINE_PHASE_STARTED,
         PIPELINE_PHASE_COMPLETED,
