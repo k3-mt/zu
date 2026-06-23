@@ -103,8 +103,13 @@ class Event(BaseModel):
     # Tamper-evidence chain (ZU-AUDIT-1), set by the canonical sink at append:
     # ``hash`` is sha256 over this event's canonical content + ``prev_hash``;
     # ``prev_hash`` is the predecessor's ``hash`` in this event's trace chain.
+    # ``sig`` is an optional HMAC-SHA256 over ``hash`` when a signing key is
+    # configured — present only on signed chains. All three are DERIVED fields,
+    # excluded from ``event_digest`` so the canonical content digest is unchanged
+    # whether or not a chain/signature is present.
     prev_hash: str | None = None
     hash: str | None = None
+    sig: str | None = None
 
     @field_validator("type")
     @classmethod

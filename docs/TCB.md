@@ -54,7 +54,7 @@ Consumers add new kinds with `register_kind` **without editing the core**
 | `tools` (`zu.tools`) | `Tool` | Declares its capability envelope honestly; its side effects match its declaration. |
 | `detectors` (`zu.detectors`) | `Detector` | Post-hoc judgement on an observation; pure, side-effect-free. |
 | `validators` (`zu.validators`) | `Validator` | Post-hoc judgement on the final result. |
-| `gates` (`zu.gates`) | `InvocationGate` | **Pre-execution** allow/deny/escalate on the literal call; deterministic; cannot be disabled (the loop always runs it). |
+| `gates` (`zu.gates`) | `InvocationGate` | **Pre-execution** allow/deny/escalate on the literal call; deterministic; cannot be disabled (the loop always runs it). **Fails closed (ZU-CORE-2):** a gate that *crashes* judging a capability-bearing or tier-≥2 call becomes a synthesized DENY (rule `gate.crashed.fail_closed`) so a malformed call can't bypass the scope-checker; for an inert tier-1 call it fails open-but-logged (`gate.crashed.skipped`) so a broken gate can't break an ordinary fetch. |
 | `backends` (`zu.backends`) | `SandboxBackend` / `OutOfProcessLauncher` | Isolates execution; the OOP launcher gives a plugin its own process/uid. |
 | `sinks` (`zu.sinks`) | `EventSink` | Append-only, idempotent; preserves the chain. |
 | `triggers` (`zu.triggers`) | `Trigger` | Carries UNTRUSTED inbound payloads; never authoritative. |
@@ -88,10 +88,24 @@ behind the ports above, **never** imported by the core (ZU-NOT-4).
 
 ## 4. The audit substrate
 
-- **Append-only + tamper-evident** (`chain.py`): the per-trace hash chain makes
-  reorder/insert/delete/content-edit detectable on replay (`verify_chain`). With
-  the AEAD codec configured, an at-rest payload edit additionally fails to
-  decrypt.
+- **Append-only + partial-tamper-evident** (`chain.py`): the per-trace hash chain
+  makes reorder/insert/delete/content-edit detectable on replay (`verify_chain`),
+  and with the AEAD codec configured an at-rest payload edit additionally fails to
+  decrypt. **It is NOT, by itself, evidence against a privileged full rewrite:** an
+  attacker with write access to the whole store can edit content and re-link the
+  entire trace cleanly, after which `verify_chain` passes. Two composable,
+  stdlib-only mechanisms close that gap and are what make the stronger claim:
+  - **External anchoring** (always available) — the chain head (`chain_head`) is
+    periodically written to an append-only *anchor the attacker cannot reach* (a
+    separate file, external log, or notary; reference `zu_backends.anchor.JsonlAnchor`).
+    `verify_against_anchor` re-derives the head at each anchored seq and fails on a
+    mismatch, so a full rewrite is caught. This is the mechanism that detects a
+    privileged full rewrite; bare chaining does not.
+  - **HMAC signing** (only when a signing key is configured) — `link` adds an
+    HMAC-SHA256 over the digest and `verify_chain(key=…)` checks it, so a content
+    edit fails verification even after a clean re-link by an attacker *without the
+    key*. It does **not** protect against a compromised harness that holds the key.
+    Absent a key, the chain is byte-for-byte unchanged.
 - **Out-of-band facts the judged cannot author**: `harness.egress.observed` /
   `harness.host_effect.observed` (from the proxy and host monitor), preferred
   over a plugin's self-report.
@@ -131,6 +145,16 @@ no mechanism removes them:
 - **The unserveable quadrant** (broad scope + novel destination + high value +
   low latency) has no safe architecture and must be *refused*, not finessed. Zu
   provides the mechanism to refuse; the decision is the consumer's.
+- **Audit-log tampering is only partially evident from the chain alone.** The hash
+  chain catches partial tampering (edit/insert/delete/reorder) on replay, but a
+  privileged attacker with write access to the *whole* store can re-link a clean
+  chain. Detecting that requires the **external anchor** (an append-only head
+  record the attacker cannot reach — §4); without an anchor configured, a full
+  rewrite is undetectable. **HMAC signing** raises the bar against an attacker
+  *without the key* but is worthless against a **compromised harness** that holds
+  the key (and against the harness itself — it is the signer). Neither mechanism
+  makes the log evidence against the operator/harness; they bound an *external*
+  store attacker.
 - **DNS as a covert channel**: closed on the contained path — the
   `SandboxLauncher` routes through `EgressEnforcement`, which pins the proxy by IP
   in the target's `/etc/hosts` and points DNS at a non-resolving nameserver, so

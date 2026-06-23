@@ -79,8 +79,11 @@ class SqliteSink:
         *,
         codec: PayloadCodec | None = None,
         busy_timeout_ms: int = 5000,
+        sign_key: bytes | None = None,
     ) -> None:
         self.path = path
+        # Optional HMAC signing key for the chain (ZU-AUDIT-1); see MemoryEventSink.
+        self._sign_key = sign_key
         # Single writer connection (WAL single-writer model). check_same_thread
         # off because every DB call runs on an ``asyncio.to_thread`` worker (so a
         # commit's fsync never blocks the event loop). A sqlite3 connection is not
@@ -144,7 +147,7 @@ class SqliteSink:
                 prev = self._heads.get(trace)
                 if prev is None:
                     prev = self._last_hash_for_trace(trace)
-                event = chain_link(event, prev)
+                event = chain_link(event, prev, key=self._sign_key)
             aad = _aad(event_id, trace, str(event.task_id), event.type, event.source)
             blob = encode_payload(self._codec, event.model_dump_json(), aad)
             self._conn.execute(

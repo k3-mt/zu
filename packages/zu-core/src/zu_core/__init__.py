@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from . import events
 from .bus import EventBus, SubscriberFailure
-from .chain import event_digest, link, verify_chain
+from .chain import chain_head, event_digest, link, verify_against_anchor, verify_chain
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .content import Action, Audio, Content, ContentPart, Image, Observation, Text
 from .contracts import Budget, Event, Result, Status, TaskSpec
@@ -111,6 +111,8 @@ __all__ = [
     "event_digest",
     "link",
     "verify_chain",
+    "chain_head",
+    "verify_against_anchor",
     "IdentityCodec",
     "PayloadCodec",
     "KeyProvider",
