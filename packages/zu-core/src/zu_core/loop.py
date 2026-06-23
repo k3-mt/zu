@@ -753,7 +753,8 @@ async def _replay_track(
                 verdict = Verdict(severity=Severity.ESCALATE, detector="replay_arbiter",
                                   detail="consequential replay divergence", kind="human")
                 result = await _pause_for_human(
-                    run, ladder, tokens, i, ToolCall(name=step.tool, args=step.args), verdict, idem)
+                    run, ladder, tokens, i, ToolCall(name=step.tool, args=step.args), verdict, idem,
+                    annotations=annotations)
                 return False, result
             if decision is ReplayDecision.HANDOFF:
                 return True, None  # arbiter hands the frontier to the model
@@ -1450,14 +1451,20 @@ async def _gate_checkpoint(
 
 
 async def _pause_for_human(
-    run: _Run, ladder: _Ladder, tokens: int, step: int, call: ToolCall, verdict: Verdict, idem: str
+    run: _Run, ladder: _Ladder, tokens: int, step: int, call: ToolCall, verdict: Verdict, idem: str,
+    *, annotations: dict | None = None,
 ) -> Result:
     """Suspend the run for a human to approve a specific invocation. The approval
     record shows the LITERAL invocation parameters the harness holds (ground
     truth, never model narration — ZU-CD-1), and the resumable snapshot persists
     the gate-relevant state (tier, tokens, taint, the pending call + its
-    idempotency key) so resume stays bounded (ZU-CD-5)."""
+    idempotency key, and any rail-step ``annotations``) so resume stays bounded
+    (ZU-CD-5) and the approved action carries its consequence/destination on the
+    log when it finally executes (ZU-RAIL-4)."""
     approval_id = str(uuid5(run.trace_id, f"approval:{idem}"))
+    pending: dict = {"tool": call.name, "args": call.args, "idempotency_key": idem}
+    if annotations:
+        pending["annotations"] = dict(annotations)
     await run.emit(
         ev.APPROVAL_REQUESTED,
         {
@@ -1479,7 +1486,7 @@ async def _pause_for_human(
             "tokens": tokens,
             "tainted": run.tainted,
             "step": step,
-            "pending": {"tool": call.name, "args": call.args, "idempotency_key": idem},
+            "pending": pending,
         },
         parent=run.root,
     )
@@ -1584,10 +1591,12 @@ async def _resume_from_log(
     )
     if approved:
         # Execute ONLY the approved invocation, unchanged, bound to its exact key.
+        # Carry the rail step's annotations (ZU-RAIL-4) so the approved action's
+        # consequence/destination land on the log when it finally executes.
         obs = await _invoke(
             run, turn, ladder.active(), pending["tool"], pending["args"],
             gates=gates, approved_key=pending["idempotency_key"],
-            timeout=spec.budget.wall_time_s,
+            timeout=spec.budget.wall_time_s, annotations=pending.get("annotations"),
         )
         model_obs = await _shrink_for_model(
             obs, max_chars=max_observation_chars, strategy=observation_strategy,
