@@ -1,6 +1,6 @@
 [project]
 name = "zu-runtime"
-version = "0.2.1"
+version = "0.2.2"
 description = "An opinionated, backend-agnostic runtime for agents that work in production — deterministic, auditable, injection-resistant. Import as `zu`."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -23,45 +23,45 @@ keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", 
 # the Docker sandbox, MCP); every plugin is also installable standalone (pip install
 # zu-tools, …) so a plugin author can depend on just what they need (the ecosystem).
 dependencies = [
-    "zu-cli==0.2.1",
-    "zu-providers==0.2.1",
-    "zu-checks==0.2.1",
-    "zu-backends==0.2.1",
-    "zu-tools==0.2.1",       # web tools — the common case, so it ships in the base
+    "zu-cli==0.2.2",
+    "zu-providers==0.2.2",
+    "zu-checks==0.2.2",
+    "zu-backends==0.2.2",
+    "zu-tools==0.2.2",       # web tools — the common case, so it ships in the base
 ]
 
 [project.optional-dependencies]
 # The web tools now ship in the BASE; [web]/[demo] remain as no-op back-compat
 # aliases so an existing `pip install 'zu-runtime[web]'` / `[demo]` still resolves.
-web = ["zu-tools==0.2.1"]
-demo = ["zu-tools==0.2.1"]
+web = ["zu-tools==0.2.2"]
+demo = ["zu-tools==0.2.2"]
 # Real model SDKs (the adapters ship in the base; these add the vendor client).
-anthropic = ["zu-providers[anthropic]==0.2.1"]
-openai = ["zu-providers[openai]==0.2.1"]
+anthropic = ["zu-providers[anthropic]==0.2.2"]
+openai = ["zu-providers[openai]==0.2.2"]
 # The HTTP server (`zu serve`) and the Docker sandbox client (tier-2 browser).
-serve = ["zu-cli[serve]==0.2.1"]
-docker = ["zu-backends[docker]==0.2.1"]
+serve = ["zu-cli[serve]==0.2.2"]
+docker = ["zu-backends[docker]==0.2.2"]
 # The MCP server (`zu mcp`) — integrate with coding agents (Claude Code, Cursor).
-mcp = ["zu-cli[mcp]==0.2.1"]
+mcp = ["zu-cli[mcp]==0.2.2"]
 # The plugin-test gate + adversarial red team (`zu test-plugin`) — a contributor
 # / CI tool for proving a plugin cooperates and withstands attack.
-test = ["zu-cli[test]==0.2.1"]
+test = ["zu-cli[test]==0.2.2"]
 # HuggingFace task models as typed tools/detectors/validators (behind the
 # supply-chain guards). [huggingface] pulls the hosted Inference Providers
 # router; for local pipelines install `zu-huggingface[local]` (transformers + a
 # backend) directly.
-huggingface = ["zu-huggingface[hosted]==0.2.1"]
+huggingface = ["zu-huggingface[hosted]==0.2.2"]
 # Everything: web tools, both model SDKs, the server, the Docker sandbox, MCP,
 # the test gate, and the HuggingFace adapter.
 all = [
-    "zu-tools==0.2.1",
-    "zu-providers[anthropic]==0.2.1",
-    "zu-providers[openai]==0.2.1",
-    "zu-cli[serve]==0.2.1",
-    "zu-cli[mcp]==0.2.1",
-    "zu-cli[test]==0.2.1",
-    "zu-backends[docker]==0.2.1",
-    "zu-huggingface[hosted]==0.2.1",
+    "zu-tools==0.2.2",
+    "zu-providers[anthropic]==0.2.2",
+    "zu-providers[openai]==0.2.2",
+    "zu-cli[serve]==0.2.2",
+    "zu-cli[mcp]==0.2.2",
+    "zu-cli[test]==0.2.2",
+    "zu-backends[docker]==0.2.2",
+    "zu-huggingface[hosted]==0.2.2",
 ]
 
 [project.urls]

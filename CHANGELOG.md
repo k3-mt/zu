@@ -7,6 +7,41 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-06-24
+
+### Fixed — three hardening fixes from downstream (Conduit) reports
+
+- **ZU-NET-2 — `CredentialBroker.mint` no longer leaks low-entropy secrets**
+  (#22). The minted token was an unsalted `sha256(secret:nonce)`, brute-forceable
+  offline for a low-entropy secret (a card PAN/PIN: ~10¹² candidates recovered in
+  under a second). It is now an **HMAC under a 256-bit key minted at construction
+  that never leaves the broker**, so token strength is decoupled from the secret's
+  entropy — and the policy-supplied `nonce` is just the HMAC message, safe to let
+  the policy control. Docstring softened accordingly.
+  (`packages/zu-backends/src/zu_backends/broker.py`)
+- **ZU-CD-4 — atomic check-and-increment for cumulative caps** (#23).
+  `get`+`put` is TOCTOU-racy: under concurrency two invocations could each pass an
+  under-cap check and both proceed, overshooting a spend cap (a real over-spend for
+  a money grant). Added `GrantStore.incr_if_below(grant_id, key, delta, ceiling)` —
+  implemented atomically under a lock in `InMemoryGrantStore`, the seam a SQL/Redis
+  backing fills with `UPDATE ... WHERE val+delta<=ceiling` / Lua. The port now
+  documents that `get`/`put` is **not** safe for limit enforcement under concurrency.
+  (`packages/zu-core/src/zu_core/{grants,ports}.py`)
+- **ZU-CORE-2 — a gate can force fail-closed on crash regardless of target tier**
+  (#24). A crashed `InvocationGate` fails closed only for a capability-bearing /
+  tier-≥2 call, so a side-effecting tool *under-declared* as tier-1 would have its
+  crashed gate skipped (fail open). A gate that knows it guards something dangerous
+  can now set `fail_closed_on_crash = True` to fail closed on its own crash
+  regardless of the target's self-declaration; the implicit coupling is now
+  documented. (`packages/zu-core/src/zu_core/loop.py`)
+
+### Not a bug
+
+- **#1 — workspace resolves `zu-runtime`.** The root `pyproject.toml` depends on
+  `zu-runtime`, which is the package at `packages/zu/` (its `name = "zu-runtime"`);
+  uv resolves workspace members by package name, not directory name, so `uv sync`
+  succeeds. Closed as working-as-designed.
+
 ## [0.2.1] — 2026-06-23
 
 ### Added — the upstream-conformance layer (five pillars) + the rail mechanisms

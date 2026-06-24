@@ -1397,9 +1397,18 @@ async def _gate_checkpoint(
     judging such a call, a crashed scope-checker must not be a bypass: synthesize a
     DENY (rule ``gate.crashed.fail_closed``). For an inert tier-1 call the crash is
     tolerated so a broken gate cannot break an ordinary fetch — but never silently:
-    a ``gate.crashed.skipped`` decision is recorded either way. ``annotations`` are
-    the rail step's blessed consequence/destination (ZU-RAIL-4), surfaced on the
-    ctx so a gate can gate by consequence."""
+    a ``gate.crashed.skipped`` decision is recorded either way.
+
+    Note the implicit coupling: the target-tier fail-closed guarantee holds only
+    if the gated tool DECLARES its capability envelope (a side-effecting tool
+    authored as tier-1 / no-capabilities would have its crashed gate skipped, i.e.
+    fail OPEN). A gate that knows it guards something dangerous (money, a card)
+    should not depend on the target's self-declaration: it can set
+    ``fail_closed_on_crash = True`` on itself to force fail-closed on crash
+    REGARDLESS of the target's tier — applied per-gate below.
+
+    ``annotations`` are the rail step's blessed consequence/destination
+    (ZU-RAIL-4), surfaced on the ctx so a gate can gate by consequence."""
     ctx = run.ctx(invocation=call, annotations=annotations)
     verdicts: list[Verdict] = []
     for g in gates:
@@ -1407,7 +1416,13 @@ async def _gate_checkpoint(
         if crash is not None:
             gname = getattr(g, "name", "gate")
             detail = f"gate crashed ({type(crash).__name__}: {crash})"
-            if fail_closed:
+            # A gate may force fail-closed on its own crash regardless of the
+            # target tool's self-declared tier (ZU-CORE-2): a gate guarding money
+            # shouldn't trust the tool to declare itself capability-bearing.
+            gate_fail_closed = fail_closed or bool(
+                getattr(g, "fail_closed_on_crash", False)
+            )
+            if gate_fail_closed:
                 # Capability-bearing / tier-≥2: fail CLOSED — the crashed gate
                 # becomes a DENY so the call is blocked, not bypassed (ZU-CORE-2).
                 await run.emit(

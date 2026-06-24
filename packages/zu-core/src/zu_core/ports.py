@@ -316,6 +316,16 @@ class InvocationGate(Protocol):
 # (``zu_core.grants.InMemoryGrantStore``) is a cache over ``harness.grant.updated``
 # events (the log stays the source of truth, so resume rebuilds counters); a
 # durable backing (SQL/Redis) is a plugin the harness injects.
+#
+# CONCURRENCY — read this before building a cap on ``get``/``put``: that pair is
+# NOT atomic. Under concurrent execution (tasks sharing a grant, a retried side
+# effect, a multi-worker deployment) two invocations can each read the same
+# spent-so-far, both pass an under-cap check, and both proceed — a lost update
+# that silently overshoots the cap (a real over-spend for a money grant). Enforce
+# cumulative limits with ``incr_if_below`` instead, which backends implement
+# atomically (a SQL ``UPDATE ... WHERE val+delta<=ceiling``, a Redis Lua/WATCH);
+# the in-memory default does it under a lock. ``get``/``put`` remain fine for
+# single-writer / serial-replay state.
 
 
 @runtime_checkable
@@ -323,6 +333,16 @@ class GrantStore(Protocol):
     def get(self, grant_id: str, key: str, default: Any = None) -> Any: ...
 
     def put(self, grant_id: str, key: str, value: Any) -> None: ...
+
+    def incr_if_below(
+        self, grant_id: str, key: str, delta: Any, ceiling: Any, default: Any = 0
+    ) -> bool:
+        """Atomic check-and-increment: if ``current + delta <= ceiling`` commit the
+        new value and return ``True``, else leave it unchanged and return ``False``.
+        The concurrency-safe primitive for cumulative caps (``get``/``put`` is
+        TOCTOU-racy — see the note above). A committed increment journals like
+        ``put`` so the event log stays the source of truth."""
+        ...
 
 
 # --- the replay-divergence arbiter (ZU-RAIL-3) ---------------------------

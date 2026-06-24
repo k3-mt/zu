@@ -317,3 +317,61 @@ async def test_crashing_gate_fails_open_but_logged_for_inert_tier1_call() -> Non
         e.payload.get("rule_id") == "gate.crashed.skipped" and e.payload.get("decision") == "skipped"
         for e in decided
     )  # but the skip is on the log
+
+
+class _CrashGateAlwaysClosed:
+    """A gate that forces fail-closed on its own crash regardless of the target
+    tool's self-declared tier — for a gate that knows it guards something
+    dangerous and won't trust the tool to declare itself capability-bearing."""
+
+    name = "crasher_closed"
+    fail_closed_on_crash = True
+
+    def check(self, call, ctx):
+        raise ValueError("scope-checker blew up")
+
+
+async def test_gate_opt_in_fails_closed_on_crash_even_for_under_declared_tier1() -> None:
+    # The footgun (issue #24): a side-effecting tool under-declared as tier-1/no-caps
+    # would have its crashed gate SKIPPED (fail open). A gate that sets
+    # fail_closed_on_crash overrides the target's self-declaration and fails CLOSED.
+    tool = WireTransfer()  # tier 1, empty capabilities + egress (under-declared)
+    reg = Registry()
+    reg.register("tools", "wire_transfer", tool)
+    reg.register("gates", "crasher_closed", _CrashGateAlwaysClosed())
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "wire_transfer", "args": {"amount": 9}}, {"text": "{}", "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="q"), provider, reg, bus)
+
+    assert result.status == Status.SUCCESS
+    assert tool.calls == []  # fail-closed despite the tool's tier-1 self-declaration
+    events = await bus.query()
+    decided = [e for e in events if e.type == ev.GATE_DECIDED]
+    assert any(
+        e.payload.get("rule_id") == "gate.crashed.fail_closed" and e.payload.get("decision") == "deny"
+        for e in decided
+    )
+    assert any(e.type == ev.DEFENSE_BLOCKED and e.payload.get("kind") == "gate_denied" for e in events)
+
+
+# --- ZU-CD-4: atomic check-and-increment for cumulative caps under concurrency ---
+
+
+async def test_incr_if_below_is_atomic_and_holds_the_cap_under_concurrency() -> None:
+    import asyncio
+
+    from zu_core.grants import InMemoryGrantStore
+
+    store = InMemoryGrantStore()
+    # 10 concurrent increments of 1 against a ceiling of 6: exactly 6 may commit,
+    # the rest must be refused — get()+put() would let several race past the cap.
+    async def attempt() -> bool:
+        return store.incr_if_below("payments", "spent", 1, 6)
+
+    results = await asyncio.gather(*(attempt() for _ in range(10)))
+    assert sum(results) == 6  # exactly the ceiling committed
+    assert store.get("payments", "spent") == 6  # never overshot
+    # Every committed increment is journaled, so the log stays the source of truth.
+    assert len([j for j in store.drain() if j[1] == "spent"]) == 6
