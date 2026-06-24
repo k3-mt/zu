@@ -147,6 +147,63 @@ async def test_resume_with_wrong_key_is_rejected() -> None:
     )
 
 
+async def test_resume_twice_executes_the_approved_side_effect_only_once() -> None:
+    # ZU-CD-6: a human approval authorises EXACTLY ONE irreversible side effect.
+    # A second resume from the same log (a fresh runner re-reading it — a new
+    # _Run with a fresh ledger each time) must NOT execute the side effect again;
+    # the consume-once guarantee is durable via ``harness.execution.claimed``.
+    tool = WireTransfer()
+    reg = _reg(tool)
+    tid = uuid4()
+    bus = EventBus()
+
+    p1 = ScriptedProvider.from_moves([{"tool": "wire_transfer", "args": {"amount": 500}}])
+    await run_task(TaskSpec(task_id=tid, query="pay rent"), p1, reg, bus)
+    req = [e for e in await bus.query() if e.type == ev.APPROVAL_REQUESTED][-1]
+    await _resolve(bus, tid, req.payload["approval_id"], req.payload["idempotency_key"])
+
+    # First resume: the approved invocation executes exactly once and the loop
+    # records the consume-once claim on the log.
+    p2 = ScriptedProvider.from_moves([{"text": '{"done": true}', "finish": "stop"}])
+    r2 = await run_task(
+        TaskSpec(task_id=tid, query="pay rent"), p2, reg, bus, resume_from=await bus.query()
+    )
+    assert r2.status == Status.SUCCESS
+    assert tool.calls == [500]
+    assert any(e.type == ev.EXECUTION_CLAIMED for e in await bus.query())
+
+    # Second resume from the now-larger log: the approval is still resolved, but the
+    # side effect is already claimed -> refused, never executed a second time.
+    p3 = ScriptedProvider.from_moves([{"text": '{"done": true}', "finish": "stop"}])
+    r3 = await run_task(
+        TaskSpec(task_id=tid, query="pay rent"), p3, reg, bus, resume_from=await bus.query()
+    )
+    assert r3.status == Status.SUCCESS
+    assert tool.calls == [500]  # STILL once — consume-once held across the re-resume
+    assert any(
+        e.type == ev.DEFENSE_BLOCKED and e.payload.get("kind") == "duplicate_execution"
+        for e in await bus.query()
+    )
+
+
+async def test_execution_ledger_claim_is_atomic_consume_once() -> None:
+    # The primitive in isolation: the first claim of a key wins, every later
+    # caller (a replay/retry) is refused — concurrency-safe.
+    import asyncio
+
+    from zu_core.ledger import InMemoryExecutionLedger
+
+    ledger = InMemoryExecutionLedger()
+
+    async def attempt() -> bool:
+        return ledger.claim("approval:abc")
+
+    results = await asyncio.gather(*(attempt() for _ in range(8)))
+    assert sum(results) == 1  # exactly one winner
+    assert ledger.claim("approval:abc") is False  # and it stays claimed
+    assert ledger.drain() == ["approval:abc"]  # exactly one journaled claim
+
+
 async def test_resume_without_resolution_stays_paused() -> None:
     # Resuming before a human has decided keeps the run paused (idempotent).
     tool = WireTransfer()

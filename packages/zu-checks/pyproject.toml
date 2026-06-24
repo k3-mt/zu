@@ -1,6 +1,6 @@
 [project]
 name = "zu-checks"
-version = "0.2.2"
+version = "0.2.3"
 description = "Zu built-in checks: detectors (empty, error, js-shell, embedded-widget, bot-wall) + validators (schema, grounding)"
 readme = "README.md"
 requires-python = ">=3.11"

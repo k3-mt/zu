@@ -29,6 +29,7 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-CD-3": ("packages/zu-core/tests/test_invocation_gate.py", "test_taint_recorded_and_readable_at_the_gate"),
     "ZU-CD-4": ("packages/zu-core/tests/test_invocation_gate.py", "test_velocity_limit_via_grant_store"),
     "ZU-CD-5": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_without_resolution_stays_paused"),
+    "ZU-CD-6": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_twice_executes_the_approved_side_effect_only_once"),
     "ZU-AUDIT-1": ("packages/zu-core/tests/test_chain.py", "test_content_tamper_detected"),
     "ZU-AUDIT-2": ("packages/zu-core/tests/test_invocation_gate.py", "test_gate_deny_blocks_the_call_no_side_effect"),
     "ZU-AUDIT-3": ("packages/zu-core/tests/test_chain.py", "test_consumer_field_is_queryable"),

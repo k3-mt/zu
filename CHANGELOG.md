@@ -7,6 +7,34 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-06-24
+
+### Added — ZU-CD-6: first-class consume-once / idempotent-execution guard (#25)
+
+A human approval (ZU-CD-1/2) authorises exactly one irreversible side effect, and
+that "once" must survive across component/process lifetimes — a fresh runner
+resuming the same resolved approval must not execute the side effect again. The
+footgun is keeping the "already done" flag per-instance (a new instance silently
+resets it); the durable answer is the event log, which Zu already owns.
+
+- **New `ExecutionLedger` port** (`zu_core.ports`) with one atomic operation,
+  `claim(key) -> bool`: the first caller wins (proceed), every later caller — a
+  replay/resume/retry — is refused (already executed). The in-memory default
+  `InMemoryExecutionLedger` (`zu_core.ledger`) is a cache over a new
+  `harness.execution.claimed` event; a durable backing (SQL `INSERT ... ON
+  CONFLICT DO NOTHING`, Redis `SET NX`) is a plugin the harness injects via
+  `run_task(ledger=...)`. Mirrors `GrantStore`/`incr_if_below` (#23).
+- **The loop claims before re-executing a human-approved invocation on resume**
+  (`loop._invoke`), so a second resume of the same resolved approval — a fresh
+  `_Run` re-reading the log — finds the key claimed and records a
+  `duplicate_execution` block instead of double-executing. The claimed set is
+  rebuilt from the log on resume, so the guarantee survives restart.
+- Exposed on `RunContext.execution` so a consumer's own tool/gate can make any
+  side effect idempotent on its `idempotency_key`.
+- Conformance: new requirement **ZU-CD-6** in `zu-upstream-conformance.md`, proof
+  `test_pause_resume.py::test_resume_twice_executes_the_approved_side_effect_only_once`,
+  guarded by the conformance matrix.
+
 ## [0.2.2] — 2026-06-24
 
 ### Fixed — three hardening fixes from downstream (Conduit) reports

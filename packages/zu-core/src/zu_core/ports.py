@@ -243,6 +243,11 @@ class RunContext(BaseModel):
     # gate can gate divergence/instruments by the rail's content-free consequence
     # class without reading hostile content. ``None`` outside a replayed call.
     annotations: dict | None = None
+    # Consume-once execution ledger (ZU-CD-6): an ``ExecutionLedger`` a tool/gate
+    # can ``claim(key)`` against to make a side effect idempotent across instances
+    # (kept ``Any`` like ``grants``). The loop itself claims before re-executing a
+    # human-approved invocation on resume, so a double-resume can't double-execute.
+    execution: Any = None
 
 
 @runtime_checkable
@@ -342,6 +347,32 @@ class GrantStore(Protocol):
         The concurrency-safe primitive for cumulative caps (``get``/``put`` is
         TOCTOU-racy — see the note above). A committed increment journals like
         ``put`` so the event log stays the source of truth."""
+        ...
+
+
+# --- consume-once / idempotent execution for human approvals (ZU-CD-6) ----
+#
+# A human approval (ZU-CD-1/2) authorises exactly ONE irreversible side effect, and
+# that "once" must survive across component/process lifetimes: a fresh runner that
+# resumes the same resolved approval MUST NOT execute the side effect again. The
+# footgun is keeping the "already done" flag per-instance — a new instance silently
+# resets it and double-executes. ``ExecutionLedger`` is the durable, atomic
+# consume-once primitive the loop consults before re-executing a human-approved
+# invocation on resume; the in-memory default (``zu_core.ledger.InMemoryExecutionLedger``)
+# is a cache over ``harness.execution.claimed`` events (the log stays source of
+# truth, so resume rebuilds the claimed set); a durable backing (SQL
+# ``INSERT ... ON CONFLICT DO NOTHING``, Redis ``SET NX``) is a plugin the harness
+# injects. A consumer's own tool/gate may ``claim`` against it too (via
+# ``ctx.execution``) to make any side effect idempotent on its idempotency key.
+
+
+@runtime_checkable
+class ExecutionLedger(Protocol):
+    def claim(self, key: str) -> bool:
+        """Atomically claim ``key`` for execution: ``True`` for the first caller
+        (proceed), ``False`` for every later caller — a replay/resume/retry —
+        (already executed, refuse). A first claim journals so the log stays the
+        source of truth and a resumed run sees the key as taken."""
         ...
 
 

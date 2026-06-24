@@ -91,6 +91,11 @@ APPROVAL_RESOLVED = "harness.approval.resolved"
 # resumed run re-entering the loop from a prior log.
 RUN_PAUSED = "harness.run.paused"
 RUN_RESUMED = "harness.run.resumed"
+# A consume-once execution claim (ZU-CD-6): {"key"}. The first claim of a key wins
+# and is recorded here; the in-memory ExecutionLedger is a cache over these events,
+# so a resumed/replayed run folds them to rebuild the claimed set and REFUSES to
+# execute an already-claimed side effect again (one approval -> one irreversible act).
+EXECUTION_CLAIMED = "harness.execution.claimed"
 # A replayed track was verified against a human-approved content hash (ZU-RAIL-1):
 # {"rail_hash"}. The run refuses to replay an unapproved rail (a content-hash
 # mismatch is recorded as harness.defense.blocked {kind:"rail_unapproved"}).
@@ -138,6 +143,7 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         APPROVAL_RESOLVED,
         RUN_PAUSED,
         RUN_RESUMED,
+        EXECUTION_CLAIMED,
         RAIL_VERIFIED,
         RAIL_DISARMED,
         PIPELINE_STARTED,

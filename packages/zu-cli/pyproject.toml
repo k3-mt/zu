@@ -1,6 +1,6 @@
 [project]
 name = "zu-cli"
-version = "0.2.2"
+version = "0.2.3"
 description = "The `zu` command — Agent Production Runtime CLI"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -127,6 +127,12 @@ When a run pauses for ESCALATE and resumes, the gate (ZU-CORE-2), taint flags (Z
 - **Conformance test:** Pause at a high-consequence action, resume after approval, and show subsequent actions are still gated and taint is still set.
 - **Failure mode:** Resume resets state → escalate once, then act freely.
 
+### ZU-CD-6 — A human approval executes its side effect at most once (consume-once) **(MUST)**
+A human approval authorises exactly ONE irreversible side effect, and that "once" MUST survive across component/process lifetimes — a fresh runner resuming the same resolved approval MUST NOT execute the side effect again.
+- **Why:** The obvious place to keep the "already executed" flag is per-instance, and a new instance silently resets it — double-charging on a re-resume/replay. The framework owns the approval identity and the durable log, so it owns the consume-once guard.
+- **Conformance test:** Approve once, resume twice from the log; the side effect runs exactly once and the second resume is refused (`duplicate_execution`).
+- **Failure mode:** Per-instance dedup → a re-resumed/replayed run double-executes an irreversible action.
+
 ---
 
 ## 5. Cross-cutting — the audit log (`ZU-AUDIT`)
@@ -300,6 +306,7 @@ implementations are plugins.
 | ZU-CD-3 | Input taggable; taint propagated & queryable at gate | MUST | **Satisfied** | `spec.tainted`/`TriggerEvent.hostile`/`_taint`; `ctx.tainted`; `test_invocation_gate.py` |
 | ZU-CD-4 | Validators hold durable per-grant state | MUST | **Satisfied** | `GrantStore` + `InMemoryGrantStore` + `grant.updated`; `test_invocation_gate.py::test_velocity_limit_via_grant_store` |
 | ZU-CD-5 | Pause/resume preserves gate, taint, state | MUST | **Satisfied** | `run_task(resume_from=...)` rebuilds from log; `test_pause_resume.py` |
+| ZU-CD-6 | Approval executes its side effect at most once (consume-once) | MUST | **Satisfied** | `ExecutionLedger` + `InMemoryExecutionLedger` + `execution.claimed`; loop claims before re-executing an approved invocation; `test_pause_resume.py::test_resume_twice_executes_the_approved_side_effect_only_once` |
 | ZU-AUDIT-1 | Log append-only & tamper-evident | MUST | **Satisfied** | `chain.py` per-trace hash chain + `verify_chain`; `test_chain.py` |
 | ZU-AUDIT-2 | Log records decision, rule, escalation binding | MUST | **Satisfied** | `gate.decided`/`approval.*` events, parented to `tool.invoked`; `test_invocation_gate.py` |
 | ZU-AUDIT-3 | Log accepts consumer-defined fields | MUST | **Satisfied** | `payload["ctx"]` + `register_event_filter` + SQLite index; `test_chain.py`, `test_sqlite_sink.py` |

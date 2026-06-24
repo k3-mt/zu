@@ -39,6 +39,7 @@ from . import events as ev
 from .bus import EventBus
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .grants import InMemoryGrantStore
+from .ledger import InMemoryExecutionLedger
 from .ports import (
     Finish,
     ModelProvider,
@@ -500,6 +501,7 @@ class _Run:
         trace_id: UUID | None = None,
         *,
         grants: Any = None,
+        ledger: Any = None,
     ) -> None:
         self.spec = spec
         self.bus = bus
@@ -518,6 +520,11 @@ class _Run:
         # Durable per-grant state (ZU-CD-4): the injected store or the in-memory
         # default (a cache over ``harness.grant.updated`` events).
         self.grant_state: Any = grants if grants is not None else InMemoryGrantStore()
+        # Consume-once execution ledger (ZU-CD-6): the injected ledger or the
+        # in-memory default (a cache over ``harness.execution.claimed`` events). The
+        # loop claims against it before re-executing a human-approved invocation on
+        # resume, so a double-resume cannot double-execute an irreversible side effect.
+        self.exec_ledger: Any = ledger if ledger is not None else InMemoryExecutionLedger()
         # One RunContext reused for the whole run: ``observation`` is updated
         # per checkpoint — so a checkpoint is O(1), not an O(n) copy of the log.
         # Plugins (tools/detectors/validators) receive ``ctx.events`` as a
@@ -532,6 +539,7 @@ class _Run:
         self._ctx = RunContext(spec=spec, observation=None, events=[])
         self._ctx.events = _EventsView(self.events)
         self._ctx.grants = self.grant_state
+        self._ctx.execution = self.exec_ledger
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
         self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
@@ -592,6 +600,19 @@ class _Run:
                 ev.GRANT_UPDATED,
                 {"grant_id": grant_id, "key": key, "value": value},
                 parent=parent or self.root,
+            )
+
+    async def flush_claims(self, parent: UUID | None = None) -> None:
+        """Drain the in-memory execution ledger's journal and record each claim as a
+        ``harness.execution.claimed`` event (ZU-CD-6), so a resumed/replayed run
+        rebuilds its claimed set and refuses to re-execute a claimed side effect. A
+        durable/plugin ledger with no journal is a no-op (it persists itself)."""
+        drain = getattr(self.exec_ledger, "drain", None)
+        if drain is None:
+            return
+        for key in drain():
+            await self.emit(
+                ev.EXECUTION_CLAIMED, {"key": key}, parent=parent or self.root
             )
 
     async def terminal(self, reason: str) -> Result:
@@ -825,6 +846,7 @@ async def run_task(
     finish_provider: ModelProvider | None = None,
     replay_jitter_median_ms: int = 0,
     grants: Any = None,
+    ledger: Any = None,
     resume_from: Sequence[Event] | None = None,
     approved_rail_hash: str | None = None,
 ) -> Result:
@@ -871,7 +893,7 @@ async def run_task(
     by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
-    run = _Run(spec, bus, trace_id=trace_id, grants=grants)
+    run = _Run(spec, bus, trace_id=trace_id, grants=grants, ledger=ledger)
     # At maturity a matching track makes the run a deterministic replay: apply the
     # tight replay budget (a broken track then fails fast, not at full pathfinding
     # cost). The pathfinding budget still governs a fresh/--no-track run.
@@ -1231,6 +1253,26 @@ async def _invoke(
     invoked_id = await run.emit(ev.TOOL_INVOKED, invoked_payload, parent=turn, source=name)
     call = ToolCall(name=name, args=args)
     if approved_key is not None:
+        # Consume-once (ZU-CD-6): a human approval authorises EXACTLY ONE
+        # irreversible side effect. Claim the approved key BEFORE executing — a
+        # replay or a second resume of the same resolved approval (e.g. a fresh
+        # runner re-reading the log) finds it already claimed and is refused, so it
+        # cannot double-execute. The claim journals to the log (flush below) so the
+        # guarantee survives across instances/processes, not just this object.
+        claimer = getattr(run.exec_ledger, "claim", None)
+        if claimer is not None and not claimer(idem):
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": "duplicate_execution", "tool": name,
+                 "detail": "approved invocation already executed (consume-once, ZU-CD-6)"},
+                parent=invoked_id,
+                source="human",
+            )
+            obs: dict = {"error": "approved invocation already executed",
+                         "blocked": "duplicate_execution"}
+            await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
+            return obs
+        await run.flush_claims(parent=invoked_id)
         # Resumed after a human approval (ZU-CD-5): the gate is satisfied by the
         # recorded resolution bound to this exact key; record that and execute.
         await run.emit(
@@ -1258,7 +1300,7 @@ async def _invoke(
                 parent=invoked_id,
                 source=worst.detector,
             )
-            obs: dict = {
+            obs = {
                 "error": f"blocked by gate {worst.detector}: {worst.detail or 'denied'}",
                 "blocked": "gate_denied",
             }
@@ -1518,6 +1560,7 @@ def _rebuild_run_state(events: Sequence[Event]) -> dict:
     tainted = False
     call_seq = 0
     grant_updates: list[tuple[str, str, Any]] = []
+    execution_claims: list[str] = []
     pending: dict | None = None
     resolutions: dict[str, dict] = {}
     for e in events:
@@ -1531,6 +1574,8 @@ def _rebuild_run_state(events: Sequence[Event]) -> dict:
             tier = max(tier, int(p["to_tier"]))
         elif t == ev.GRANT_UPDATED:
             grant_updates.append((p["grant_id"], p["key"], p["value"]))
+        elif t == ev.EXECUTION_CLAIMED:
+            execution_claims.append(p["key"])
         elif t == ev.TOOL_INVOKED:
             call_seq += 1
         elif t == ev.RUN_PAUSED:
@@ -1551,6 +1596,7 @@ def _rebuild_run_state(events: Sequence[Event]) -> dict:
         "tainted": tainted,
         "call_seq": call_seq,
         "grant_updates": grant_updates,
+        "execution_claims": execution_claims,
         "pending": pending,
         "resolution": resolution,
     }
@@ -1583,6 +1629,12 @@ async def _resume_from_log(
     if loader is not None:
         for grant_id, key, value in state["grant_updates"]:
             loader(grant_id, key, value)
+    # Rebuild the consume-once claimed set (ZU-CD-6) so an already-executed approval
+    # is seen as taken and a re-resume refuses to run its side effect again.
+    claim_loader = getattr(run.exec_ledger, "load", None)
+    if claim_loader is not None:
+        for ckey in state["execution_claims"]:
+            claim_loader(ckey)
     tokens = int(state["tokens"])
     messages = _initial_messages(spec, ladder.active().values())
 

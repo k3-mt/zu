@@ -75,7 +75,8 @@ server — `zu_scaffold/validate/run/traces`, `zu_explore/explore_save`,
 - Per-package details: each `packages/zu-*/README.md`. Ports + recipes: AGENTS.md.
 - **Upstream conformance** (the mechanical guarantees a credential/capability
   consumer builds on): the pre-execution gate (`InvocationGate`), idempotency,
-  run-level taint, durable grant state, human-pause/resume, the hash-chained audit
+  run-level taint, durable grant state, human-pause/resume, consume-once execution
+  (`ExecutionLedger`), the hash-chained audit
   log, harness-owned `Channel`s, out-of-process plugins (`zu_core.rpc` +
   `zu_backends.oop_launcher`), `WorkloadIdentity`, and `EgressEnforcement`. Spec +
   status matrix: [`zu-upstream-conformance.md`](zu-upstream-conformance.md);
