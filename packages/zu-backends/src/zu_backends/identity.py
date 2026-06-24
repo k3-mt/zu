@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 
 from zu_core.ports import IdentityProof
 
@@ -45,13 +46,21 @@ class StaticIdentity:
         self._trusted = dict(trusted_keys or {principal: key})
         self._expected_measurement = expected_measurement
 
-    def _sign(self, principal: str, key: str) -> str:
-        return hmac.new(key.encode(), principal.encode(), hashlib.sha256).hexdigest()
+    def _sign(self, principal: str, key: str, measurement: str | None = None) -> str:
+        # Bind BOTH the principal AND (when present) the attestation measurement
+        # into the signed material (ZU-NET-5). The measurement must NOT ride as
+        # unsigned plaintext: it is the whole point of attestation, so an
+        # intermediary that swaps it in transit (no key needed for a plaintext ==
+        # compare) would defeat it. Canonical JSON of ``[principal, measurement]``
+        # maps the pair 1:1 to bytes — ``["a|b", null]`` and ``["a", "b"]`` encode
+        # differently, so there is no delimiter-injection ambiguity.
+        msg = json.dumps([principal, measurement], separators=(",", ":"))
+        return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
 
     def present(self) -> IdentityProof:
-        proof: dict = {"sig": self._sign(self._principal, self._key)}
+        proof: dict = {"sig": self._sign(self._principal, self._key, self._measurement)}
         if self._measurement is not None:
-            proof["measurement"] = self._measurement  # NET-5 attestation (optional)
+            proof["measurement"] = self._measurement  # NET-5 attestation (now signed)
         return IdentityProof(scheme=self.scheme, principal=self._principal, proof=proof)
 
     def verify(self, proof: IdentityProof) -> str | None:
@@ -60,13 +69,17 @@ class StaticIdentity:
         key = self._trusted.get(proof.principal)
         if key is None:
             return None
-        expected = self._sign(proof.principal, key)
-        if not hmac.compare_digest(expected, str(proof.proof.get("sig", ""))):
+        # Verify the sig over the principal AND the PRESENTED measurement, so a
+        # tampered measurement breaks the signature itself — not merely a plaintext
+        # equality compare a key-less intermediary could satisfy by editing both.
+        presented = proof.proof.get("measurement")
+        expected_sig = self._sign(proof.principal, key, presented)
+        if not hmac.compare_digest(expected_sig, str(proof.proof.get("sig", ""))):
             return None
-        # NET-5: if this verifier requires an attestation measurement, enforce it;
-        # otherwise accept identity-only (degrade gracefully).
+        # NET-5: if this verifier requires an attestation measurement, enforce the
+        # exact value; otherwise accept identity-only (degrade gracefully).
         if self._expected_measurement is not None:
-            if proof.proof.get("measurement") != self._expected_measurement:
+            if presented != self._expected_measurement:
                 return None
         return proof.principal
 

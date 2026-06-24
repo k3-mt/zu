@@ -1,6 +1,6 @@
 [project]
 name = "zu-core"
-version = "0.2.3"
+version = "0.2.4"
 description = "Zu core: contracts, ports, registry, loop, event bus"
 readme = "README.md"
 requires-python = ">=3.11"

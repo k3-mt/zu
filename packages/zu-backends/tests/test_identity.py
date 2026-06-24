@@ -49,6 +49,19 @@ def test_attestation_measurement_enforced_when_required() -> None:
     assert verifier.verify(tampered.present()) is None
 
 
+def test_measurement_tampering_breaks_the_signature() -> None:
+    # ZU-NET-5: the attestation measurement is bound INTO the signature, so swapping
+    # it on a genuine proof (no re-signing) no longer verifies — it is tamper-evident,
+    # not an unsigned plaintext == compare. Mirrors the reported repro (#26).
+    honest = StaticIdentity("vault", key="k", measurement="genuine-v1")
+    proof = honest.present()
+    proof.proof["measurement"] = "anything-i-want"  # swap measurement, keep the sig
+    forger = StaticIdentity(
+        "vault", key="k", trusted_keys={"vault": "k"}, expected_measurement="anything-i-want"
+    )
+    assert forger.verify(proof) is None  # the broken signature is detected
+
+
 def test_degrades_to_identity_only_without_expected_measurement() -> None:
     # With no expected measurement configured, identity verifies without one.
     no_measure = StaticIdentity("agent", key="k")

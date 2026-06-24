@@ -87,8 +87,8 @@ The harness MUST be able to (a) present an attestable identity for the agent on 
 ### ZU-NET-5 — Harness integrity is attestable **(SHOULD)**
 Zu SHOULD support attestation that the running harness is the expected code, so a consumer can refuse to issue identity or credentials to a tampered harness.
 - **Why:** Attestation protects the *mediator*. The policy being injectable is tolerable only because the harness mediates everything; attestation guarantees an attacker cannot swap the real harness for a passthrough harness that skips the gate (ZU-CORE-2) — the swapped harness fails attestation and gets no identity.
-- **Conformance test:** A modified harness fails attestation against a reference measurement.
-- **Failure mode:** Without it, a host-level attacker replaces the enforcer and the broker cannot tell. (SHOULD, not MUST: the consumer degrades to static identity, which proves possession but not enforcer integrity.)
+- **Conformance test:** A modified harness fails attestation against a reference measurement; and a measurement swapped on a genuine proof breaks the signature (the measurement is signed, not unsigned plaintext).
+- **Failure mode:** Without it, a host-level attacker replaces the enforcer and the broker cannot tell. (SHOULD, not MUST: the consumer degrades to static identity, which proves possession but not enforcer integrity.) An *unsigned* measurement is worse than none: an intermediary swaps it in transit and a verifier whose expected value matches the forgery accepts it — so the reference `StaticIdentity` binds the measurement into the signature.
 
 ---
 

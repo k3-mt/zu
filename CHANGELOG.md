@@ -7,6 +7,27 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-06-24
+
+### Fixed — ZU-NET-5: the attestation measurement is now signed (#26)
+
+`StaticIdentity` (`zu_backends.identity`) signed only the principal, so the
+attestation `measurement` rode in the proof as **unsigned plaintext** checked with a
+plain equality compare. An intermediary could swap the measurement on a genuine
+proof in transit (no key needed) and a verifier whose `expected_measurement` matched
+the forged value would accept it — defeating measurement-based attestation, which is
+the whole point of ZU-NET-5.
+
+- `_sign` now binds **both the principal and (when present) the measurement** into
+  the signed material, canonically encoded (`json.dumps([principal, measurement])`)
+  so the pair maps 1:1 to bytes with no delimiter-injection ambiguity. `verify`
+  recomputes the signature over the **presented** measurement, so a tampered
+  measurement breaks the signature itself rather than being caught only by the
+  equality compare. A verifier still degrades to identity-only when no measurement
+  is presented. (`packages/zu-backends/src/zu_backends/identity.py`)
+- Regression: `test_identity.py::test_measurement_tampering_breaks_the_signature`
+  (the reported repro — swap the measurement, keep the sig, verify rejects).
+
 ## [0.2.3] — 2026-06-24
 
 ### Added — ZU-CD-6: first-class consume-once / idempotent-execution guard (#25)

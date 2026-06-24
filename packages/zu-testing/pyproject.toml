@@ -1,6 +1,6 @@
 [project]
 name = "zu-testing"
-version = "0.2.3"
+version = "0.2.4"
 description = "Zu test kit: shared fakes, fixtures, and a pytest plugin for testing Zu and its plugins"
 readme = "README.md"
 requires-python = ">=3.11"
