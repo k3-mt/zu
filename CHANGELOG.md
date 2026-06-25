@@ -7,6 +7,107 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — §8 credential broker spend-accounting: the cap reflects only ACTUAL captures (zu-core 0.2.13 → 0.2.14)
+An adversarial review of the shipped broker found SPEND-ACCOUNTING bugs in
+`InMemoryCredentialBroker.use`. None weaken containment (secret/scope/TTL/revocation/
+audit-binding/high-consequence-to-human are unchanged); they correct how the
+cumulative cap is accounted, restructuring `use` around an **authorize→capture
+reconciliation** so the cumulative counter commits ONLY to real captures.
+
+- **Retry no longer double-counts the cap (FIX A).** `use` previously reserved the
+  cumulative spend via `incr_if_below` BEFORE calling the instrument, so a retried use
+  with the same `idempotency_key` — which the instrument correctly dedupes (no
+  re-charge) — still took a SECOND reservation AND emitted a SECOND
+  `harness.capability.used`. The broker now wraps a consume-once `ExecutionLedger`
+  (`zu_core.ledger`, REUSED — ZU-CD-6 style) keyed by `idempotency_key`: a replay
+  returns the PRIOR `UseOutcome` verbatim, takes NO new reservation, and emits NO
+  duplicate event. The first claim journals `harness.execution.claimed` so the dedupe
+  survives pause/resume. New optional `ledger=` constructor arg (defaults to
+  `InMemoryExecutionLedger`).
+- **A DECLINED charge consumes nothing and is not `ok` (FIX A).** The reservation is
+  now DEFERRED to AFTER the instrument returns: only a `status=="captured"` outcome
+  commits to the cumulative counter (atomic `incr_if_below`, unchanged race-proof
+  guard). A non-captured outcome (decline/reject) commits NOTHING, emits a contained
+  `harness.defense.blocked` (`kind="charge_declined"`) instead of a success
+  `harness.capability.used`, and returns `UseOutcome(ok=False, refused="declined",
+  detail=<reason>)`. The cap check stays FAIL-CLOSED: a read-only pre-check refuses a
+  use that WOULD exceed the cap BEFORE the instrument is charged. (Chosen over adding a
+  GrantStore decrement/release — reserve-on-capture with a fail-closed pre-check is the
+  lower-risk option: no new mutable release path to get wrong, and the atomic
+  `incr_if_below` after capture stays the real commit.) `FakeCardInstrument` gained a
+  decline path (`decline_payees`/`decline_amounts`) so this is provable offline.
+- **Consent PRESENCE is enforced, not just mismatch (FIX B).** `use` previously refused
+  only on a consent_ref MISMATCH, so a use with NO `consent_ref` still executed. A
+  grant now refuses a use with an absent `consent_ref` (`refused="no_consent"`,
+  `kind="consent_absent"`, logged). A grant may opt OUT explicitly via the new
+  `Grant.requires_consent: bool` (default **True** — consent REQUIRED).
+- **Structuring is caught by the velocity monitor (FIX C, confirmed).** The per-use
+  `requires_human_over` gate can be evaded by splitting one high-consequence spend into
+  many sub-threshold charges; the `SPEND_VELOCITY` monitor is the backstop. Confirmed
+  the predicate sums windowed `harness.capability.used` captures (3×400 over a 1000/
+  window cap → VIOLATION) — no predicate change needed. The per-use human threshold and
+  the velocity monitor TOGETHER cover high-consequence; neither alone does.
+- **Proofs (extend `test_credential_broker.py`).**
+  `test_retry_same_idempotency_key_does_not_double_count_the_cap`,
+  `test_declined_charge_does_not_consume_the_cap_and_is_not_ok`,
+  `test_use_without_consent_is_refused`,
+  `test_structuring_is_caught_by_the_velocity_monitor`. Each fails against the
+  pre-fix code and passes after. The existing ZU-CD-7/8/AUDIT-5 proofs now supply a
+  `consent_ref` (the contract is now presence-enforced) and stay green.
+
+### Added — §8 credential broker: the contained, scoped, revocable USE of an instrument (zu-core 0.2.12 → 0.2.13)
+"Capability acquisition is the HARNESS job, never the model." §8 generalises the
+existing inference-credential containment to ALL credentials/instruments (a card via
+an issuer, a vault/KMS, an inbox, an OAuth grant). The thesis: the INSTRUMENT exists
+or a third party issues it; Zu builds the CONTAINMENT — how the agent USES it without
+ever holding the secret, exceeding scope, overspending, or being hijacked. **Zu is
+the thing that makes it safe to hand the agent a wallet, NOT the wallet.** The
+reference instrument is FAKE; a real issuer is a FUTURE pluggable adapter.
+
+- **`CredentialBroker` + `Instrument` ports (`zu_core.ports`).** The ONE primitive: a
+  scoped, time-boxed, revocable, harness-held, fully-audited capability to USE an
+  instrument, where the policy only ever gets "a door already locked behind it",
+  NEVER the secret. The policy holds an opaque capability HANDLE (`Grant.id`) and
+  emits a typed `UseRequest`; it gets a `UseOutcome` (a charge id, never the PAN/
+  token). There is **no signature on the policy-facing side that can carry a secret**
+  — the boundary is mechanical, not asked-nicely. The `Instrument` is the pluggable
+  issuer/vault seam: it ALONE holds the secret and `perform`s the real op; the secret
+  never crosses back. New registry kind `credential_brokers` (`zu.credential_brokers`,
+  interface v1) + `@credential_broker` decorator, mirroring `monitors`/`patterns`.
+- **`Grant`/`Consent`/`CapScope` data model (pydantic; frozen).** A `Grant` carries
+  `instrument_ref`, `scope` (operations + payee allowlist + `requires_human_over`),
+  `per_use_limit`, `cumulative_limit` (+ key), `ttl_s`, the authorizing `consent`, and
+  `revoked`. `Grant.expired(now)` is a pure function of time.
+- **`InMemoryCredentialBroker` (`zu_core.broker`) — the reference enforcer over a FAKE
+  instrument.** Fail-closed: every refusal is logged (`harness.defense.blocked`) and
+  the instrument is touched ONLY on a full allow. Enforces scope → payee-allowlist →
+  TTL → consent-match → per-use → cumulative (atomic `incr_if_below`, REUSING the
+  `GrantStore` primitive that closes the TOCTOU race) → then the instrument op, the
+  ONE place the secret is used, harness-side. Emits `harness.capability.used` bound to
+  the grant + consent under `payload["ctx"]` (ZU-AUDIT-3 convention), plus
+  `harness.grant.issued`/`harness.grant.revoked`.
+- **`FakeCardInstrument`/`FakeVaultInstrument` (`zu_core.instruments`).** The in-memory
+  doubles (alongside `grants.py`/`ledger.py`). The card holds a private `_pan` and
+  charges a counter (idempotent on the ZU-CORE-4 key); the vault derives an HMAC token
+  from a private `_root_secret`. NO payment SDK, NO network, NO real secret.
+- **Wiring, reusing the shipped machinery.** HIGH-CONSEQUENCE → HUMAN: `BrokerGate`
+  (`zu_core.broker_gate`) maps a use over `scope.requires_human_over` (or a new payee)
+  — computed HARNESS-SIDE from the Grant + the literal call args, never policy
+  self-report — to `Verdict(kind="human")`, routing to the EXISTING `_pause_for_human`
+  (ZU-CD-1/2/5/6 unchanged): the large spend pauses BEFORE the instrument op, a human
+  approves, the broker use runs exactly once. SPEND-VELOCITY → MONITOR: a new
+  `PredicateKind.SPEND_VELOCITY` (`{window_s, limit}`) folds `harness.capability.used`
+  over a sliding window and compiles to a Monitor via the unchanged
+  `compile_invariant`, joining the existing VIOLATION→TERMINAL path (declared as DATA,
+  ZU-RAIL-6).
+- **Conformance (three-way synced + named offline proofs).** `ZU-CD-7` (secret never
+  in the policy context/log), `ZU-CD-8` (use refused if it exceeds
+  scope/limits/TTL/revocation) — the next integers in the FIXED `ZU-CD` family; and
+  `ZU-AUDIT-5` (every use on the hash-chained log bound to its consent) — the next in
+  `ZU-AUDIT`. Proofs in `test_credential_broker.py` (a ScriptedProvider policy + the
+  FAKE instrument), including an adversarial policy that tries to read the secret /
+  overspend / pay an off-allowlist payee and is CONTAINED. TCB updated.
+
 ### Added — §9.5 non-executing PDF extract: read the doc, never run its JS (zu-tools 0.2.8 → 0.2.9)
 §9.5 (the worked threat model) prefers a NON-EXECUTING document path: "extract
 text/structure WITHOUT running embedded JS … do not give the attacker the primitive

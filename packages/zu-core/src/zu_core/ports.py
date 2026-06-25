@@ -8,8 +8,10 @@ a concrete adapter — which is what makes every adapter replaceable.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Sequence
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +55,12 @@ INTERFACE_VERSION: dict[str, int] = {
     "replay_arbiters": 1,  # ReplayArbiter — replay-divergence decision (ZU-RAIL-3)
     "monitors": 1,  # Monitor — stateful history-aware automaton over the log (ZU-RAIL-5)
     "patterns": 1,  # Pattern — recognize a surface archetype + emit rail invariants (§5)
+    # CredentialBroker — the SCOPED, time-boxed, revocable, harness-held, fully-
+    # audited capability to USE an instrument (a card, a vault, an inbox, an OAuth
+    # grant) WITHOUT the policy ever holding the secret (§8: generalises inference-
+    # credential containment to ALL credentials/instruments). The policy holds an
+    # opaque capability handle; the broker uses the secret harness-side.
+    "credential_brokers": 1,
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -581,6 +589,181 @@ class Channel(Protocol):
     endpoint: str  # opaque label for the log; never the credential
 
     async def call(self, req: ChannelRequest) -> ChannelResponse: ...
+
+
+# --- the credential broker — scoped, time-boxed, revocable, audited USE of an
+#     instrument WITHOUT the policy ever holding the secret (§8) ---------------
+#
+# THE THESIS. Two things, and conflating them is the trap:
+#   * the INSTRUMENT (a card via an issuer, a vault/KMS, an inbox, an OAuth
+#     grant) — it EXISTS, or a THIRD PARTY issues it; Zu integrates it, never
+#     becomes it;
+#   * the CONTAINMENT problem — how the agent USES the instrument without ever
+#     holding the secret, exceeding scope, overspending, or being hijacked.
+# Zu builds the CONTAINMENT / ACCESS layer, NEVER the instrument. The reference
+# instrument here is FAKE; a real issuer is a FUTURE pluggable adapter behind the
+# ``Instrument`` seam below — never in zu-core (which imports nothing but pydantic).
+#
+# THE ONE PRIMITIVE. A scoped, time-boxed, revocable, harness-held, fully-audited
+# capability to USE an instrument, where the policy only ever gets "a door already
+# locked behind it", NEVER the secret. The policy holds an opaque capability
+# HANDLE (``Grant.id``); the broker holds the secret (behind the ``Instrument``)
+# and uses it harness-side; every use lands on the hash-chained audit log bound to
+# the consent that justified it.
+#
+# This is the SAME ownership ``ModelProvider``/``Channel`` already have for the
+# inference key, generalised to an arbitrary instrument: the harness/operator
+# constructs the broker with (a reference to) an ``Instrument``; the policy emits
+# a typed ``UseRequest`` (a verb + args + a consent_ref) and gets a ``UseOutcome``
+# (an outcome dict — a charge id, never the PAN/token), and can neither read the
+# secret nor exceed scope/limit/TTL/revocation. For the strongest boundary the
+# broker is wrapped as a ``Channel`` (op="use") and run out-of-process via
+# ``zu_core.rpc`` + ``zu_backends.oop_launcher`` — then the secret lives in a
+# separate process/uid (ZU-CORE-3 / ZU-NET-3 / ZU-EXT-4) and a harness compromise
+# yields the socket, not the secret.
+
+
+class Consent(BaseModel):
+    """Who authorized a capability + for what + the proof/authority (audit-bound
+    on EVERY use, so "acted-within-granted-authority" is provable from the log).
+
+    ``authority`` is the proof/justification — an approval_id, a signed-token ref,
+    a parent grant — not the secret. ``Consent`` is a pure authority object: it
+    grants the right to USE an instrument, it is not a balance/ledger/settlement
+    record (containment, never issuance)."""
+
+    model_config = {"frozen": True}
+
+    consent_id: str
+    by: str  # the principal who authorized (a human, a parent grant)
+    authority: str  # the proof/justification (an approval_id, a signed-token ref)
+    purpose: str = ""  # what it was authorized for (audit-readable)
+
+
+class CapScope(BaseModel):
+    """The allowed operations + constraints a capability is bounded to. The policy
+    cannot exceed this — the broker refuses (and logs) any use outside it.
+
+    ``payees`` is an allowlist of permitted recipients (``None`` ⇒ the op-set is
+    the only constraint). ``requires_human_over`` is the per-use amount above which
+    a use is HIGH-CONSEQUENCE and routes to the human-in-the-loop pause BEFORE the
+    instrument operation (the existing ``Verdict(kind="human")`` path), never
+    silently through."""
+
+    model_config = {"frozen": True}
+
+    operations: frozenset[str] = frozenset()  # allowed ops, e.g. {"charge"}
+    payees: frozenset[str] | None = None  # recipient allowlist; None ⇒ op-set only
+    requires_human_over: float | None = None  # per-use amount → HITL above this
+
+
+class Grant(BaseModel):
+    """A SCOPED, time-boxed, revocable capability to USE an instrument — the ONE
+    primitive. ``id`` is the OPAQUE capability handle the policy holds; everything
+    authority-bearing (the ``instrument_ref``, the secret behind it) stays
+    harness-side. The model is frozen: an issued capability is immutable; revoke is
+    state the broker holds, and cumulative spend accrues in a ``GrantStore`` keyed
+    by ``id`` — not by mutating the Grant.
+
+    REUSES ``GrantStore.incr_if_below`` for the cumulative cap (the atomic
+    check-and-increment that closes the TOCTOU race two concurrent uses would
+    otherwise drive through an under-cap check)."""
+
+    model_config = {"frozen": True}
+
+    id: str = Field(default_factory=lambda: uuid4().hex)  # the OPAQUE handle
+    instrument_ref: str  # which Instrument (an opaque label); NEVER the secret
+    scope: CapScope
+    per_use_limit: float | None = None  # max single-use amount
+    cumulative_limit: float | None = None  # max spend over the window (incr_if_below)
+    cumulative_key: str = "spent"  # the GrantStore key the cumulative cap accrues under
+    ttl_s: int | None = None  # seconds from created_at; None ⇒ no expiry
+    consent: Consent  # the authorizing consent (audit-bound on every use)
+    # Whether every USE must NAME a matching consent (the default — consent is
+    # PRESENCE-enforced, not just mismatch-checked: a use with no consent_ref is
+    # refused ``no_consent``). A grant may opt OUT explicitly (a back-office/batch
+    # grant whose single issuing consent covers all uses) by setting this False.
+    requires_consent: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    revoked: bool = False  # revoke() flips this in the broker's grant table
+
+    def expired(self, now: datetime) -> bool:
+        """True once ``now`` is past ``created_at + ttl_s`` (``ttl_s is None`` ⇒
+        never expires). Time is supplied by the caller so the check is pure and
+        testable; the broker passes ``datetime.now(UTC)``."""
+        return self.ttl_s is not None and (now - self.created_at).total_seconds() > self.ttl_s
+
+
+class UseRequest(BaseModel):
+    """The policy's request to USE a capability — PURE DATA, carries NO secret.
+
+    ``capability_id`` is the opaque handle the policy holds; ``operation``/``args``
+    are the verb and its parameters (e.g. ``{"amount": 1200, "payee": "acct_42"}``).
+    ``consent_ref`` names which approval/consent authorizes THIS use (the audit
+    binding). ``idempotency_key`` dedupes a retried side effect (reusing the
+    ZU-CORE-4 key shape). There is no field on this type that could carry a secret
+    — the boundary is mechanical, not asked-nicely."""
+
+    capability_id: str
+    operation: str  # e.g. "charge" | "issue_token" | "send"
+    args: dict = Field(default_factory=dict)
+    consent_ref: str | None = None  # which consent authorizes THIS use (audit binding)
+    idempotency_key: str | None = None  # dedupe a retried side effect
+
+
+class UseOutcome(BaseModel):
+    """The OUTCOME of a use — a charge id, a status, never the PAN/token.
+
+    On allow, ``outcome`` is the instrument's returned outcome dict
+    (``{"charge_id": ..., "status": "captured"}``) — the secret never appears here.
+    On refusal, ``ok`` is False and ``refused`` is the machine code
+    (``scope`` | ``per_use`` | ``cumulative`` | ``expired`` | ``revoked`` |
+    ``no_consent`` | ``requires_human``); the instrument was NOT touched."""
+
+    ok: bool = True
+    outcome: dict = Field(default_factory=dict)  # {"charge_id": ...}; NEVER a secret
+    refused: str | None = None
+    detail: str | None = None
+
+
+@runtime_checkable
+class Instrument(Protocol):
+    """The pluggable issuer/vault seam (a FUTURE real issuer is an adapter here,
+    not this build). The Instrument ALONE holds the secret; the broker calls
+    ``perform``; the secret NEVER crosses back to the broker or the policy.
+
+    ``ref`` is an opaque label for the log (e.g. ``"card:fake-001"``), NEVER the
+    secret. ``perform`` does the real operation USING the secret it alone holds and
+    returns only the OUTCOME (a charge id, a derived token used internally) — the
+    one place a secret is touched, and it stays behind this boundary."""
+
+    ref: str
+
+    async def perform(self, operation: str, args: dict) -> dict: ...
+
+
+@runtime_checkable
+class CredentialBroker(Protocol):
+    """The harness-side broker: holds a reference to the secret (via an
+    ``Instrument``) and exposes ONLY scoped capabilities. The policy NEVER receives
+    a secret — it holds an opaque ``capability_id`` and gets a ``UseOutcome``.
+
+    ``grant`` registers a :class:`Grant` and returns its opaque id (the handle).
+    ``use`` checks the grant (scope, per-use + cumulative limits via
+    ``incr_if_below``, TTL/expiry, NOT revoked, the authorizing consent) and IF
+    allowed performs the instrument operation USING the secret INTERNALLY, records
+    the use as an audit event bound to the grant + consent, and returns only the
+    outcome; it refuses (and logs a defense.blocked-style event) on any scope/limit/
+    TTL/revocation failure. ``revoke`` flips a grant revoked so subsequent use is
+    refused. ``name`` lets it register/version like every other port."""
+
+    name: str
+
+    def grant(self, grant: Grant) -> str: ...
+
+    async def use(self, req: UseRequest) -> UseOutcome: ...
+
+    def revoke(self, grant_id: str) -> None: ...
 
 
 # --- workload identity (ZU-NET-4) ----------------------------------------

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -55,6 +56,15 @@ class PredicateKind(str, Enum):
     # it folds data.surface.captured / data.pattern.recognized events and checks
     # whether the expected handle/label/archetype is present (or, negated, absent).
     SURFACE_CONTAINS = "surface_contains"
+    # Spend velocity over a sliding window (§8): sums the ``amount`` on
+    # harness.capability.used events whose timestamp falls within the last
+    # ``window_s`` and HOLDS iff that sum stays at or below ``limit``. This is the
+    # velocity/anomaly rail a consumer declares in agent.yaml as DATA (ZU-RAIL-6);
+    # it compiles to a Monitor exactly like BUDGET_CAP and joins the existing
+    # VIOLATION→TERMINAL escalation path. Distinct from a Grant's cumulative_limit
+    # (a per-grant hard stop at the broker via incr_if_below): this is a
+    # cross-use, time-windowed anomaly rail over the whole log.
+    SPEND_VELOCITY = "spend_velocity"
 
 
 class Predicate(BaseModel):
@@ -70,6 +80,9 @@ class Predicate(BaseModel):
                            "require_present": bool (optional, default False — when
                            True, absence-of-evidence is unsatisfied, not vacuously
                            true; the liveness/EVENTUALLY reading)}
+      * spend_velocity:   {"window_s": int, "limit": float} — summed spend on
+                           ``harness.capability.used`` within the last window_s must
+                           stay ≤ limit (the §8 velocity/anomaly rail).
     """
 
     model_config = {"frozen": True}
@@ -216,11 +229,52 @@ def _eval_surface_contains(events: Sequence[Any], params: dict) -> bool:
     return (not present) if negate else present
 
 
+def _eval_spend_velocity(events: Sequence[Any], params: dict) -> bool:
+    """True iff summed spend on ``harness.capability.used`` events within the last
+    ``window_s`` seconds stays at or below ``limit`` (§8 velocity rail).
+
+    Sums ``payload["outcome"]["captured"]`` (the instrument's captured amount) —
+    falling back to ``payload["args"]["amount"]`` / ``payload["amount"]`` if a
+    consumer's instrument reports the amount elsewhere. The window is anchored at
+    the latest event's timestamp (``now`` when the log has none), so the property
+    is a pure fold over the timestamps already on the chain — no wall clock, so it
+    is deterministic on replay."""
+    window_s = float(params.get("window_s", 0))
+    limit = float(params.get("limit", 0))
+    used = [e for e in events if getattr(e, "type", None) == ev.CAPABILITY_USED]
+    if not used:
+        return True
+    # Anchor the window at the most recent event timestamp (deterministic on replay
+    # — never the wall clock), falling back to now only for a tsless synthetic log.
+    stamps = [getattr(e, "ts", None) for e in events]
+    real = [t for t in stamps if isinstance(t, datetime)]
+    anchor = max(real) if real else datetime.now(UTC)
+    total = 0.0
+    for e in used:
+        ts = getattr(e, "ts", None)
+        if isinstance(ts, datetime) and (anchor - ts).total_seconds() > window_s:
+            continue  # outside the window
+        p = _payload(e)
+        raw_outcome = p.get("outcome")
+        outcome: dict = raw_outcome if isinstance(raw_outcome, dict) else {}
+        amt = outcome.get("captured")
+        if amt is None:
+            raw_args = p.get("args")
+            args: dict = raw_args if isinstance(raw_args, dict) else {}
+            amt = args.get("amount", p.get("amount", 0))
+        try:
+            total += float(amt)
+        except (TypeError, ValueError):
+            continue
+    return total <= limit
+
+
 _PREDICATE_EVALUATORS: dict[PredicateKind, Callable[[Sequence[Any], dict], bool]] = {
     PredicateKind.BUDGET_CAP: _eval_budget_cap,
     PredicateKind.DOMAIN_ALLOWLIST: _eval_domain_allowlist,
     PredicateKind.REQUIRED_FIELD: _eval_required_field,
     PredicateKind.SURFACE_CONTAINS: _eval_surface_contains,
+    PredicateKind.SPEND_VELOCITY: _eval_spend_velocity,
 }
 
 

@@ -112,6 +112,23 @@ RUN_ROLLED_BACK = "harness.run.rolled_back"
 # so a resumed/replayed run folds them to rebuild the claimed set and REFUSES to
 # execute an already-claimed side effect again (one approval -> one irreversible act).
 EXECUTION_CLAIMED = "harness.execution.claimed"
+# --- the credential broker — scoped/audited USE of an instrument (§8) ---------
+# A capability was USED against an instrument (ZU-AUDIT-5): the OUTCOME summary on
+# the record, NEVER the secret. Payload:
+# {"operation", "outcome": {charge_id|token-ref summary}, "ctx": {"grant_id",
+#  "consent_id", "capability_id", "instrument_ref", "idempotency_key"}}. The
+# consumer-field convention (payload["ctx"], ZU-AUDIT-3) binds the use to the
+# authorizing consent so "acted-within-granted-authority" is provable from the
+# chain. Emitted by a CredentialBroker only on a FULL allow (the instrument ran).
+CAPABILITY_USED = "harness.capability.used"
+# A grant (capability) was issued/registered with a broker (§8): {"ctx":
+# {"grant_id", "instrument_ref", "consent_id"}, "scope": <summary>}. The opaque
+# handle is recorded; the secret is not (it lives behind the Instrument). A refused
+# use reuses harness.defense.blocked; a cumulative-cap write reuses harness.grant.updated.
+GRANT_ISSUED = "harness.grant.issued"
+# A grant was revoked (§8): {"ctx": {"grant_id"}}. Every subsequent use of the
+# handle is refused (and logged as harness.defense.blocked {kind:"capability_revoked"}).
+GRANT_REVOKED = "harness.grant.revoked"
 # A replayed track was verified against a human-approved content hash (ZU-RAIL-1):
 # {"rail_hash"}. The run refuses to replay an unapproved rail (a content-hash
 # mismatch is recorded as harness.defense.blocked {kind:"rail_unapproved"}).
@@ -221,6 +238,9 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         CHECKPOINT_MARKED,
         RUN_ROLLED_BACK,
         EXECUTION_CLAIMED,
+        CAPABILITY_USED,
+        GRANT_ISSUED,
+        GRANT_REVOKED,
         RAIL_VERIFIED,
         RAIL_DISARMED,
         PIPELINE_STARTED,

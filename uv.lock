@@ -2214,7 +2214,7 @@ provides-extras = ["serve", "mcp", "test"]
 
 [[package]]
 name = "zu-core"
-version = "0.2.12"
+version = "0.2.14"
 source = { editable = "packages/zu-core" }
 dependencies = [
     { name = "pydantic" },

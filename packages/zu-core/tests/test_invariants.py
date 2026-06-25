@@ -68,6 +68,53 @@ def test_required_field_presence() -> None:
     assert predicate_holds(pred, missing) is False
 
 
+def test_spend_velocity_under_window_passes_over_window_fails() -> None:
+    # §8 velocity rail: summed spend on harness.capability.used within the last
+    # window_s must stay ≤ limit. The window is anchored at the latest event ts
+    # (deterministic on replay — never the wall clock).
+    from datetime import UTC, datetime, timedelta
+
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def used(amount: float, at: datetime) -> Event:
+        return Event(trace_id=_TRACE, task_id=_TASK, type=ev.CAPABILITY_USED, source="broker",
+                     ts=at, payload={"operation": "charge", "outcome": {"captured": amount}})
+
+    pred = Predicate(kind=PredicateKind.SPEND_VELOCITY, params={"window_s": 60, "limit": 1000})
+    # Two charges totalling 900 within a 60s window — under the cap, HOLDS.
+    within = [used(400, base), used(500, base + timedelta(seconds=30))]
+    assert predicate_holds(pred, within) is True
+    # A third charge pushes the in-window sum to 1300 — over the cap, BROKEN.
+    over = within + [used(400, base + timedelta(seconds=45))]
+    assert predicate_holds(pred, over) is False
+    # An old charge OUTSIDE the window does not count: anchored at the latest ts
+    # (base+1000s), the two recent 400+500 are within 60s; the ancient one is excluded.
+    windowed = [used(9999, base), used(400, base + timedelta(seconds=1000)),
+                used(500, base + timedelta(seconds=1010))]
+    assert predicate_holds(pred, windowed) is True
+
+
+def test_spend_velocity_compiles_to_a_violating_monitor() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def used(amount: float, at: datetime) -> Event:
+        return Event(trace_id=_TRACE, task_id=_TASK, type=ev.CAPABILITY_USED, source="broker",
+                     ts=at, payload={"outcome": {"captured": amount}})
+
+    inv = Invariant(
+        name="velocity_cap",
+        kind=InvariantKind.THROUGHOUT,
+        predicate=Predicate(kind=PredicateKind.SPEND_VELOCITY, params={"window_s": 60, "limit": 500}),
+    )
+    monitor = compile_invariant(inv)
+    over = [used(300, base), used(300, base + timedelta(seconds=10))]  # 600 in window > 500
+    ctx = RunContext(spec=None, events=over)
+    v = monitor.evaluate(ctx)
+    assert v is not None and v.state == MonitorState.VIOLATION
+
+
 def test_compile_invariant_yields_a_monitor() -> None:
     inv = Invariant(
         name="cap_tools",

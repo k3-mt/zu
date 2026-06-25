@@ -49,6 +49,11 @@ GROUPS = {
     # The pattern port (§5): a recognizer over the Action Surface + the rail
     # invariants it emits. Read-only plugins, discovered like any other kind.
     "patterns": "zu.patterns",
+    # The credential broker (§8): the scoped/revocable/audited capability to USE
+    # an instrument without the policy ever holding the secret. The broker holds
+    # the secret harness-side; an Instrument adapter (a real issuer/vault) plugs in
+    # behind it. Discovered like any other kind.
+    "credential_brokers": "zu.credential_brokers",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind
@@ -273,3 +278,4 @@ channel = kind_decorator("channels")
 arbiter = kind_decorator("replay_arbiters")
 monitor = kind_decorator("monitors")
 pattern = kind_decorator("patterns")
+credential_broker = kind_decorator("credential_brokers")

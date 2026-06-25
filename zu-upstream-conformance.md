@@ -133,6 +133,18 @@ A human approval authorises exactly ONE irreversible side effect, and that "once
 - **Conformance test:** Approve once, resume twice from the log; the side effect runs exactly once and the second resume is refused (`duplicate_execution`).
 - **Failure mode:** Per-instance dedup → a re-resumed/replayed run double-executes an irreversible action.
 
+### ZU-CD-7 — An instrument/credential secret never enters the policy context **(MUST)** (§8)
+The credential broker generalises inference-credential containment to ALL credentials/instruments (a card via an issuer, a vault/KMS, an inbox, an OAuth grant). The policy MUST hold only an opaque capability **handle**; the secret MUST be used **harness-side** (behind an `Instrument` the broker calls), and MUST appear in no event, observation, or use-outcome the policy can read.
+- **Why:** Once an agent has a card + credentials it is a financial target — every page it reads and email it gets is a prompt injection trying to make it spend the operator's money. A compromised policy must be *mechanically* unable to exfiltrate the secret: not "asked nicely", but with no signature on the policy-facing side (`UseRequest` in / `UseOutcome` out) that could carry it. The broker holds the secret behind the `Instrument` and forwards only the outcome (a charge id, a derived token), never the PAN/token.
+- **Conformance test:** A ScriptedProvider policy issues a broker `UseRequest` with a capability_id; the broker charges a `FakeCardInstrument` whose `_pan` is a known sentinel; assert the sentinel appears in NO event payload, NO observation handed to the policy, and NO `UseOutcome` — only a charge id.
+- **Failure mode:** A secret on the policy-facing surface → an injected policy exfiltrates it → containment is fiction.
+
+### ZU-CD-8 — A capability use is refused if it exceeds scope/limits/TTL/revocation **(MUST)** (§8)
+A capability use MUST be refused if it is outside the grant's scope (operation or payee allowlist), over the per-use or cumulative limit, past TTL, or revoked — the policy cannot exceed granted authority. The cumulative cap MUST be enforced atomically (`incr_if_below`) so concurrent uses cannot both pass an under-cap check.
+- **Why:** The instrument exists or a third party issues it; Zu builds the *containment*. A scoped, time-boxed, revocable capability is the one primitive: the policy gets "a door already locked behind it." A compromised policy paying an off-allowlist payee, overspending, or replaying a revoked handle must be refused and logged, never executed.
+- **Conformance test:** An adversarial ScriptedProvider tries an off-scope operation, an off-allowlist payee, an over-per-use amount, an over-cumulative sequence (via `incr_if_below`), an expired grant, and a revoked grant; each is refused with the right `refused` code + a `harness.defense.blocked` event; only the in-scope/in-limit use produces a charge.
+- **Failure mode:** A use that exceeds authority executes → the slow-drip drain / off-allowlist payment the containment layer exists to stop.
+
 ---
 
 ## 5. Cross-cutting — the audit log (`ZU-AUDIT`)
@@ -162,6 +174,12 @@ When a capture path folds a *human* session onto the log (Shadow, §2.8 — a re
 - **Why:** The log is append-only and tamper-evident (ZU-AUDIT-1) — which means a secret that reaches it cannot be deleted later. A capture that recorded the human's password verbatim would make the immutable system of record itself the leak. Redaction must therefore be a *pre-append* property, not a post-hoc filter.
 - **Conformance test:** Drive the recorder with a synthetic stream carrying secrets through every channel (a credential field, a token in a URL, a header, a "why" note); read the sink and show no secret is present.
 - **Failure mode:** Post-hoc redaction → the secret was on the append-only chain first → it is unforgeably, permanently recorded.
+
+### ZU-AUDIT-5 — Every instrument use is recorded on the hash-chained log, bound to the authorizing consent **(MUST)** (§8)
+Every credential-broker use of an instrument MUST be recorded on the per-trace hash chain bound to the **consent** that authorized it (the grant id + consent id under `payload["ctx"]`, the ZU-AUDIT-3 convention) — so "acted within granted authority" is reconstructable purely from the log.
+- **Why:** The log is the consumer's system of record and the artifact that proves the consent → grant → capability → invocation chain. A charge that did not name the consent that justified it cannot be attributed; the audit invariant (every action either matched a pre-consented template or was human-approved on its exact bytes) becomes unprovable.
+- **Conformance test:** A broker use emits `harness.capability.used` naming `grant_id` + `consent_id` under `payload["ctx"]`; the grant issuance (`harness.grant.issued`) names the same consent; reconstruct "this charge was authorized by this consent" purely from the log; `verify_chain` holds.
+- **Failure mode:** A use the log cannot bind to a consent → attribution fractures; the audit invariant is fiction.
 
 ---
 
@@ -413,10 +431,13 @@ implementations are plugins.
 | ZU-CD-4 | Validators hold durable per-grant state | MUST | **Satisfied** | `GrantStore` + `InMemoryGrantStore` + `grant.updated`; `test_invocation_gate.py::test_velocity_limit_via_grant_store` |
 | ZU-CD-5 | Pause/resume preserves gate, taint, state | MUST | **Satisfied** | `run_task(resume_from=...)` rebuilds from log; `test_pause_resume.py` |
 | ZU-CD-6 | Approval executes its side effect at most once (consume-once) | MUST | **Satisfied** | `ExecutionLedger` + `InMemoryExecutionLedger` + `execution.claimed`; loop claims before re-executing an approved invocation; `test_pause_resume.py::test_resume_twice_executes_the_approved_side_effect_only_once` |
+| ZU-CD-7 ⚑ | Instrument/credential secret never enters the policy context (§8) | MUST | **Satisfied** | `CredentialBroker`/`Instrument` ports + `InMemoryCredentialBroker` over a FAKE `FakeCardInstrument`; policy holds an opaque `capability_id`, broker uses the secret harness-side; `test_credential_broker.py::test_secret_never_reaches_the_policy_or_the_log` (sentinel PAN on no event/observation/outcome) |
+| ZU-CD-8 | Capability use refused if it exceeds scope/limits/TTL/revocation (§8) | MUST | **Satisfied** | broker enforces scope/payee-allowlist/per-use/cumulative(`incr_if_below`)/TTL/revoke; refusals logged as `defense.blocked`; adversarial ScriptedProvider contained; `test_credential_broker.py::test_over_authority_uses_are_refused_and_logged`. High-consequence→human via `BrokerGate`→`_pause_for_human` (`::test_high_consequence_use_pauses_for_human_then_executes_once`); velocity→Monitor via `SPEND_VELOCITY` (`test_invariants.py::test_spend_velocity_compiles_to_a_violating_monitor`) |
 | ZU-AUDIT-1 | Log append-only & tamper-evident | MUST | **Satisfied** | `chain.py` per-trace hash chain + `verify_chain`; `test_chain.py` |
 | ZU-AUDIT-2 | Log records decision, rule, escalation binding | MUST | **Satisfied** | `gate.decided`/`approval.*` events, parented to `tool.invoked`; `test_invocation_gate.py` |
 | ZU-AUDIT-3 | Log accepts consumer-defined fields | MUST | **Satisfied** | `payload["ctx"]` + `register_event_filter` + SQLite index; `test_chain.py`, `test_sqlite_sink.py` |
 | ZU-AUDIT-4 | Secrets redacted at capture, before any event reaches the log | MUST | **Satisfied** | `zu_shadow.redaction` default-ON stage in `Recorder._emit` before `EventBus.publish`; `zu-shadow/tests/test_conformance_audit4.py::test_secrets_are_redacted_before_reaching_the_log` |
+| ZU-AUDIT-5 | Every instrument use is on the hash-chained log, bound to the authorizing consent (§8) | MUST | **Satisfied** | broker emits `harness.capability.used` with `grant_id`+`consent_id` under `payload["ctx"]` (ZU-AUDIT-3 convention) + `harness.grant.issued`/`harness.grant.revoked`; `verify_chain` holds; `test_credential_broker.py::test_use_is_audit_bound_to_consent_and_chains` |
 | ZU-EXT-1 | New port types without forking the core | MUST | **Satisfied** | `Registry.register_kind` + `zu.kinds`; `test_registry.py::test_consumer_registers_new_kind_without_core_edit` |
 | ZU-EXT-2 | Trusted/untrusted boundary explicit & documented | MUST | **Satisfied** | [`docs/TCB.md`](docs/TCB.md) |
 | ZU-EXT-3 | Port framework supports narrow typed contracts | SHOULD | **Satisfied** | typed Protocols + narrow broker verbs (mint/introspect); `test_oop_channel.py` |

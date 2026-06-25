@@ -30,12 +30,21 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-CD-4": ("packages/zu-core/tests/test_invocation_gate.py", "test_velocity_limit_via_grant_store"),
     "ZU-CD-5": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_without_resolution_stays_paused"),
     "ZU-CD-6": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_twice_executes_the_approved_side_effect_only_once"),
+    # §8 — the credential broker: scoped/audited USE of an instrument WITHOUT the
+    # policy ever holding the secret. ZU-CD-7/8 are the next integers in the FIXED
+    # ZU-CD family; the proofs use a FAKE instrument + an adversarial ScriptedProvider.
+    "ZU-CD-7": ("packages/zu-core/tests/test_credential_broker.py", "test_secret_never_reaches_the_policy_or_the_log"),
+    "ZU-CD-8": ("packages/zu-core/tests/test_credential_broker.py", "test_over_authority_uses_are_refused_and_logged"),
     "ZU-AUDIT-1": ("packages/zu-core/tests/test_chain.py", "test_content_tamper_detected"),
     "ZU-AUDIT-2": ("packages/zu-core/tests/test_invocation_gate.py", "test_gate_deny_blocks_the_call_no_side_effect"),
     "ZU-AUDIT-3": ("packages/zu-core/tests/test_chain.py", "test_consumer_field_is_queryable"),
     # Capture-time redaction: secrets are stripped BEFORE any event reaches the
     # append-only log. The proof lives in zu-shadow/tests (repo-relative path resolves).
     "ZU-AUDIT-4": ("packages/zu-shadow/tests/test_conformance_audit4.py", "test_secrets_are_redacted_before_reaching_the_log"),
+    # §8 — every instrument use is on the hash-chained log, bound to the consent
+    # that authorized it (acted-within-authority provable from the log). The next
+    # integer in the FIXED ZU-AUDIT family.
+    "ZU-AUDIT-5": ("packages/zu-core/tests/test_credential_broker.py", "test_use_is_audit_bound_to_consent_and_chains"),
     "ZU-EXT-1": ("packages/zu-core/tests/test_registry.py", "test_consumer_registers_new_kind_without_core_edit"),
     "ZU-EXT-2": ("docs/TCB.md", None),
     "ZU-EXT-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
