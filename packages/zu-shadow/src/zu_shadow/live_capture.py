@@ -281,12 +281,17 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
                 while True:
                     live = [p for p in ctx.pages if not p.is_closed()]
                     if not live:
+                        break  # you closed the last window -> stop and write what we have
+                    try:
+                        live[0].wait_for_timeout(300)  # pump CDP events; bindings/handlers fire
+                    except Exception:  # noqa: BLE001 - the page/browser closed mid-wait IS the stop signal
                         break
-                    live[0].wait_for_timeout(300)  # pump CDP events; bindings/handlers fire
                     if deadline and time.monotonic() >= deadline:
                         break
             except KeyboardInterrupt:
                 pass
+    except Exception:  # noqa: BLE001 - a browser closed mid-session is a stop, never a crash
+        pass
     finally:
         proc.terminate()
         try:

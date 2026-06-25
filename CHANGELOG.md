@@ -7,6 +7,13 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — live capture must not crash when you close the window (zu-shadow 0.1.5 → 0.1.6)
+Closing the Chrome window (the recommended stop) killed the page mid `wait_for_timeout`, and
+Playwright raised a "target closed" error the loop only guarded against `KeyboardInterrupt` —
+so capture crashed and the recording was lost. The pump now treats a page/browser close (and
+any error on session exit) as the STOP signal: it breaks the loop and writes the recording it
+already has. Validated by killing Chrome mid-session — the recording is written, no crash.
+
 ### Added — live capture: prompt on text fields + track scrolls (zu-core 0.2.14 → 0.2.15, zu-shadow 0.1.4 → 0.1.5)
 - The "why?" prompt now also fires when you click a TEXT FIELD (search/textbox/combobox),
   not just buttons/links. A text field doesn't navigate, so its click isn't held — the box
