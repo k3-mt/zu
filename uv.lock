@@ -2486,7 +2486,7 @@ provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "mcp
 
 [[package]]
 name = "zu-shadow"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "packages/zu-shadow" }
 dependencies = [
     { name = "zu-cli" },

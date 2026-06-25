@@ -7,6 +7,15 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Improved — live capture resolves real element names + cuts network noise (zu-shadow 0.1.7 → 0.1.8)
+A real Von Wolf run exposed two capture-quality problems. Fixed both:
+- Element/name resolution: a clicked icon/path now climbs to the REAL control, and the
+  accessible name uses innerText (skipping <style>/<script> CSS soup), then value/placeholder/
+  title/alt, an inner icon label, and form context (an unlabeled submit in a search form is
+  "Search"). The search-button step that captured ".cls-1{fill:none;...}" now captures "Search".
+- Network noise: each egress host is recorded once, not on every request — a 458-event
+  recording with 414 tracker pings collapses to a handful, with the same egress signal.
+
 ### Fixed — redact payment-card data at capture (zu-shadow 0.1.6 → 0.1.7)
 A real run revealed a card number captured in PLAINTEXT: the CVV/security-code field was
 blanked (it matched a credential hint) but the "Card number" / "Expiration date" fields were

@@ -46,29 +46,52 @@ CAPTURE_JS = r"""
   const FORK = new Set(['button','link','checkbox','radio','switch','tab','menuitem',
     'menuitemcheckbox','menuitemradio','option','row','gridcell']);
   const TEXT = new Set(['textbox','searchbox','combobox']);  // also prompt on text fields
+  function control(el){
+    // climb from a clicked icon/path/span to the REAL interactive control
+    const c = el.closest && el.closest(
+      'button, a[href], [role=button], [role=link], [role=tab], [role=menuitem], [role=option], '+
+      '[role=checkbox], [role=radio], [role=switch], input, select, textarea, summary, label, '+
+      '[onclick], [tabindex]');
+    return c || el;
+  }
+  function clean(s){ return (s||'').replace(/\s+/g,' ').trim().slice(0,80); }
   function role(el){
-    const r = el.getAttribute && el.getAttribute('role'); if(r) return r;
+    const r = el.getAttribute && el.getAttribute('role'); if(r && r.trim()) return r.trim();
     const t = (el.tagName||'').toLowerCase();
-    if(t==='button') return 'button';
+    if(t==='button' || t==='summary') return 'button';
     if(t==='a' && el.hasAttribute('href')) return 'link';
-    if(t==='input'){const ty=(el.type||'text');
-      if(ty==='submit'||ty==='button')return'button';
-      if(ty==='checkbox')return'checkbox'; if(ty==='radio')return'radio'; return'textbox';}
+    if(t==='input'){const ty=(el.type||'text').toLowerCase();
+      if(ty==='submit'||ty==='button'||ty==='image')return'button';
+      if(ty==='checkbox')return'checkbox'; if(ty==='radio')return'radio';
+      if(ty==='search')return'searchbox'; return'textbox';}
     if(t==='textarea') return 'textbox';
     if(t==='select') return 'combobox';
+    if(el.hasAttribute && (el.hasAttribute('onclick')||el.hasAttribute('tabindex'))) return 'button';
     return t || 'generic';
   }
   function name(el){
     try{
-      const al=el.getAttribute('aria-label'); if(al) return al.trim();
+      const al=el.getAttribute('aria-label'); if(al && al.trim()) return clean(al);
       const lb=el.getAttribute('aria-labelledby');
-      if(lb){const n=document.getElementById(lb); if(n) return (n.textContent||'').trim();}
+      if(lb){const n=document.getElementById(lb); const v=n&&clean(n.innerText); if(v) return v;}
       if(el.id){const lab=document.querySelector('label[for="'+CSS.escape(el.id)+'"]');
-        if(lab) return (lab.textContent||'').trim();}
-      const cl=el.closest && el.closest('label'); if(cl) return (cl.textContent||'').trim();
-      const txt=(el.textContent||'').trim(); if(txt) return txt.slice(0,80);
-      const ph=el.getAttribute('placeholder'); if(ph) return ph.trim();
-      const ttl=el.getAttribute('title'); if(ttl) return ttl.trim();
+        const v=lab&&clean(lab.innerText); if(v) return v;}
+      const cl=el.closest && el.closest('label'); { const v=cl&&clean(cl.innerText); if(v) return v; }
+      const it=clean(el.innerText); if(it) return it;   // innerText skips <style>/<script> CSS soup
+      for(const a of ['value','placeholder','title','alt','name']){
+        const v=el.getAttribute && el.getAttribute(a); if(v && v.trim()) return clean(v); }
+      const ic=el.querySelector && el.querySelector('[aria-label],img[alt],[title]');
+      if(ic){ const v=ic.getAttribute('aria-label')||ic.getAttribute('alt')||ic.getAttribute('title');
+        if(v && v.trim()) return clean(v); }
+      // an unlabeled submit/icon button inside a search form is "Search", else "Submit"
+      const ty=(el.type||'').toLowerCase();
+      const btn = ty==='submit'||ty==='image'||el.tagName==='BUTTON'||el.getAttribute('role')==='button';
+      if(btn){
+        const f=el.closest && el.closest('form');
+        if(f && (f.getAttribute('role')==='search' || /search/i.test(f.getAttribute('action')||'') ||
+                 f.querySelector('[type=search],[name*="search" i],[placeholder*="search" i]'))) return 'Search';
+        if(ty==='submit'||ty==='image') return 'Submit';
+      }
     }catch(e){}
     return '';
   }
@@ -105,7 +128,7 @@ CAPTURE_JS = r"""
   document.addEventListener('click', e=>{
     if(replaying) return;                             // our own re-dispatch passes straight through
     if(e.target.closest && e.target.closest('#__zuShadowWhy')) return;  // ignore our own UI
-    const el=(e.target.closest && e.target.closest('button,a,[role],input,select,textarea'))||e.target;
+    const el = control(e.target);                     // climb to the real control that was clicked
     const r = role(el);
     if(FORK.has(r)){
       // HOLD the fork click so its navigation can't destroy the prompt before you answer.
@@ -241,6 +264,7 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
     sync_playwright = _require_playwright()
     proc = _launch_chrome(url, port=port, profile=profile, headed=headed, chrome=chrome)
     actions: list[dict] = []
+    seen_hosts: set[str] = set()  # record each egress host once, not every tracker ping
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}")
@@ -261,9 +285,13 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
                         actions.append({"kind": "navigate", "url": fr.url})
 
                 def on_resp(r: Any) -> None:
-                    if _interesting_response(r):
-                        actions.append({"kind": "network", "url": r.url, "status": r.status,
-                                        "host": urlsplit(r.url).hostname or ""})
+                    if not _interesting_response(r):
+                        return
+                    host = urlsplit(r.url).hostname or ""
+                    if host in seen_hosts:   # one egress event per host — the allowlist needs the
+                        return               # host, not 91 tracker pings; keeps the recording lean
+                    seen_hosts.add(host)
+                    actions.append({"kind": "network", "url": r.url, "status": r.status, "host": host})
 
                 page.on("framenavigated", on_nav)
                 page.on("response", on_resp)
