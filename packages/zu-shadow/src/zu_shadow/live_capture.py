@@ -74,9 +74,9 @@ CAPTURE_JS = r"""
   function rep(kind, el, extra){
     try{ window.__zuShadow(Object.assign({kind, role:role(el), name:name(el)}, extra||{})); }catch(e){}
   }
-  let box = null;
+  let box = null, replaying = false;
   function closeWhy(){ if(box){ box.remove(); box = null; } }
-  function askWhy(x, y){
+  function askWhy(x, y, done){
     closeWhy();
     box = document.createElement('div'); box.id = '__zuShadowWhy';
     box.setAttribute('style', 'position:fixed;z-index:2147483647;left:'+
@@ -88,18 +88,34 @@ CAPTURE_JS = r"""
     inp.setAttribute('style', 'border:0;outline:0;background:#222;color:#fff;'+
       'padding:5px 7px;border-radius:6px;width:230px;font:13px system-ui');
     box.appendChild(inp); document.body.appendChild(box); inp.focus();
+    let resolved = false;
+    async function finish(t){                         // record the why (if any), THEN proceed
+      if(resolved) return; resolved = true;
+      if(t){ try{ await window.__zuShadow({kind:'intent', text:t}); }catch(e){} }
+      closeWhy();
+      if(done){ try{ done(); }catch(e){} }            // release the held click -> navigate now
+    }
     inp.addEventListener('keydown', ev=>{
       ev.stopPropagation();
-      if(ev.key==='Enter'){ const t=inp.value.trim();
-        if(t){ try{ window.__zuShadow({kind:'intent', text:t}); }catch(e){} } closeWhy(); }
-      else if(ev.key==='Escape'){ closeWhy(); }
+      if(ev.key==='Enter'){ finish(inp.value.trim()); }
+      else if(ev.key==='Escape'){ finish(''); }
     });
   }
   document.addEventListener('click', e=>{
+    if(replaying) return;                             // our own re-dispatch passes straight through
     if(e.target.closest && e.target.closest('#__zuShadowWhy')) return;  // ignore our own UI
     const el=(e.target.closest && e.target.closest('button,a,[role],input,select,textarea'))||e.target;
-    rep('click', el);
-    if(FORK.has(role(el))) askWhy(e.clientX, e.clientY);  // prompt only at decision forks
+    if(FORK.has(role(el))){
+      // HOLD the fork click so its navigation can't destroy the prompt before you answer.
+      e.preventDefault(); e.stopPropagation();
+      rep('click', el);
+      askWhy(e.clientX, e.clientY, ()=>{              // once answered/skipped, let the click proceed
+        if(el.tagName==='A' && el.href){ window.location.href = el.href; }  // real navigation
+        else { replaying = true; try{ el.click(); } finally { replaying = false; } }
+      });
+    } else {
+      rep('click', el);                               // non-forks: record, never hold
+    }
   }, true);
   document.addEventListener('change', e=>{
     if(e.target.closest && e.target.closest('#__zuShadowWhy')) return;
