@@ -1,6 +1,6 @@
 [project]
 name = "zu-redteam"
-version = "0.2.6"
+version = "0.3.0"
 description = "Zu plugin-test gate: contract/interop gates + the adversarial red-team agent and out-of-band verdict observers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Typing :: Typed",
 ]
-dependencies = ["zu-core==0.2.1", "zu-providers==0.2.1"]
+dependencies = ["zu-core==0.3.0", "zu-providers==0.3.0"]
 
 # The verdict observers are deliberately NOT registered as runtime zu.detectors:
 # they are the out-of-band judge of the gate, not in-loop detectors, and must not

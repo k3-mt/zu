@@ -1,7 +1,8 @@
 # Releasing Zu to PyPI
 
-Zu publishes **9 distributions as a set** — `zu-core`, `zu-providers`, `zu-tools`,
-`zu-checks`, `zu-backends`, `zu-redteam`, `zu-cli`, `zu-huggingface`, `zu-runtime` — via
+Zu publishes **11 distributions as a set** — `zu-core`, `zu-providers`, `zu-tools`,
+`zu-checks`, `zu-backends`, `zu-redteam`, `zu-cli`, `zu-huggingface`, `zu-runtime`,
+`zu-patterns`, `zu-shadow` — via
 PyPI **Trusted Publishing** (GitHub OIDC; no token stored in the repo). The release runs
 on a `v*` tag: [`.github/workflows/publish.yml`](.github/workflows/publish.yml) does
 `uv build --all-packages` → drop `zu_testing-*` from `dist/` → `pypa/gh-action-pypi-publish`
@@ -14,13 +15,15 @@ packages are skipped and only the new one uploads.
 
 ## One-time setup (maintainer)
 
-1. **Add a *pending* Trusted Publisher on PyPI for each of the 9 names** at
+1. **Add a *pending* Trusted Publisher on PyPI for each of the 11 names** at
    <https://pypi.org/manage/account/publishing/>:
    - **Owner** `k3-mt` · **Repository** `zu` · **Workflow** `publish.yml` · **Environment** `pypi`
    - A *pending* publisher creates the project on first publish — so no project and no token
      need to exist beforehand.
-   - **`zu-huggingface` still needs this step** (the other 8 are already registered/published);
-     register it before the next tag or its upload is rejected (403, no trusted publisher).
+   - **`zu-patterns` and `zu-shadow` still need this step** for the token-free CI path: the
+     0.3.0 release published the whole set (incl. these two) via an API token
+     (`zu publish`-style, see below), which creates the projects; but a future *tag-triggered*
+     `publish.yml` run will 403 on these two until their Trusted Publishers are registered.
 2. **Create the `pypi` GitHub environment** (Settings → Environments → `pypi`). Optionally add
    required reviewers so a release needs sign-off.
 
