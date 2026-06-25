@@ -7,6 +7,15 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Improved — synthesizer cleans the induced path; it slots into the §5 pathfinder (zu-shadow 0.1.8 → 0.1.9)
+The induced FSM now reads as clean GENERALISED steps: a focus-click immediately followed by a
+type on the same target collapses to the type, consecutive duplicate steps (a widget firing
+twice) collapse to one, and baked-in prices / option-dumps are stripped from target names
+(Von Wolf: 33 → 22 states, "Add to cart £46.00" → "Add to cart"). Proven that a recording
+slots into the §5 pathfinder: induce_fsm → fsm_from_shadow → a transition model the guided
+search plan() reaches the goal over (all states co-reachable, zero traps), and a second
+recording merges/grows it (apprenticeship). The recording IS the empirical forward model.
+
 ### Improved — live capture resolves real element names + cuts network noise (zu-shadow 0.1.7 → 0.1.8)
 A real Von Wolf run exposed two capture-quality problems. Fixed both:
 - Element/name resolution: a clicked icon/path now climbs to the REAL control, and the

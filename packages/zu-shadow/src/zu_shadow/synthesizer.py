@@ -27,6 +27,7 @@ The synthesizer PROPOSES. Promotion is GATED downstream by reproduced outcome
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -114,13 +115,14 @@ def induce_fsm(events: list[object]) -> Fsm:
         if getattr(e, "type", "") in (ev.SHADOW_USER_CLICK, ev.SHADOW_USER_TYPE,
                                       ev.SHADOW_USER_NAVIGATE)
     ]
+    labels = _clean_step_labels([_action_label(e) for e in actions])
     states = [_INITIAL_STATE]
     edges: list[FsmEdge] = []
     prev = _INITIAL_STATE
-    for i, e in enumerate(actions):
+    for i, label in enumerate(labels):
         s = f"s{i + 1}"
         states.append(s)
-        edges.append(FsmEdge(src=prev, dst=s, label=_action_label(e)))
+        edges.append(FsmEdge(src=prev, dst=s, label=label))
         prev = s
     states.append(_GOAL_STATE)
     edges.append(FsmEdge(src=prev, dst=_GOAL_STATE, label="done"))
@@ -132,6 +134,21 @@ def induce_fsm(events: list[object]) -> Fsm:
     )
 
 
+# Baked-in prices make a target name instance-brittle ("Add to cart £46.00"); strip them so
+# the step generalises ("Add to cart"). Generic shape, never a site constant.
+_PRICE = re.compile(r"[£$€]\s*\d+(?:[.,]\d{2})?(?:\s*(?:GBP|USD|EUR))?", re.I)
+
+
+def _clean_name(name: str) -> str:
+    """Normalise a captured accessible name for the induced step: drop baked-in prices,
+    collapse a multi-option dump to its first option, squeeze whitespace, cap length —
+    so the FSM reads as clean, generalised steps rather than instance soup."""
+    s = _PRICE.sub("", name or "")
+    s = s.replace("\n", " ").split("  ")[0]  # a select's option-dump → its first option
+    s = re.sub(r"\s+", " ", s).strip(" -–·|\t")
+    return s[:50]
+
+
 def _action_label(e: object) -> str:
     t = getattr(e, "type", "")
     p = _payload(e)
@@ -139,8 +156,26 @@ def _action_label(e: object) -> str:
         return "navigate"
     verb = "click" if t == ev.SHADOW_USER_CLICK else "type"
     target = p.get("target", {})
-    name = target.get("name") or target.get("label") or target.get("role") or ""
+    name = _clean_name(target.get("name") or target.get("label") or target.get("role") or "")
     return f"{verb}:{name}" if name else verb
+
+
+def _clean_step_labels(labels: list[str]) -> list[str]:
+    """Clean a raw step sequence into a generalised path: (R1) collapse a run of identical
+    consecutive steps (a widget that fires the same action twice), and (R2) drop a
+    focus-click immediately followed by a type on the SAME target (focus-then-type → just
+    the type). The "why" annotations live on the events and are surfaced separately, so
+    pruning a redundant FSM state never loses a captured rationale."""
+    out: list[str] = []
+    for i, lab in enumerate(labels):
+        if lab.startswith("click:") and i + 1 < len(labels):
+            nxt = labels[i + 1]
+            if nxt.startswith("type:") and nxt[len("type:"):] == lab[len("click:"):]:
+                continue  # R2: this click just focuses the field the next step types into
+        if out and out[-1] == lab:
+            continue  # R1: a consecutive duplicate of the step we already kept
+        out.append(lab)
+    return out
 
 
 def induce_invariants(events: list[object], egress: list[str], goal: str) -> list[Invariant]:

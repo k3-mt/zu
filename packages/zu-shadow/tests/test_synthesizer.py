@@ -83,3 +83,35 @@ async def test_spec_unlocks_browser_tier_when_actions_present() -> None:
     result = await _synthesize()
     assert 2 in result.spec["tiers"]  # clicks/types → the browser tier is offered
     assert result.spec["task"]["max_tier"] == 2
+
+
+def test_cleanup_collapses_widget_noise_and_strips_prices() -> None:
+    # The induced FSM reads as clean GENERALISED steps, not instance soup.
+    from zu_shadow.synthesizer import _clean_name, _clean_step_labels
+    assert _clean_name("Add to cart £46.00") == "Add to cart"
+    assert _clean_name("Wire Basket Muzzle with Quick Release Clip £46.00 GBP") == \
+        "Wire Basket Muzzle with Quick Release Clip"
+    assert _clean_name("Small - £46.00 GBP  Medium - £46.00 GBP") == "Small"  # option-dump → first
+    # R2 drops a focus-click before a type on the same target; R1 collapses a doubled step.
+    labels = ["click:Search", "type:Search", "click:Large", "click:Large", "type:Large",
+              "click:Card number", "type:Card number"]
+    assert _clean_step_labels(labels) == [
+        "type:Search", "click:Large", "type:Large", "type:Card number"]
+
+
+async def test_a_recording_feeds_the_section5_pathfinder() -> None:
+    # The synthesizer's induced FSM IS a §5 pathfinder transition model: the guided search
+    # plans a path over it, and a SECOND recording merges/grows it (the apprenticeship
+    # premise). Leaf import of zu_patterns — no production dependency from zu-shadow.
+    import pytest
+    search = pytest.importorskip("zu_patterns.search")
+    from zu_core.reachability import co_reachable, trap_states
+
+    result = await _synthesize()
+    model = search.fsm_from_shadow(result.fsm)              # Shadow recording → transition model
+    assert len(trap_states(model)) == 0
+    assert len(co_reachable(model)) == len(model.states)    # every state can still reach the goal
+    plan = search.plan(model)                               # the §5 guided search plans over it
+    assert plan.reached_goal and len(plan.steps) >= 1
+    grown = search.fsm_from_shadow(result.fsm, base=model)  # a 2nd recording merges in (grows it)
+    assert len(grown.states) >= len(model.states)
