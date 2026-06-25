@@ -7,6 +7,15 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — redact payment-card data at capture (zu-shadow 0.1.6 → 0.1.7)
+A real run revealed a card number captured in PLAINTEXT: the CVV/security-code field was
+blanked (it matched a credential hint) but the "Card number" / "Expiration date" fields were
+not, so the PAN sat in the recording. Card/expiry/CVC/IBAN/sort-code/account fields are now
+credential fields (blanked wholesale), and a Luhn-valid PAN in any free text is swept too
+(Luhn-gated so a random long id — e.g. a Shopify variant id — is not a false positive). The
+distinction held: card data is a SECRET (redacted; a real payment is brokered, §8) while
+name/address/phone are TASK PARAMETERS the agent fills (kept, parameterized via --scale).
+
 ### Fixed — live capture must not crash when you close the window (zu-shadow 0.1.5 → 0.1.6)
 Closing the Chrome window (the recommended stop) killed the page mid `wait_for_timeout`, and
 Playwright raised a "target closed" error the loop only guarded against `KeyboardInterrupt` —

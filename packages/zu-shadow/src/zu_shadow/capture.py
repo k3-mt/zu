@@ -25,7 +25,12 @@ from zu_core.surface import SurfaceAffordance
 # blanks wholesale — a password is never recorded verbatim, even pre-redaction-sweep.
 _CREDENTIAL_TARGET_HINTS: tuple[str, ...] = ("password", "passwd", "secret", "token",
                                              "api key", "api_key", "apikey", "otp",
-                                             "cvv", "pin", "security code")
+                                             "cvv", "cvc", "pin", "security code",
+                                             # payment-card secrets — the agent must NEVER hold
+                                             # these; a real payment goes through the §8 broker.
+                                             "card number", "cardnumber", "card no",
+                                             "credit card", "debit card", "expiration", "expiry",
+                                             "iban", "sort code", "account number")
 
 
 class SemanticTarget(BaseModel):

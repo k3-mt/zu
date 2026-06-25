@@ -85,12 +85,41 @@ class RedactionPolicy(BaseModel):
         return tuple(re.compile(p) for p in self.pii_patterns)
 
 
+# A payment-card-number SHAPE: 13–19 digits, optionally grouped by spaces/dashes. Luhn-gated
+# at substitution time so a real PAN is redacted but a random long id (an order/variant id)
+# is left alone.
+_PAN_CANDIDATE: re.Pattern[str] = re.compile(r"\b(?:\d[ \-]?){13,19}\b")
+
+
+def _luhn_ok(digits: str) -> bool:
+    total, parity = 0, len(digits) % 2
+    for i, ch in enumerate(digits):
+        d = ord(ch) - 48
+        if i % 2 == parity:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _redact_pans(text: str) -> str:
+    """Redact Luhn-valid payment card numbers anywhere in a string (a card pasted into a
+    'why' note, a url, a free-text field). The card FIELD itself is also blanked wholesale
+    by its credential-target name; this is the belt-and-suspenders pass."""
+    def repl(m: re.Match[str]) -> str:
+        digits = "".join(c for c in m.group(0) if c.isdigit())
+        return REDACTED if 13 <= len(digits) <= 19 and _luhn_ok(digits) else m.group(0)
+    return _PAN_CANDIDATE.sub(repl, text)
+
+
 def _redact_string(text: str, policy: RedactionPolicy, pii: Iterable[re.Pattern[str]]) -> str:
-    """Sweep one string for token shapes + consumer PII (pure)."""
+    """Sweep one string for token shapes + payment-card numbers + consumer PII (pure)."""
     out = text
     if policy.redact_token_shapes:
         for pat in _TOKEN_PATTERNS:
             out = pat.sub(_token_replacement, out)
+        out = _redact_pans(out)  # payment card numbers (Luhn-gated)
     for pat in pii:
         out = pat.sub(REDACTED, out)
     return out

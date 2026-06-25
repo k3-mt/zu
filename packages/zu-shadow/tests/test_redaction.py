@@ -85,3 +85,22 @@ def test_consumer_pii_pattern_is_applied() -> None:
     out = redact_text("customer CUST-123456 called", policy)
     assert "CUST-123456" not in out
     assert REDACTED in out
+
+
+def test_payment_card_fields_are_credential_fields() -> None:
+    # A payment-card field is a credential field, so the recorder blanks its value
+    # wholesale (the agent must never hold the card — a real payment is brokered, §8).
+    from zu_shadow.capture import SemanticTarget, _is_credential_target
+    for nm in ("Card number", "Expiration date (MM / YY)", "Security code", "CVC", "Sort code"):
+        assert _is_credential_target(SemanticTarget(role="textbox", name=nm, label=nm)), nm
+    # ...but the address/phone fields are TASK PARAMETERS the agent fills, not secrets.
+    assert not _is_credential_target(SemanticTarget(role="textbox", name="Phone", label="Phone"))
+    assert not _is_credential_target(SemanticTarget(role="combobox", name="Address", label="Address"))
+
+
+def test_luhn_valid_pan_is_swept_but_a_long_id_is_not() -> None:
+    # A real (Luhn-valid) card number pasted into free text is redacted...
+    assert "4242 4242 4242 4242" not in redact_text("paid with 4242 4242 4242 4242 today")
+    assert "4242424242424242" not in redact_text("card 4242424242424242")
+    # ...but a random long id (a Shopify variant id) is NOT a false positive.
+    assert "49817120276817" in redact_text("variant 49817120276817 added")
