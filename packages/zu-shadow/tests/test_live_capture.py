@@ -40,8 +40,15 @@ def test_navigate_and_network_payloads() -> None:
     assert net is not None and net.kind == "network" and net.host == "api.x.example"
 
 
+def test_scroll_payload_carries_direction_and_position() -> None:
+    ri = _payload_to_raw({"kind": "scroll", "dir": "down", "y": 1200})
+    assert ri is not None and ri.kind == "scroll" and ri.value == "down" and ri.status == 1200
+    up = _payload_to_raw({"kind": "scroll", "dir": "up", "y": 0})
+    assert up is not None and up.value == "up"
+
+
 def test_unknown_payload_is_skipped() -> None:
-    assert _payload_to_raw({"kind": "scroll"}) is None
+    assert _payload_to_raw({"kind": "wheel"}) is None
     assert _payload_to_raw({}) is None
 
 

@@ -7,6 +7,16 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — live capture: prompt on text fields + track scrolls (zu-core 0.2.14 → 0.2.15, zu-shadow 0.1.4 → 0.1.5)
+- The "why?" prompt now also fires when you click a TEXT FIELD (search/textbox/combobox),
+  not just buttons/links. A text field doesn't navigate, so its click isn't held — the box
+  appears, you answer, and focus is handed back so you can type. (Forks stay held.)
+- New `data.shadow.user.scroll` event: settled scrolls (debounced, direction up/down +
+  position) are captured as CONTEXT — recording that the human had to scroll to reach the
+  next affordance, without counting as an action step. Wired through capture/recorder and
+  the live binding; tested offline and validated headless (a search-bar click prompts; a
+  scroll down then up is recorded).
+
 ### Added — the "why?" intent prompt in live capture (§2.4) (zu-shadow 0.1.2 → 0.1.3)
 `zu shadow capture` now captures INTENT, not just actions: at a decision fork (a click on
 a button/link/toggle/row) a small floating "why?" input appears at the cursor — Enter

@@ -45,6 +45,7 @@ CAPTURE_JS = r"""
   if (window.__zuShadowWired) return; window.__zuShadowWired = true;
   const FORK = new Set(['button','link','checkbox','radio','switch','tab','menuitem',
     'menuitemcheckbox','menuitemradio','option','row','gridcell']);
+  const TEXT = new Set(['textbox','searchbox','combobox']);  // also prompt on text fields
   function role(el){
     const r = el.getAttribute && el.getAttribute('role'); if(r) return r;
     const t = (el.tagName||'').toLowerCase();
@@ -105,7 +106,8 @@ CAPTURE_JS = r"""
     if(replaying) return;                             // our own re-dispatch passes straight through
     if(e.target.closest && e.target.closest('#__zuShadowWhy')) return;  // ignore our own UI
     const el=(e.target.closest && e.target.closest('button,a,[role],input,select,textarea'))||e.target;
-    if(FORK.has(role(el))){
+    const r = role(el);
+    if(FORK.has(r)){
       // HOLD the fork click so its navigation can't destroy the prompt before you answer.
       e.preventDefault(); e.stopPropagation();
       rep('click', el);
@@ -113,9 +115,25 @@ CAPTURE_JS = r"""
         if(el.tagName==='A' && el.href){ window.location.href = el.href; }  // real navigation
         else { replaying = true; try{ el.click(); } finally { replaying = false; } }
       });
+    } else if(TEXT.has(r)){
+      // a text field doesn't navigate — don't HOLD it; prompt, then hand focus back to type.
+      rep('click', el);
+      askWhy(e.clientX, e.clientY, ()=>{ try{ el.focus(); }catch(_e){} });
     } else {
-      rep('click', el);                               // non-forks: record, never hold
+      rep('click', el);                               // anything else: record, never hold
     }
+  }, true);
+  // Settled-scroll capture: debounced, direction + position; context, not an action step.
+  let scrollTimer = null, lastY = (window.scrollY || 0);
+  window.addEventListener('scroll', ()=>{
+    if(scrollTimer) clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(()=>{
+      const y = (window.scrollY || 0), dy = y - lastY;
+      if(Math.abs(dy) >= 80){  // ignore tiny jitters
+        try{ window.__zuShadow({kind:'scroll', dir: dy>0?'down':'up', y: Math.round(y)}); }catch(e){}
+        lastY = y;
+      }
+    }, 400);
   }, true);
   document.addEventListener('change', e=>{
     if(e.target.closest && e.target.closest('#__zuShadowWhy')) return;
@@ -147,6 +165,9 @@ def _payload_to_raw(p: dict) -> RawInput | None:
     if kind == "network":
         return RawInput(kind="network", url=str(p.get("url", "") or ""),
                         status=int(p.get("status", 200)), host=str(p.get("host", "") or ""))
+    if kind == "scroll":
+        return RawInput(kind="scroll", value=str(p.get("dir") or "down"),
+                        status=int(p.get("y", 0) or 0))  # status carries the settled y
     return None
 
 

@@ -2322,7 +2322,7 @@ provides-extras = ["serve", "mcp", "test"]
 
 [[package]]
 name = "zu-core"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "packages/zu-core" }
 dependencies = [
     { name = "pydantic" },
@@ -2486,7 +2486,7 @@ provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "mcp
 
 [[package]]
 name = "zu-shadow"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "packages/zu-shadow" }
 dependencies = [
     { name = "zu-cli" },

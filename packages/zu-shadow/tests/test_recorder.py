@@ -47,6 +47,25 @@ async def test_records_semantic_shadow_events() -> None:
     await bus.aclose()
 
 
+async def test_scroll_is_recorded_as_context_not_an_action_step() -> None:
+    bus = EventBus()
+    rec = Recorder(bus, site="https://vets.example.com")
+    stream = [
+        RawInput(kind="navigate", url="https://vets.example.com/book"),
+        RawInput(kind="scroll", value="down", status=1400),   # had to scroll to find it
+        RawInput(kind="click",
+                 target=SemanticTarget(role="button", name="Book", label="Book")),
+    ]
+    session = await rec.record_stream(stream, outcome="done")
+    types = [e.type for e in session.shadow_events()]
+    assert ev.SHADOW_USER_SCROLL in types
+    scroll = next(e for e in session.events if e.type == ev.SHADOW_USER_SCROLL)
+    assert scroll.payload["direction"] == "down" and scroll.payload["y"] == 1400
+    end = next(e for e in session.events if e.type == ev.SHADOW_SESSION_END)
+    assert end.payload["steps"] == 2  # navigate + click; the scroll is context, not a step
+    await bus.aclose()
+
+
 async def test_all_shadow_events_are_namespaced_data() -> None:
     bus = EventBus()
     rec = Recorder(bus, site="s")

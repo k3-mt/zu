@@ -208,6 +208,9 @@ SHADOW_SESSION_END = "data.shadow.session.end"
 SHADOW_USER_CLICK = "data.shadow.user.click"
 SHADOW_USER_TYPE = "data.shadow.user.type"
 SHADOW_USER_NAVIGATE = "data.shadow.user.navigate"
+# A settled scroll. Payload: {"direction": "up"|"down", "y": int}. Context (not an action
+# step) — it records that the human had to scroll to reach the next affordance.
+SHADOW_USER_SCROLL = "data.shadow.user.scroll"
 SHADOW_PAGE_LOADED = "data.shadow.page.loaded"
 SHADOW_NETWORK_RESPONSE = "data.shadow.network.response"
 
@@ -263,6 +266,7 @@ DATA_TYPES: frozenset[str] = frozenset(
         SHADOW_USER_CLICK,
         SHADOW_USER_TYPE,
         SHADOW_USER_NAVIGATE,
+        SHADOW_USER_SCROLL,
         SHADOW_PAGE_LOADED,
         SHADOW_NETWORK_RESPONSE,
     }

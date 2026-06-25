@@ -144,6 +144,8 @@ class Recorder:
             return capture.capture_type(item.target, item.value or "", intent=item.intent)
         if item.kind == "navigate":
             return capture.capture_navigate(item.url, intent=item.intent)
+        if item.kind == "scroll":
+            return capture.capture_scroll(item.value or "down", item.status)
         if item.kind == "page":
             return capture.capture_page_loaded(item.url, item.title)
         if item.kind == "network":

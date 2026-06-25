@@ -105,3 +105,10 @@ def capture_network_response(url: str, status: int, host: str) -> tuple[str, dic
     no headers beyond the host). The synthesized agent's egress allowlist is induced
     from the ``host`` values across these events."""
     return ev.SHADOW_NETWORK_RESPONSE, {"url": url, "status": status, "host": host}
+
+
+def capture_scroll(direction: str, y: int = 0) -> tuple[str, dict]:
+    """A ``data.shadow.user.scroll`` (type, payload) — a settled scroll up/down. Context,
+    not an action step: it records that the human had to scroll to reach the next thing."""
+    d = direction if direction in ("up", "down") else "down"
+    return ev.SHADOW_USER_SCROLL, {"direction": d, "y": int(y)}
