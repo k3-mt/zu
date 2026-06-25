@@ -2279,7 +2279,7 @@ provides-extras = ["anthropic", "openai"]
 
 [[package]]
 name = "zu-redteam"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "packages/zu-redteam" }
 dependencies = [
     { name = "zu-core" },

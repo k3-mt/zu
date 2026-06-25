@@ -7,6 +7,40 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — §9 defence-in-depth worked threat model: the malicious-PDF phone-home chain, contained (zu-redteam 0.2.5 → 0.2.6)
+A worked threat model (RED_TEAM.md §9) proving the EXISTING containment does its
+job, frozen as a deterministic, offline ($0) regression the red team owns. It is
+**not** a new runtime feature: it exercises the ZU-NET-1 egress-allowlist guarantee
+already in the trusted base. The attack: a malicious PDF runs embedded JavaScript
+that (1) fingerprints the host, (2) phones home to a command-and-control (C2) server
+to exfiltrate the fingerprint and pull a second-stage payload, then (3) the second
+stage would attempt a container escape.
+
+- **`PdfPhoneHomeFetch` + `connection_to_c2` fixtures** (`zu-redteam` `fixtures.py`):
+  a document tool that declares ONLY its legitimate doc source (`docs.example`) as
+  egress, opens the malicious PDF, and — when the embedded JS attempts the off-
+  allowlist C2 callback — has the egress floor refuse it via `SecurityBlock`
+  (`kind="egress"`), so the loop records a `harness.defense.blocked` event.
+  `connection_to_c2` is the egress proxy's out-of-band record of the REFUSED C2
+  attempt (`allowed: false`, `bytes_out: 0`).
+- **`pdf_phone_home` corpus case** (`zu-redteam` `corpus.py`, objective `escape`):
+  the staged attack as a deterministic Zu run; the corpus only ever grows, so every
+  future plugin is replayed against it.
+- **The named offline proof** (`zu-redteam` `tests/test_pdf_phone_home.py`) asserts
+  the §9.6 outcome via the OUT-OF-BAND verdict observers (never self-asserted by the
+  simulated attacker): (a) stage 2 is SEVERED — the C2 callback returns nothing;
+  (b) the denial is VISIBLE on the append-only log (`harness.defense.blocked` in-
+  process; a refused `harness.egress.observed` in the container form), attributable;
+  (c) NOTHING exfiltrates — the fingerprint (the planted secret) never leaves, and
+  the inference channel excludes arbitrary egress (no tunnel-out through the LLM
+  API); (d) stage 3 is MOOT — with the callback severed, the second-stage payload is
+  never fetched, so the escape never arrives.
+- **Honest scope (encoded in the test docstrings): CONTAINMENT, not prevention.** Zu
+  does not stop the PDF being malicious or the JS engine firing; it contains the
+  blast radius so the exploit lands in a box that cannot phone home. Boundary noted:
+  a C2 on an already-allowlisted host would not be caught by egress filtering alone —
+  the regression uses an un-allowlisted C2 to exercise the layer that DOES catch it.
+
 ### Added — Human handoff + the apprenticeship loop (§3.4) (zu-core 0.2.10 → 0.2.11; zu-checks 0.2.4 → 0.2.5; zu-cli 0.2.5 → 0.2.6)
 When an agent hits friction on a system it is *entitled* to operate — a captcha /
 anti-bot wall, or a declared human-only step (a final "yes, send the wire") — it

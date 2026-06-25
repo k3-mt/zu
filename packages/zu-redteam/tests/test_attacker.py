@@ -34,7 +34,7 @@ def test_craft_payload_encodings() -> None:
 async def test_scripted_attacker_runs_the_corpus() -> None:
     attacker = ScriptedAttacker(planted_secret="ZU-PLANTED-SECRET-x")
     results = await attacker.run()
-    assert len(results) == 6
+    assert len(results) == 7
     assert len(set(attacker.objectives_attempted(results))) >= 5
 
 
