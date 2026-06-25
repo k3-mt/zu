@@ -7,6 +7,18 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the "why?" intent prompt in live capture (§2.4) (zu-shadow 0.1.2 → 0.1.3)
+`zu shadow capture` now captures INTENT, not just actions: at a decision fork (a click on
+a button/link/toggle/row) a small floating "why?" input appears at the cursor — Enter
+saves the reason onto that step's `intent`, Esc skips. It is selective (forks only, never
+every keystroke) so the first run stays frictionless, and the typed reason is redacted like
+everything else before it reaches the recording. This is what makes a recording GENERALIZE
+rather than merely replay — the synthesizer surfaces the whys for review and turns the
+conditional ones into rail invariants/detectors. The pure attachment (`_attach_intent`,
+`_payload_to_raw` carrying `intent`) is unit-tested offline; the headed prompt is exercised
+by hand. Validated end-to-end by a headless smoke test (a fork click → typed why → the
+intent lands on that click).
+
 ### Added — `zu shadow capture`: author by clicking on a real webpage (zu-shadow 0.1.1 → 0.1.2)
 The live headed half of Shadow — the "do the job once" entrypoint. `zu shadow capture
 --url <page> --site <site>` launches a dedicated Chrome (its own profile; your normal
