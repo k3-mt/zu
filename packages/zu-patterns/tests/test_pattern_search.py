@@ -14,7 +14,6 @@ from zu_patterns.search import (
     PlanStep,
     _default_classifier,
     fsm_from_events,
-    live_mpc_step,
     plan,
     surface_state_id,
 )
@@ -123,11 +122,6 @@ def test_plan_step_is_frozen() -> None:
     step = PlanStep(src="s0", dst="s1", label="go", committing=False)
     with pytest.raises((AttributeError, TypeError)):
         step.label = "x"  # type: ignore[misc]
-
-
-def test_live_mpc_step_is_a_deferred_stub() -> None:
-    with pytest.raises(NotImplementedError):
-        live_mpc_step()
 
 
 # --- the commit-boundary safety discipline (the LOW fix) ------------------

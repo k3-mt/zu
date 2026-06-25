@@ -1,6 +1,6 @@
 [project]
 name = "zu-patterns"
-version = "0.2.1"
+version = "0.2.2"
 description = "Zu pattern library: the policy-prior / move-ordering layer over the Action Surface (§5)"
 readme = "README.md"
 requires-python = ">=3.11"

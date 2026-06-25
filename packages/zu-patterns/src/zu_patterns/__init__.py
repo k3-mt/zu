@@ -15,7 +15,20 @@ from .reversibility import (
     Signal,
     classify_action,
 )
-from .search import Plan, fsm_from_events, live_mpc_step, plan
+from .search import (
+    Candidate,
+    MpcDecision,
+    MpcOutcome,
+    Plan,
+    PlanStep,
+    fsm_from_events,
+    fsm_from_shadow,
+    fsm_from_shadow_events,
+    live_mpc_step,
+    merge_transition_models,
+    mpc_run,
+    plan,
+)
 
 __all__ = [
     "Recognition",
@@ -26,7 +39,15 @@ __all__ = [
     "DEFAULT_PRIORS",
     "classify_action",
     "Plan",
+    "PlanStep",
     "fsm_from_events",
     "plan",
     "live_mpc_step",
+    "mpc_run",
+    "Candidate",
+    "MpcDecision",
+    "MpcOutcome",
+    "fsm_from_shadow",
+    "fsm_from_shadow_events",
+    "merge_transition_models",
 ]

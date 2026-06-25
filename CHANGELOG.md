@@ -7,6 +7,43 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — §5.2 live guided-MPC loop + Shadow-sourced transition model (zu-patterns 0.2.1 → 0.2.2)
+The two deferred pieces of the §5 pattern/search stack, both pure/offline ($0):
+
+- **The live guided-MPC step (`live_mpc_step`) — MODEL PROPOSES, HARNESS DISPOSES.**
+  The `ModelProvider` proposes ≤K candidate next actions over the current
+  `SurfaceView` (policy-pruned branching); the pattern recognizer supplies the
+  move-ordering PRIOR (recognized archetypes/handles explored first). A SHALLOW
+  lookahead over the LEARNED `reachability.Fsm` estimates where each candidate
+  leads, SCORED by the rail evaluator (`co_reachable` to the goal / not a `trap`).
+  The deterministic lookahead+rail DISPOSES — MPC picks the goal-reachable on-rail
+  candidate, NOT the model's naive first pick; a pattern's prediction is a PRIOR
+  confirmed by the lookahead, never ground truth. (Replaces the `NotImplementedError`
+  stub.)
+- **STOP AT THE COMMIT BOUNDARY.** The chosen candidate is re-classified by
+  `reversibility.classify_action` (DEFAULT-TO-COMMITTING on uncertainty). A
+  COMMITTING/side-effecting next step is the live-search boundary: the loop STOPS
+  and ESCALATES rather than auto-crossing it; only REVERSIBLE/idempotent steps
+  execute. The §1 commit-boundary married to the §5 search.
+- **The driver loop (`mpc_run`).** `live_mpc_step` → execute ONE step via an
+  INJECTED executor callback (a fake returning scripted next-surfaces in tests; a
+  real browser in production) → re-plan from the REAL resulting state → repeat until
+  the goal, a trap/terminal, or an escalation. `live_mpc_step` stays pure decision
+  logic (no real I/O), so the whole loop runs offline with `ScriptedProvider` + a
+  hand-built `Fsm` + a fake executor.
+- **The Shadow-sourced transition model (`fsm_from_shadow` / `merge_transition_models`).**
+  Folds a Shadow recording — either the synthesizer's already-emitted induced
+  `reachability.Fsm` or the raw `data.shadow.user.*` action sequence — into the SAME
+  search transition model `fsm_from_events` produces, so a recording and the event
+  log feed one model. Accumulating recordings GROWS the learned graph (the
+  apprenticeship premise). DEP-DIRECTION: zu-shadow depends on zu-core AND zu-cli, so
+  to avoid a package cycle and keep zu-patterns dependency-light, `fsm_from_shadow`
+  takes PLAIN inputs (the `Fsm`, the shadow events, or a `RecordedSession`-shaped
+  duck) and does NOT import zu-shadow — zu-patterns still depends only on zu-core.
+- Tests: `packages/zu-patterns/tests/test_mpc_and_shadow.py` (MPC picks the on-rail
+  candidate over the model's first pick; a committing candidate STOPS the loop before
+  the executor runs; `fsm_from_shadow` folds + a second recording grows it).
+
 ### Fixed — plugin-gate discovery omitted newer groups (zu-cli 0.2.6 → 0.2.7)
 `zu test-plugin` discovered plugins via a stale hardcoded group list
 (providers/tools/detectors/validators/backends/sinks), so the `zu.patterns` (and

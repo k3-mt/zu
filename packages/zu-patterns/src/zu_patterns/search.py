@@ -17,21 +17,34 @@ Two pieces:
     lookahead must stop). Offline the whole learned graph is explorable; the plan
     never auto-crosses a COMMITTING edge in the live seam.
 
-Pure, offline, $0. The LIVE guided-MPC loop and the Shadow-sourced transition
-model are DEFERRED seams (``live_mpc_step`` is a documented stub).
+Now also:
+  * ``live_mpc_step`` / ``mpc_run`` — the LIVE guided-MPC loop (§5.2, the
+    AlphaZero shape): the model PROPOSES ≤K candidates (the recognizer is the
+    move-ordering prior), a shallow lookahead over the learned FSM DISPOSES via
+    the rail (``co_reachable``/traps), one REVERSIBLE step executes via an injected
+    executor, then re-plan — STOPPING at the commit boundary (default-to-committing).
+  * ``fsm_from_shadow`` / ``merge_transition_models`` — the Shadow-sourced
+    transition model: fold a recording's induced FSM / shadow events into the SAME
+    search model; accumulating recordings GROWS the graph.
+
+Pure, offline, $0 — the executor is the only I/O and it is injected (a fake in
+tests, a real browser in production).
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from zu_core import events as ev
+from zu_core.ports import ModelProvider, ModelRequest, RecognitionResult
 from zu_core.reachability import Fsm, FsmEdge, co_reachable, trap_states
+from zu_core.surface import SurfaceAffordance, SurfaceView
 
-from .reversibility import Commitment
+from .recognizer import recognize
+from .reversibility import Commitment, classify_action
 
 # --- (A) the empirical transition-model builder ---------------------------
 
@@ -244,22 +257,522 @@ def plan(
     )
 
 
-# --- DEFERRED: the live guided-MPC seam (documented, not built) -----------
+# --- (C) the LIVE guided-MPC loop (§5.2, the AlphaZero shape) --------------
+#
+# MODEL PROPOSES, HARNESS DISPOSES. The model proposes ≤K candidate next actions
+# (policy-pruned branching) — the pattern recognizer supplies the move-ordering
+# PRIOR; a shallow lookahead over the LEARNED ``Fsm`` (the remembered transition
+# model) estimates where each candidate leads; the rail/reachability DISPOSES
+# (co_reachable to the goal? not a trap?). A pattern's prediction is a PRIOR
+# confirmed by the deterministic lookahead/rail, NEVER ground truth.
+#
+# ``live_mpc_step`` is PURE decision logic — no real I/O. The executor is injected
+# into the driver loop (``mpc_run``), so the whole thing is offline-testable with a
+# ScriptedProvider + a hand-built Fsm + a fake executor.
 
 
-def live_mpc_step(*_args: Any, **_kwargs: Any) -> None:
-    """DEFERRED — the live guided-MPC loop (model proposes K → shallow live
-    lookahead over the REVERSIBLE sub-graph → execute one → re-plan).
+# A proposed candidate: the action label (matching an FSM edge ``label``), the
+# affordance handle it acts on (for the executor), and a generic interaction verb
+# (``op``)/``role`` the commit-boundary classifier reads.
+@dataclass(frozen=True)
+class Candidate:
+    label: str
+    handle: str | None = None
+    op: str | None = None
+    role: str | None = None
+    http_method: str | None = None
 
-    The doc marks this "(optional, later)". The offline planner above is the
-    pathfinder; the live executor would call ``plan`` for K candidates, run a
-    shallow lookahead that STOPS at the first ``PlanStep.committing`` boundary
-    (never auto-crossing an irreversible commit), execute one reversible step,
-    observe, and re-plan. It also needs the Shadow-sourced transition model (the
-    next phase) to extend ``fsm_from_events`` with richer state. Both are
-    intentionally NOT built in this phase.
+
+@dataclass(frozen=True)
+class MpcDecision:
+    """The result of one ``live_mpc_step``: the chosen candidate and WHY.
+
+    ``action`` is the picked on-rail candidate (``None`` ⇒ no on-rail/safe move —
+    the loop escalates). ``escalate`` is set when the best candidate crosses the
+    COMMIT BOUNDARY (a side-effecting/irreversible step the live loop must NOT
+    auto-cross) or when nothing is recognized/reachable. ``committing`` says the
+    chosen/blocking candidate was classified COMMITTING. ``scored`` is the full
+    ranked list (candidate, lookahead-score) for audit — the lookahead+rail
+    DISPOSED, the model only PROPOSED.
     """
-    raise NotImplementedError(
-        "live_mpc_step is a deferred seam (live guided-MPC + Shadow-sourced "
-        "transition model); use plan()/fsm_from_events() for the offline planner."
+
+    action: Candidate | None
+    escalate: bool
+    rationale: str
+    committing: bool = False
+    scored: tuple[tuple[Candidate, float], ...] = ()
+
+
+# The state of the current surface within the learned FSM. The caller maps a live
+# ``SurfaceView`` to an FSM state id; offline tests pass the id directly.
+SurfaceToState = Callable[[SurfaceView], str]
+
+
+def _surface_state(surface: SurfaceView) -> str:
+    """Default surface→FSM-state mapping: the same digest ``fsm_from_events``
+    uses, so a live surface lands on the learned state when the model remembers it."""
+    payload = {
+        "url": surface.url,
+        "title": surface.title,
+        "handles": [a.handle for a in surface.affordances],
+    }
+    return surface_state_id(payload)
+
+
+def _prior_for_candidate(
+    cand: Candidate, recognized: RecognitionResult | None
+) -> float:
+    """The move-ordering PRIOR (the recognizer's confidence, biased to the handles
+    the recognized archetype bound). A recognized handle ⇒ explore-first bonus."""
+    if recognized is None:
+        return 0.0
+    bonus = recognized.confidence
+    if cand.handle is not None and cand.handle in recognized.matched_handles:
+        bonus += 1.0
+    return bonus
+
+
+def _lookahead_score(fsm: Fsm, co: frozenset[str], traps: frozenset[str],
+                     dst: str, depth: int) -> float:
+    """SHALLOW lookahead over the LEARNED fsm: how good is landing on ``dst``?
+
+    The rail evaluator (``co_reachable``) is the value estimate: ``dst`` accepting
+    ⇒ best; ``dst`` co-reachable (goal still reachable) ⇒ good; a trap ⇒ worst
+    (pruned). Within ``depth`` we look whether an accepting state is reachable from
+    ``dst`` (a cheap bounded BFS), preferring the shorter route. Pure graph query —
+    no model, no I/O. This is what DISPOSES."""
+    if dst in traps:
+        return -1.0
+    if dst in fsm.accepting:
+        return 100.0
+    if dst not in co:
+        # not co-reachable and not accepting: a dead end for the goal.
+        return -1.0
+    # bounded BFS to the nearest accepting state within ``depth`` — closer is
+    # better (the value estimate the rail's co_reachable underwrites).
+    frontier = {dst}
+    seen = {dst}
+    for d in range(1, max(depth, 1) + 1):
+        nxt: set[str] = set()
+        for s in frontier:
+            for e in fsm.edges:
+                if e.src == s and e.dst not in seen:
+                    if e.dst in fsm.accepting:
+                        return 100.0 - d
+                    if e.dst in co:
+                        nxt.add(e.dst)
+                    seen.add(e.dst)
+        frontier = nxt
+        if not frontier:
+            break
+    # co-reachable but goal is beyond the horizon: still on-rail, mild positive.
+    return 1.0
+
+
+async def live_mpc_step(
+    surface: SurfaceView,
+    model: ModelProvider,
+    fsm: Fsm,
+    patterns: Sequence[Any] = (),
+    *,
+    k: int = 3,
+    depth: int = 2,
+    surface_to_state: SurfaceToState | None = None,
+    priors: Sequence[Any] = (),
+    min_confidence: float = 0.6,
+) -> MpcDecision:
+    """One guided-MPC step — MODEL PROPOSES, deterministic lookahead+rail DISPOSES.
+
+    PROPOSE: the ``ModelProvider`` proposes ≤K candidate next actions from the
+    current ``SurfaceView`` (policy-pruned branching; K small). The pattern
+    recognizer supplies the move-ordering PRIOR — recognized archetypes/handles are
+    explored first (the heuristic network).
+
+    LOOK AHEAD: each candidate maps to an FSM edge out of the current state; a
+    SHALLOW lookahead over the LEARNED fsm estimates where it leads, SCORED by the
+    rail evaluator (``co_reachable`` to the goal / not a ``trap``).
+
+    DISPOSE: pick the best-scoring on-rail candidate. A pattern's prediction is a
+    PRIOR confirmed by the lookahead/rail, never trusted as ground truth.
+
+    SAFETY — STOP AT THE COMMIT BOUNDARY: the chosen candidate is re-classified by
+    ``classify_action`` (default-to-COMMITTING on uncertainty). A COMMITTING next
+    step is the live-search boundary: the step does NOT execute — the decision is
+    ``escalate``. Only a REVERSIBLE/idempotent candidate is returned for execution.
+    An UNRECOGNIZED / no-on-rail-candidate surface also escalates (fall through to
+    the model / route out). Pure: no I/O beyond the injected ``model.complete``.
+    """
+    to_state = surface_to_state or _surface_state
+    here = to_state(surface)
+    co = co_reachable(fsm)
+    traps = trap_states(fsm)
+
+    # PROPOSE — the model proposes ≤K candidates from the surface.
+    rec = recognize(surface, patterns, min_confidence=min_confidence)
+    proposals = await _propose_candidates(surface, model, rec.result, k=k)
+    if not proposals:
+        return MpcDecision(
+            action=None, escalate=True,
+            rationale="model proposed no candidates — escalate",
+        )
+
+    # LOOK AHEAD + score. Each candidate's label is matched to an outgoing FSM edge
+    # from the current state (the learned transition); its destination is scored by
+    # the rail. The recognizer's confidence is the move-ordering PRIOR (a tie-break
+    # / bias, NEVER overriding the deterministic lookahead).
+    edges_here = {e.label: e for e in fsm.edges if e.src == here}
+    scored: list[tuple[Candidate, float]] = []
+    for cand in proposals:
+        edge = edges_here.get(cand.label)
+        if edge is None:
+            # the learned model has no memory of this move from here: unknown
+            # transition ⇒ blind. Score it below any on-rail known move.
+            scored.append((cand, -2.0))
+            continue
+        base = _lookahead_score(fsm, co, traps, edge.dst, depth)
+        score = base + 0.001 * _prior_for_candidate(cand, rec.result)
+        scored.append((cand, score))
+    # deterministic ordering: score desc, then label for stable ties.
+    scored.sort(key=lambda cs: (-cs[1], cs[0].label))
+    scored_t = tuple(scored)
+
+    best, best_score = scored[0]
+    if best_score <= 0.0:
+        # no on-rail candidate (trap / unknown / unreachable). The deterministic
+        # lookahead+rail DISPOSED against the model's proposals — escalate rather
+        # than execute a blind/off-rail move.
+        return MpcDecision(
+            action=None, escalate=True,
+            rationale=(
+                f"no on-rail candidate from {here!r} "
+                f"(best {best.label!r} scored {best_score:.3f}) — escalate"
+            ),
+            scored=scored_t,
+        )
+
+    # DISPOSE — SAFETY: re-classify the chosen candidate at the COMMIT BOUNDARY.
+    # default-to-committing: an uncertain/side-effecting move STOPS the live loop.
+    commitment = classify_action(
+        http_method=best.http_method, role=best.role, op=best.op, priors=priors
+    )
+    if commitment is Commitment.COMMITTING:
+        return MpcDecision(
+            action=best, escalate=True, committing=True,
+            rationale=(
+                f"chosen on-rail candidate {best.label!r} is COMMITTING "
+                "(default-to-committing) — STOP at the commit boundary, escalate"
+            ),
+            scored=scored_t,
+        )
+
+    return MpcDecision(
+        action=best, escalate=False, committing=False,
+        rationale=(
+            f"chosen {best.label!r} → on-rail (score {best_score:.3f}); "
+            "REVERSIBLE — execute one step then re-plan"
+        ),
+        scored=scored_t,
+    )
+
+
+def _aff(surface: SurfaceView, handle: str | None) -> SurfaceAffordance | None:
+    if handle is None:
+        return None
+    for a in surface.affordances:
+        if a.handle == handle:
+            return a
+    return None
+
+
+async def _propose_candidates(
+    surface: SurfaceView, model: ModelProvider,
+    recognized: RecognitionResult | None, *, k: int,
+) -> list[Candidate]:
+    """Ask the ModelProvider to PROPOSE ≤K candidate next actions over the surface.
+
+    The model emits tool_calls (the policy-pruned branching factor): each call's
+    ``args`` carry ``{label, handle?, op?, role?, http_method?}``. A proposal's
+    ``op``/``role`` default from the named affordance when the model omits them, so
+    the commit-boundary classifier always has signal. ≤K are kept (the model
+    prunes; we cap)."""
+    req = _proposal_request(surface, recognized, k=k)
+    resp = await model.complete(req)
+    out: list[Candidate] = []
+    for call in resp.tool_calls[:k]:
+        args = call.args or {}
+        label = str(args.get("label") or call.name)
+        handle = args.get("handle")
+        aff = _aff(surface, handle if isinstance(handle, str) else None)
+        op = args.get("op") or (call.name if call.name in _OP_NAMES else None)
+        role = args.get("role") or (aff.role if aff is not None else None)
+        out.append(
+            Candidate(
+                label=label,
+                handle=handle if isinstance(handle, str) else None,
+                op=op if isinstance(op, str) else None,
+                role=role if isinstance(role, str) else None,
+                http_method=(
+                    str(args["http_method"]) if args.get("http_method") else None
+                ),
+            )
+        )
+    return out
+
+
+# Generic interaction verbs a tool name may itself be (so a bare ``fill``/``submit``
+# tool call carries an op signal to the classifier without explicit args).
+_OP_NAMES = frozenset(
+    {"fill", "read", "open", "select", "expand", "focus",
+     "submit", "confirm", "purchase", "pay", "checkout", "delete", "click"}
+)
+
+
+def _proposal_request(
+    surface: SurfaceView, recognized: RecognitionResult | None, *, k: int
+) -> ModelRequest:
+    """The ModelRequest handed to the proposing policy: the surface affordances and
+    the recognizer's PRIOR (archetype + handles), asking for ≤K candidate moves as
+    tool calls. The recognized handles are surfaced as a hint to bias move ordering;
+    the model is free to ignore them (the lookahead/rail still DISPOSES)."""
+    affs = [
+        {"handle": a.handle, "role": a.role, "label": a.label} for a in surface.affordances
+    ]
+    hint: dict[str, Any] = {}
+    if recognized is not None:
+        hint = {
+            "archetype": recognized.archetype,
+            "confidence": recognized.confidence,
+            "suggested_handles": list(recognized.matched_handles),
+        }
+    sys = (
+        "Propose up to K candidate next actions over the current surface as tool "
+        "calls. Each call's args carry {label, handle, op?, role?}. You PROPOSE; a "
+        "deterministic lookahead over the learned model disposes — do not commit."
+    )
+    user = {"k": k, "url": surface.url, "title": surface.title,
+            "affordances": affs, "prior": hint}
+    import json
+
+    return ModelRequest(
+        messages=[{"role": "system", "content": sys},
+                  {"role": "user", "content": json.dumps(user)}]
+    )
+
+
+# An injected executor: act ONE step in the real world (browser/tool) and return
+# the resulting ``SurfaceView``. Offline tests inject a fake returning scripted
+# next-surfaces; a real run drives the browser. It is async and may be awaited.
+ActionExecutor = Callable[[Candidate, SurfaceView], Awaitable[SurfaceView]]
+
+
+@dataclass(frozen=True)
+class MpcOutcome:
+    """The result of an ``mpc_run`` driver loop."""
+
+    reached_goal: bool
+    escalated: bool
+    steps: tuple[Candidate, ...]
+    rationale: str
+    surface: SurfaceView
+
+
+async def mpc_run(
+    surface: SurfaceView,
+    model: ModelProvider,
+    fsm: Fsm,
+    executor: ActionExecutor,
+    patterns: Sequence[Any] = (),
+    *,
+    k: int = 3,
+    depth: int = 2,
+    max_steps: int = 25,
+    surface_to_state: SurfaceToState | None = None,
+    priors: Sequence[Any] = (),
+    min_confidence: float = 0.6,
+) -> MpcOutcome:
+    """The driver loop: ``live_mpc_step`` → execute ONE step via the injected
+    ``executor`` → re-plan from the REAL resulting state → repeat.
+
+    Stops when: the goal FSM state is reached (success), a trap/terminal/no-on-rail
+    candidate is hit (escalate), or a COMMITTING step is chosen (STOP at the commit
+    boundary — escalate, NEVER auto-cross). Reversible/idempotent steps execute
+    freely. ``max_steps`` bounds the loop. The executor is the only I/O; everything
+    else is the pure decision above, so the whole loop runs offline with a fake
+    executor."""
+    to_state = surface_to_state or _surface_state
+    taken: list[Candidate] = []
+    cur = surface
+    for _ in range(max_steps):
+        if to_state(cur) in fsm.accepting:
+            return MpcOutcome(
+                reached_goal=True, escalated=False, steps=tuple(taken),
+                rationale="reached goal state", surface=cur,
+            )
+        decision = await live_mpc_step(
+            cur, model, fsm, patterns, k=k, depth=depth,
+            surface_to_state=to_state, priors=priors, min_confidence=min_confidence,
+        )
+        if decision.escalate or decision.action is None:
+            return MpcOutcome(
+                reached_goal=False, escalated=True, steps=tuple(taken),
+                rationale=decision.rationale, surface=cur,
+            )
+        # execute exactly ONE reversible step via the injected executor, then
+        # re-plan from the REAL resulting surface.
+        taken.append(decision.action)
+        cur = await executor(decision.action, cur)
+    return MpcOutcome(
+        reached_goal=to_state(cur) in fsm.accepting, escalated=False,
+        steps=tuple(taken), rationale="max_steps reached", surface=cur,
+    )
+
+
+# --- (D) the transition model FROM SHADOW recordings (Part B) -------------
+#
+# ``fsm_from_events`` folds the EVENT LOG into an ``Fsm``. ``fsm_from_shadow`` does
+# the same from a Shadow recording, so a recording and the event log feed the SAME
+# search transition model. The shapes are aligned (both produce a ``reachability.
+# Fsm``), so the two sources MERGE — accumulating recordings GROWS the learned
+# graph (the apprenticeship premise).
+#
+# DEPENDENCY DIRECTION: zu-shadow depends on zu-core AND zu-cli. Importing zu-shadow
+# from zu-patterns risks a package cycle and violates the "dependency-light" rule,
+# so ``fsm_from_shadow`` takes PLAIN inputs — either the already-emitted induced
+# ``Fsm`` (the synthesizer's ``SynthesisResult.fsm``) OR the list of shadow events
+# (``data.shadow.user.*``) — and NEVER imports zu-shadow. zu-patterns still depends
+# only on zu-core.
+
+
+def _shadow_state_id(seq: int) -> str:
+    return f"shadow_s{seq}"
+
+
+def _shadow_action_label(e: Any) -> str:
+    """The edge label for one ``data.shadow.user.*`` event — verb[:target], the
+    same human-readable shape the synthesizer's ``_action_label`` produces."""
+    t = getattr(e, "type", "")
+    p = _payload(e)
+    if t == ev.SHADOW_USER_NAVIGATE:
+        return "navigate"
+    verb = "click" if t == ev.SHADOW_USER_CLICK else "type"
+    target = p.get("target") or {}
+    name = ""
+    if isinstance(target, dict):
+        name = target.get("name") or target.get("label") or target.get("role") or ""
+    return f"{verb}:{name}" if name else verb
+
+
+def fsm_from_shadow_events(
+    events: Sequence[Any],
+    *,
+    initial: str = "shadow_start",
+    goal: str = "shadow_goal",
+) -> Fsm:
+    """Fold a Shadow recording's ``data.shadow.user.*`` action sequence into an
+    induced ``Fsm`` (pure) — the SAME shape ``fsm_from_events`` and the synthesizer's
+    ``induce_fsm`` produce, so the search transition model is source-agnostic.
+
+    One state per recorded action, an edge per consecutive pair labelled by the
+    action, ``initial`` → … → ``goal`` (a ``done`` edge into the accepting goal).
+    Takes plain events (no zu-shadow import)."""
+    actions = [
+        e for e in events
+        if getattr(e, "type", "") in (
+            ev.SHADOW_USER_CLICK, ev.SHADOW_USER_TYPE, ev.SHADOW_USER_NAVIGATE
+        )
+    ]
+    states = [initial]
+    edges: list[FsmEdge] = []
+    prev = initial
+    for i, e in enumerate(actions):
+        s = _shadow_state_id(i + 1)
+        states.append(s)
+        edges.append(FsmEdge(src=prev, dst=s, label=_shadow_action_label(e)))
+        prev = s
+    states.append(goal)
+    edges.append(FsmEdge(src=prev, dst=goal, label="done"))
+    return Fsm(
+        states=frozenset(states),
+        initial=initial,
+        accepting=frozenset({goal}),
+        edges=tuple(edges),
+    )
+
+
+def merge_transition_models(*fsms: Fsm) -> Fsm:
+    """Merge induced ``Fsm``s into ONE learned transition model — the union of
+    states and edges (de-duplicated), so accumulating recordings GROWS the graph.
+
+    The first FSM's ``initial`` is kept as the merged initial; the accepting sets
+    union (any source's goal is a goal). Pure set/tuple algebra — no new machinery,
+    just graph union over ``reachability.Fsm``. This is what lets a Shadow recording
+    and the event log feed the same search, and a second recording extend the
+    first."""
+    if not fsms:
+        return Fsm(states=frozenset(), initial="", accepting=frozenset(), edges=())
+    states: set[str] = set()
+    accepting: set[str] = set()
+    seen_edges: set[tuple[str, str, str]] = set()
+    edges: list[FsmEdge] = []
+    for f in fsms:
+        states |= f.states
+        accepting |= f.accepting
+        for e in f.edges:
+            key = (e.src, e.dst, e.label)
+            if key not in seen_edges:
+                seen_edges.add(key)
+                edges.append(e)
+    return Fsm(
+        states=frozenset(states),
+        initial=fsms[0].initial,
+        accepting=frozenset(accepting),
+        edges=tuple(edges),
+    )
+
+
+def fsm_from_shadow(
+    source: Any,
+    *,
+    base: Fsm | None = None,
+    initial: str = "shadow_start",
+    goal: str = "shadow_goal",
+) -> Fsm:
+    """Build/extend the empirical transition model from a Shadow recording (Part B).
+
+    ``source`` is taken as PLAIN input — no zu-shadow import (dependency-light):
+
+      * an already-emitted ``reachability.Fsm`` (the synthesizer's induced FSM,
+        ``SynthesisResult.fsm``) — consumed directly; or
+      * a sequence of shadow events (``data.shadow.user.*``) — folded via
+        ``fsm_from_shadow_events`` into the SAME shape; or
+      * an object exposing ``.events`` / ``.shadow_events()`` (a RecordedSession-
+        shaped duck) — its events are folded.
+
+    When ``base`` is given, the new model is MERGED into it (``merge_transition_
+    models``), so a SECOND recording GROWS the learned graph — the apprenticeship
+    premise. The result feeds the SAME ``plan`` / ``live_mpc_step`` search."""
+    if isinstance(source, Fsm):
+        induced = source
+    else:
+        events = _shadow_events_of(source)
+        induced = fsm_from_shadow_events(events, initial=initial, goal=goal)
+    if base is not None:
+        return merge_transition_models(base, induced)
+    return induced
+
+
+def _shadow_events_of(source: Any) -> Sequence[Any]:
+    """Extract the shadow events from a plain input: a bare sequence, or a
+    RecordedSession-shaped object exposing ``shadow_events()`` / ``events``."""
+    shadow_events = getattr(source, "shadow_events", None)
+    if callable(shadow_events):
+        return list(shadow_events())
+    events = getattr(source, "events", None)
+    if events is not None:
+        return list(events)
+    if isinstance(source, Sequence):
+        return source
+    raise TypeError(
+        "fsm_from_shadow source must be an Fsm, a sequence of shadow events, or a "
+        "RecordedSession-shaped object (with .events / .shadow_events())"
     )

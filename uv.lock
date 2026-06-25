@@ -2244,7 +2244,7 @@ provides-extras = ["hosted", "local"]
 
 [[package]]
 name = "zu-patterns"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "packages/zu-patterns" }
 dependencies = [
     { name = "zu-core" },
