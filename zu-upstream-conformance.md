@@ -252,6 +252,63 @@ divergence surfacing + escalate-to-human, annotation carriage. The consumer keep
 the judgment. The most consequential is ZU-RAIL-3's escalate-to-a-**human** (Zu's
 default escalates a broken path to the *model*).
 
+### ZU-RAIL-5 — A deterministic, history-aware Monitor over the event stream **(MUST)**
+- **Mechanism (Zu):** the `Monitor` port (`evaluate(ctx) -> MonitorVerdict | None`,
+  `zu_core.ports`) — the stateful generalisation of a `Detector` that folds the
+  WHOLE event history via `ctx.events` and returns a policy-neutral
+  `OK`/`WARN`/`VIOLATION` automaton state. The `zu.monitors` registry kind +
+  `_monitor_checkpoint` run it beside the detector checkpoints; the
+  `_MONITOR_SEVERITY` bridge (in the loop, not the port) maps a `VIOLATION` to a
+  `TERMINAL` `Verdict` routed through the EXISTING halting/`_escalate` path, and a
+  `WARN` is recorded-and-continued. It is pure — no model, no I/O — which keeps it
+  LTL-compilable later with no caller change. An empty monitor list is inert (a
+  byte-identical event sequence). **Policy (consumer):** the automaton/predicate
+  the Monitor encodes.
+- **Conformance test:** a scripted Monitor that returns `VIOLATION` once a forbidden
+  tool appears on the log ends the run `TERMINAL` with the monitor name and a
+  `harness.monitor.fired` `state="violation"` on the log.
+
+### ZU-RAIL-6 — Invariants declared as DATA compile down to a Monitor **(MUST)**
+- **Mechanism (Zu):** `zu_core.invariants` — `Invariant`/`Predicate` (a tagged union
+  by `kind`: budget caps, domain allowlists, required-field presence; pre/post/
+  throughout) carried as DATA an `agent.yaml` declares, plus `compile_invariant` /
+  `compile_spec` that bridge a declared invariant into a concrete `Monitor` whose
+  violation is detected over the log by the ZU-RAIL-5 checkpoint. Pure evaluators
+  over an event `Sequence`; adding an LTL predicate is one enum value + one
+  evaluator entry with callers unchanged, and an LTL→Monitor compiler emits the
+  SAME `Monitor` shape. **Policy (consumer):** the limits/allowlists as data — no
+  magic constant in Zu.
+- **Conformance test:** a declared `budget_cap` of 1 tool call, compiled to a
+  Monitor and registered, halts a run that overshoots to 2 calls (`TERMINAL` +
+  `harness.monitor.fired`).
+
+### ZU-RAIL-7 — A pure reachability check over an induced FSM flags trap states **(MUST)**
+- **Mechanism (Zu):** `zu_core.reachability` — a NEW branching `Fsm`/`FsmEdge`
+  (deliberately NOT the linear `Track`), with `co_reachable` (a backward
+  BFS/fixpoint from the accepting/goal states over reversed edges), `trap_states`
+  (states that cannot reach the goal), and `check_reachability` returning a
+  `ReachabilityVerdict` (`reachable_goal`, `traps`, `unreachable_from_initial`). A
+  pure function — no model, no I/O — that consumes an `Fsm` a §2 synthesizer will
+  later produce from a `Track`. **Policy (consumer):** how the FSM is synthesized.
+- **Conformance test:** an FSM `A→B→GOAL` plus a sink `A→T` flags `T` as the sole
+  trap, with the goal still reachable from the initial state.
+
+### ZU-RAIL-8 — Restore-to-last-known-good rollback folds only the good prefix **(MUST)**
+- **Mechanism (Zu):** `last_known_good` (the latest `harness.checkpoint.marked`,
+  falling back to the latest successful `harness.tool.returned`) + `_rebuild_to`
+  (reuses `_rebuild_run_state` over the prefix up to the LKG, dropping the failed
+  tail) + `rollback_and_replan` (re-seats the run spine — root/tier/tokens/taint/
+  dispatch-counter/grant-load/claim-load — from the GOOD PREFIX only, emits
+  `harness.run.rolled_back` {to, dropped}, then re-enters the model loop from a
+  fresh turn so the model RE-PLANS). It builds on the existing event-sourcing (no
+  parallel snapshot) and preserves consume-once (good-prefix `execution.claimed`
+  keys are re-loaded; the dropped tail's claims are gone) — distinct from today's
+  forward-resume-from-pause, which keeps the whole log and executes the one pinned
+  approval. **Policy (consumer):** when to mark a checkpoint and when to roll back.
+- **Conformance test:** a run to a marked checkpoint with a failed tail rolls back,
+  emits `harness.run.rolled_back` with the dropped count, and the new (different)
+  tool call from the re-plan executes; consume-once is preserved across the fold.
+
 ---
 
 ## 7. Explicit non-requirements (`ZU-NOT`)
@@ -318,6 +375,10 @@ implementations are plugins.
 | ZU-RAIL-2 | Run mode; `explore` mechanically disarms capability-bearing calls | MUST | **Satisfied** | `TaskSpec.mode`; `_invoke` stubs a capability-bearing call in explore; `test_rail.py` |
 | ZU-RAIL-3 | Consequence-weighted replay divergence, escalatable to a human | MUST | **Satisfied** | `ReplayArbiter` port + `_replay_track` consult → pause-for-human/stop/handoff; `test_rail.py` |
 | ZU-RAIL-4 | Steps carry `consequence`/`destination` annotations, read at the gate | MUST | **Satisfied** | `TrackStep` annotations round-trip + stamped to `payload["ctx"]`/`RunContext`; `test_rail.py` |
+| ZU-RAIL-5 | History-aware Monitor over the event stream; VIOLATION→TERMINAL via the same escalation path | MUST | **Satisfied** | `Monitor` port + `zu.monitors` kind + `_monitor_checkpoint`/`_MONITOR_SEVERITY`; `test_monitor.py::test_monitor_violation_escalates_to_terminal` |
+| ZU-RAIL-6 | Invariants declared as DATA compile down to a Monitor | MUST | **Satisfied** | `zu_core.invariants` `Invariant`/`Predicate` + `compile_invariant`; `test_invariants.py::test_compiled_invariant_escalates_in_loop` |
+| ZU-RAIL-7 | Pure reachability over an induced FSM flags trap states | MUST | **Satisfied** | `zu_core.reachability` `Fsm` + `co_reachable`/`trap_states`/`check_reachability`; `test_reachability.py::test_trap_state_detected` |
+| ZU-RAIL-8 | Restore-to-last-known-good rollback folds only the good prefix | MUST | **Satisfied** | `last_known_good` + `_rebuild_to` + `rollback_and_replan` + `harness.run.rolled_back`; `test_rollback.py::test_rollback_restores_state_and_replans` |
 
 ---
 

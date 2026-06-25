@@ -96,6 +96,11 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unused_configs = true
 no_implicit_optional = true
+# Per-package test dirs each carry a top-level ``conftest.py`` (no test package
+# __init__), so mypy's flat module map collides on the shared name when more than
+# one exists. The conftests are fixture wiring, not typed surface — exclude them so
+# ``mypy packages`` stays clean as more packages add fixtures.
+exclude = "tests/conftest\\.py$"
 
 # The core contracts and ports are the load-bearing types every plugin is held
 # to — check them strictly. Adapters/CLI can tighten over time.

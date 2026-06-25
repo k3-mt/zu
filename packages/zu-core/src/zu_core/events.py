@@ -36,6 +36,12 @@ TURN_COMPLETED = "harness.turn.completed"
 TOOL_INVOKED = "harness.tool.invoked"
 TOOL_RETURNED = "harness.tool.returned"
 DETECTOR_FIRED = "harness.detector.fired"
+# A Monitor (the stateful, history-aware generalisation of a Detector, ZU-RAIL-5)
+# emitted a non-OK verdict over the event stream. Payload:
+# {"monitor": str, "state": "warn"|"violation", "detail": str|None, "step": int|None}.
+# Parented to the turn, ``source`` is the monitor name. Mirrors harness.detector.fired;
+# a "violation" maps to a TERMINAL Verdict through the loop's existing halting path.
+MONITOR_FIRED = "harness.monitor.fired"
 VALIDATION_FAILED = "harness.validation.failed"
 # A contained adversarial/unsafe attempt: a guard refused an action (SSRF/egress
 # block, an oversized "schema bomb" observation, a denied capability). Emitted at
@@ -91,6 +97,16 @@ APPROVAL_RESOLVED = "harness.approval.resolved"
 # resumed run re-entering the loop from a prior log.
 RUN_PAUSED = "harness.run.paused"
 RUN_RESUMED = "harness.run.resumed"
+# A consumer marked a last-known-good (LKG) rollback point (ZU-RAIL-8). Payload:
+# {"label": str, "step": int}. Parented to run.root. ``last_known_good`` returns
+# the most recent such marker's event_id as the restore target.
+CHECKPOINT_MARKED = "harness.checkpoint.marked"
+# The run was re-seated at a prior LKG event for an on-rail re-plan (ZU-RAIL-8) —
+# distinct from harness.run.resumed, which moves FORWARD past a pause. Payload:
+# {"to": str(event_id of the LKG event), "dropped": int (count of events after the
+# LKG that were truncated)}. Parented to run.root. The good prefix is folded; the
+# failed tail is dropped; consume-once claims from the good prefix are preserved.
+RUN_ROLLED_BACK = "harness.run.rolled_back"
 # A consume-once execution claim (ZU-CD-6): {"key"}. The first claim of a key wins
 # and is recorded here; the in-memory ExecutionLedger is a cache over these events,
 # so a resumed/replayed run folds them to rebuild the claimed set and REFUSES to
@@ -119,6 +135,23 @@ PIPELINE_FAILED = "harness.pipeline.failed"
 # --- data.* — what the agent read and produced -------------------------------
 SOURCE_FETCHED = "data.source.fetched"
 RECORD_EXTRACTED = "data.record.extracted"
+# The action surface shown to the policy at one step (Engineering Design §4.5 /
+# §11). data.* because it is perception the agent CONSUMED — the reviewer's record
+# of "what could the agent perceive/do here". Payload:
+# {"url": str, "title": str, "affordances": int (count), "handles": list[str],
+#  "context": int (count), "blind": bool, "blind_reason": str|None}. The durable
+# role+name locators stay harness-side (the handle_map is NOT on the log); the
+# handle list + counts are the auditable surface. Emitted by ActionSurface when
+# op=open/reduce yields a surface.
+SURFACE_CAPTURED = "data.surface.captured"
+# One pointer move/click trajectory the agent PRODUCED (Engineering Design §5.4 /
+# §12). data.* because it is an agent-produced action on the world — the audit
+# answer to "where did the cursor go". The full per-sample path rides in the tool
+# observation for replay; the event keeps the cheap summary. Payload:
+# {"handle": str|None, "clicked": bool, "samples": int (count), "duration_ms":
+#  float, "dest": {"x": float, "y": float}, "seed": str}. Emitted by PointerControl
+# after a successful dispatch.
+POINTER_DISPATCHED = "data.pointer.dispatched"
 
 HARNESS_TYPES: frozenset[str] = frozenset(
     {
@@ -132,6 +165,7 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         TOOL_INVOKED,
         TOOL_RETURNED,
         DETECTOR_FIRED,
+        MONITOR_FIRED,
         VALIDATION_FAILED,
         DEFENSE_BLOCKED,
         EGRESS_OBSERVED,
@@ -143,6 +177,8 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         APPROVAL_RESOLVED,
         RUN_PAUSED,
         RUN_RESUMED,
+        CHECKPOINT_MARKED,
+        RUN_ROLLED_BACK,
         EXECUTION_CLAIMED,
         RAIL_VERIFIED,
         RAIL_DISARMED,
@@ -154,5 +190,7 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         PIPELINE_FAILED,
     }
 )
-DATA_TYPES: frozenset[str] = frozenset({SOURCE_FETCHED, RECORD_EXTRACTED})
+DATA_TYPES: frozenset[str] = frozenset(
+    {SOURCE_FETCHED, RECORD_EXTRACTED, SURFACE_CAPTURED, POINTER_DISPATCHED}
+)
 ALL_TYPES: frozenset[str] = HARNESS_TYPES | DATA_TYPES

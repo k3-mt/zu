@@ -542,6 +542,95 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
             obs["action_error_kind"] = "soft" if soft else "fatal"
         return obs, False
 
+    if op == "axtree":
+        # The tier-3 Action Surface arm: hand the policy the page's ACCESSIBILITY
+        # tree (roles/names/states), an order of magnitude smaller than the DOM and
+        # built to answer "what can a user do here". We reach it over CDP — the
+        # Accessibility domain Playwright doesn't expose at the page level. Reuses
+        # the held page; if none is open and a url is given, navigate first
+        # (mirrors op=open's launch/goto) so an Action Surface tool can capture in
+        # one round-trip. The raw CDP nodes are returned verbatim — the harness's
+        # ``normalize_axtree`` owns the shape, never this server.
+        page = _ensure_page(state, cmd, playwright)
+        if page is None:
+            return {"error": "no open page; send an 'open' command or a url first"}, False
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Accessibility.enable")  # idempotent-safe
+        tree = cdp.send("Accessibility.getFullAXTree")
+        return {"axtree": tree.get("nodes", []),
+                "title": page.title(), "url": page.url}, False
+
+    if op == "locate":
+        # Resolve a {role, name} locator (NOT the opaque handle — the tool maps
+        # handle→locator harness-side via its handle_map) to on-screen bounds, plus
+        # the current cursor position, so the harness's seeded pointer_path starts
+        # from the real last point. The tool MUST send ``locator``; a bare handle the
+        # server cannot resolve → an error the tool surfaces as ``stale_handle``.
+        page = state.get("page")
+        if page is None:
+            return {"error": "no open page; send an 'open' command first"}, False
+        locator = cmd.get("locator")
+        if not isinstance(locator, dict) or not locator.get("role"):
+            return {"error": "locator required (a {role, name} dict)"}, False
+        role, nm = locator.get("role"), locator.get("name") or ""
+        try:
+            loc = page.get_by_role(role, name=nm).first if nm else page.get_by_role(role).first
+            box = loc.bounding_box()
+        except Exception as exc:  # noqa: BLE001 - an unresolvable locator is a stale handle, not a crash
+            return {"error": f"could not locate role={role!r} name={nm!r}: "
+                             f"{type(exc).__name__}: {exc}"}, False
+        if not box:
+            return {"error": f"no element for role={role!r} name={nm!r}"}, False
+        return {"bounds": [box["x"], box["y"], box["width"], box["height"]],
+                "cursor": list(state.get("cursor", [0.0, 0.0]))}, False
+
+    if op == "pointer":
+        # Stream the harness-computed samples as TRUSTED input. We use Playwright's
+        # ``page.mouse`` (which produces isTrusted=true events over the same CDP,
+        # §5.2) rather than hand-rolling Input.dispatchMouseEvent: it owns the
+        # button-state machine (down/up pairing, no half-pressed leak on error),
+        # strictly lower-risk than wiring the type/buttons fields by hand. Per-sample
+        # ``dt`` is honoured so the move TIMING is faithful, not just the geometry.
+        page = state.get("page")
+        if page is None:
+            return {"error": "no open page; send an 'open' command first"}, False
+        samples = cmd.get("samples") or []
+        last = state.get("cursor", [0.0, 0.0])
+        try:
+            for s in samples:
+                x, y = float(s["x"]), float(s["y"])
+                page.mouse.move(x, y)
+                dt = float(s.get("dt", 0.0))
+                if dt > 0:
+                    page.wait_for_timeout(dt)
+                last = [x, y]
+            if cmd.get("click"):
+                page.mouse.down()
+                page.mouse.up()
+        except Exception as exc:  # noqa: BLE001 - a dispatch failure is a response, never a crash
+            state["cursor"] = list(last)
+            return {"error": f"mouse dispatch failed: {type(exc).__name__}: {exc}"}, False
+        state["cursor"] = list(last)
+        return {"dispatched": len(samples), "clicked": bool(cmd.get("click")),
+                "cursor": list(last)}, False
+
+    if op == "screenshot":
+        # The tier-4 vision arm's capture: a viewport (or full-page) PNG of the held
+        # page, base64-encoded because the session protocol is UTF-8 JSON LINES — raw
+        # PNG bytes would corrupt the stream. The tier-4 tool decodes this into a
+        # zu_core.content.Image and hands the pixels to a VLM policy; it does NOT
+        # detect elements (that is the vision MODEL, §6/Phase 3).
+        import base64
+
+        page = state.get("page")
+        if page is None:
+            return {"error": "no open page; send an 'open' command first"}, False
+        png = page.screenshot(full_page=bool(cmd.get("full_page", False)))
+        vp = page.viewport_size or {}
+        return {"screenshot_b64": base64.b64encode(png).decode("ascii"),
+                "mime": "image/png", "width": vp.get("width"), "height": vp.get("height"),
+                "url": page.url}, False
+
     if op == "close":
         browser = state.get("browser")
         if browser is not None:
@@ -550,9 +639,40 @@ def handle_command(state: dict, cmd: dict, playwright: Any) -> tuple[dict, bool]
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
         state["browser"] = state["page"] = None
+        state["cursor"] = [0.0, 0.0]
         return {"closed": True}, True
 
-    return {"error": f"unknown op {op!r}; use open/act/read/close"}, False
+    return {"error": f"unknown op {op!r}; "
+                     "use open/act/read/axtree/locate/pointer/screenshot/close"}, False
+
+
+def _ensure_page(state: dict, cmd: dict, playwright: Any) -> Any:
+    """The held page, navigating to ``cmd['url']`` first if none is open yet (so an
+    Action Surface capture can open+read in one round-trip). Returns None when there
+    is no held page and no url to open — the caller surfaces an error.
+
+    A re-open to a DIFFERENT url on an ALREADY-HELD page re-navigates: a run that
+    reuses one shared session (the run-scoped registry keys on host, so a same-host
+    new PATH reuses the container) must land on the requested page, not silently
+    keep the stale one. Same-url re-opens are a no-op (the held page is returned)."""
+    page = state.get("page")
+    url = cmd.get("url")
+    if page is not None:
+        if url and page.url != url:
+            page.goto(url, wait_until=cmd.get("wait_until", "load"), timeout=30000)
+            state["captured"] = []
+        return page
+    if not url:
+        return None
+    if state.get("browser") is None:
+        state["browser"] = playwright.chromium.launch(args=_LAUNCH_ARGS)
+    page = launch_page(
+        state["browser"], int(cmd.get("width", _DEFAULT_WIDTH)), int(cmd.get("height", _DEFAULT_HEIGHT))
+    )
+    state["page"] = page
+    state["captured"] = []
+    page.goto(url, wait_until=cmd.get("wait_until", "load"), timeout=30000)
+    return page
 
 
 def _next_line(instream: Any, idle_timeout: float | None) -> str | None:

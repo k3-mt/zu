@@ -1,6 +1,6 @@
 [project]
 name = "zu-runtime"
-version = "0.2.4"
+version = "0.2.5"
 description = "An opinionated, backend-agnostic runtime for agents that work in production — deterministic, auditable, injection-resistant. Import as `zu`."
 requires-python = ">=3.11"
 license = "Apache-2.0"

@@ -13,7 +13,12 @@ import os
 
 import pytest
 
-from zu_backends.local_docker import DockerUnavailableError, LocalDockerBackend, _render_argv
+from zu_backends.local_docker import (
+    DockerUnavailableError,
+    LocalDockerBackend,
+    _render_argv,
+    _spec_target,
+)
 from zu_core.ports import ToolCall
 
 
@@ -417,3 +422,193 @@ async def test_browser_session_holds_state_across_commands_live() -> None:
         assert "Example Domain" in again["text"]              # the page is still held
     finally:
         await session.close()
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(
+    not os.environ.get("ZU_BROWSER_LIVE"),
+    reason="launches real Chromium + CDP; set ZU_BROWSER_LIVE=1 on a runner that can. "
+    "Proves the §4/§5 live ops (axtree/locate/pointer/screenshot) against real Chromium — "
+    "the real AX-tree shape, real bounding boxes, and isTrusted input — not offline fakes.",
+)
+async def test_axtree_locate_pointer_screenshot_against_real_chromium_live() -> None:
+    import base64
+
+    image = os.environ.get("ZU_RENDER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
+    session = await LocalDockerBackend().open_session({"image": image, "network": True})
+    try:
+        # A page with a real, addressable button (so the AX tree exposes it).
+        await session.send({"op": "open", "url": "data:text/html,"
+                            "<title>T</title><button>Place order</button>"})
+
+        # axtree: the real CDP getFullAXTree shape the harness normalises.
+        ax = await session.send({"op": "axtree"})
+        assert isinstance(ax.get("axtree"), list) and ax["axtree"]
+        roles = [n.get("role", {}).get("value") for n in ax["axtree"] if isinstance(n, dict)]
+        assert "button" in roles                         # the button is in the real AX tree
+
+        # locate: the real bounding box of the button + the current cursor.
+        loc = await session.send({"op": "locate",
+                                  "locator": {"role": "button", "name": "Place order"}})
+        assert isinstance(loc.get("bounds"), list) and len(loc["bounds"]) == 4
+        assert loc["bounds"][2] > 0 and loc["bounds"][3] > 0   # a real, non-zero box
+        assert loc.get("cursor") == [0.0, 0.0]                 # initial cursor
+
+        # pointer: stream trusted moves + a click; the cursor updates to the dest.
+        x = loc["bounds"][0] + loc["bounds"][2] / 2
+        y = loc["bounds"][1] + loc["bounds"][3] / 2
+        ptr = await session.send({"op": "pointer", "click": True,
+                                  "samples": [{"x": x, "y": y, "dt": 0.0}]})
+        assert ptr.get("dispatched") == 1 and ptr.get("clicked") is True
+        assert ptr["cursor"] == [x, y]                         # the next locate sees it
+
+        loc2 = await session.send({"op": "locate",
+                                   "locator": {"role": "button", "name": "Place order"}})
+        assert loc2["cursor"] == [x, y]                        # cursor really moved
+
+        # screenshot: a real, decodable PNG.
+        shot = await session.send({"op": "screenshot"})
+        png = base64.b64decode(shot["screenshot_b64"])
+        assert png[:8] == b"\x89PNG\r\n\x1a\n" and shot["mime"] == "image/png"
+    finally:
+        await session.close()
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(
+    not os.environ.get("ZU_BROWSER_LIVE"),
+    reason="launches real Chromium + CDP; set ZU_BROWSER_LIVE=1. Proves the END-TO-END "
+    "PRODUCTION cross-tool path against REAL Chromium: a run's shared live session lives "
+    "in the module registry, and the REAL PointerControl (NO injected backend/session) "
+    "ATTACHES to it and clicks a real button by an OPAQUE HANDLE the harness resolves "
+    "from the shared handle_map — the model never supplies a selector.",
+)
+async def test_real_pointer_attaches_to_run_session_and_clicks_by_handle_live() -> None:
+    # The cross-tool sharing seam is the module registry (a per-tool backend shares
+    # NOTHING). We open one real session, register it as the run's shared session and
+    # populate the run's handle_map exactly as action_surface(op=open) does — then drive
+    # the REAL PointerControl with NO injection: it must ATTACH via the registry and
+    # resolve the opaque handle harness-side. (A data: URL is used at the CONTAINER
+    # boundary — the tool's SSRF guard only allows http/https, so the session, not the
+    # tool, opens the test page; the cross-tool REGISTRY path is what this proves live.)
+    from zu_tools import _session
+    from zu_tools.pointer import PointerControl
+
+    image = os.environ.get("ZU_RENDER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
+    run = "live-run-share"
+
+    class _Ctx:
+        spec = type("S", (), {"task_id": run})()
+
+    backend = LocalDockerBackend()
+    with _session._LOCK:
+        _session._RUNS.pop(run, None)
+    session = await backend.open_run_session({"image": image, "network": True}, run_key=run)
+    try:
+        await session.send({"op": "open", "url": "data:text/html,"
+                           "<title>T</title><button>Place order</button>"})
+        # Register the shared session + handle_map the way action_surface would.
+        with _session._LOCK:
+            _session._RUNS[run] = _session._RunEntry(handle=session)
+        _session.put_handle_map(run, {"a1": {"role": "button", "name": "Place order"}})
+
+        # The REAL pointer, no injection: ATTACH + resolve the opaque handle harness-side.
+        out = await PointerControl(seed="live")(_Ctx(), op="move_click", handle="a1")
+        assert out["pointer"]["clicked"] is True
+        assert out["pointer"]["samples"] > 0
+        assert "stale_handle" not in out  # it found and clicked the real button
+    finally:
+        await _session.close_run(run)  # authoritative run-end teardown
+    assert run not in _session._RUNS   # no leak
+
+
+# --- run-scoped session sharing (§4/§5): one live session across tools in a run ---
+
+
+class _FakeInner:
+    """A stand-in for a real _BrowserSession: records sends and a single close, so
+    the run-scoped wrapper's refcount/teardown is provable with no Docker."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.closed = 0
+
+    async def send(self, cmd: dict) -> dict:
+        self.sent.append(cmd)
+        return {"ok": True}
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+def _backend_with_fake_opens() -> tuple[LocalDockerBackend, list[_FakeInner]]:
+    """A backend whose open_session yields fresh fake inners (one per real lease) —
+    so we can assert reuse leases NO new inner and teardown closes exactly once."""
+    backend = LocalDockerBackend()
+    made: list[_FakeInner] = []
+
+    async def _fake_open_session(spec: dict) -> _FakeInner:
+        inner = _FakeInner()
+        made.append(inner)
+        return inner
+
+    backend.open_session = _fake_open_session  # type: ignore[method-assign,assignment]
+    return backend, made
+
+
+def test_spec_target_keys_on_pinned_hosts() -> None:
+    assert _spec_target({"extra_hosts": {"shop.test": "1.2.3.4"}}) == "shop.test"
+    assert _spec_target({}) == ""           # no pin -> reused for any same-image open
+
+
+async def test_open_run_session_reuses_same_wrapper_within_a_run() -> None:
+    backend, made = _backend_with_fake_opens()
+    spec = {"image": "img", "extra_hosts": {"shop.test": "1.2.3.4"}}
+    s1 = await backend.open_run_session(spec, run_key="run-1")
+    s2 = await backend.open_run_session(spec, run_key="run-1")   # same target+run -> REUSE
+    assert s1 is s2
+    assert len(made) == 1 and s1.refcount == 2                   # one real lease, two holders
+
+
+async def test_pointer_with_no_target_attaches_to_the_open_page() -> None:
+    backend, made = _backend_with_fake_opens()
+    # The Action Surface opened a pinned-target session...
+    surf = await backend.open_run_session(
+        {"image": "img", "extra_hosts": {"shop.test": "1.2.3.4"}}, run_key="run-1")
+    # ...the pointer opens with NO target pin and gets the SAME live wrapper.
+    ptr = await backend.open_run_session({"image": "img"}, run_key="run-1")
+    assert ptr is surf and len(made) == 1 and surf.refcount == 2
+
+
+async def test_last_release_tears_down_only_once() -> None:
+    backend, made = _backend_with_fake_opens()
+    spec = {"image": "img", "extra_hosts": {"shop.test": "1.2.3.4"}}
+    s = await backend.open_run_session(spec, run_key="run-1")
+    await backend.open_run_session(spec, run_key="run-1")        # refcount 2
+    await s.close()                                              # release one -> still live
+    assert made[0].closed == 0 and "run-1" in backend._sessions
+    await s.close()                                              # last release -> teardown
+    assert made[0].closed == 1 and "run-1" not in backend._sessions
+
+
+async def test_reopen_to_different_target_leases_a_fresh_container() -> None:
+    backend, made = _backend_with_fake_opens()
+    s1 = await backend.open_run_session(
+        {"image": "img", "extra_hosts": {"a.test": "1.1.1.1"}}, run_key="run-1")
+    s2 = await backend.open_run_session(
+        {"image": "img", "extra_hosts": {"b.test": "2.2.2.2"}}, run_key="run-1")
+    assert s1 is not s2                                          # a new page -> a new lease
+    assert made[0].closed == 1                                   # the old one torn down
+    assert backend._sessions["run-1"] is s2
+
+
+async def test_aclose_run_force_closes_a_lingering_session() -> None:
+    backend, made = _backend_with_fake_opens()
+    await backend.open_run_session(
+        {"image": "img", "extra_hosts": {"shop.test": "1.2.3.4"}}, run_key="run-1")
+    await backend.open_run_session(
+        {"image": "img", "extra_hosts": {"shop.test": "1.2.3.4"}}, run_key="run-1")  # refcount 2
+    await backend.aclose_run("run-1")                           # run end: force teardown
+    assert made[0].closed == 1 and "run-1" not in backend._sessions
+    await backend.aclose_run("run-1")                           # idempotent no-op
+    assert made[0].closed == 1

@@ -43,6 +43,7 @@ INTERFACE_VERSION: dict[str, int] = {
     "workload_identity": 1,  # WorkloadIdentity — attestable identity (ZU-NET-4)
     "egress_enforcement": 1,  # EgressEnforcement — pluggable default-deny (ZU-NET-1)
     "replay_arbiters": 1,  # ReplayArbiter — replay-divergence decision (ZU-RAIL-3)
+    "monitors": 1,  # Monitor — stateful history-aware automaton over the log (ZU-RAIL-5)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -286,6 +287,45 @@ class Validator(Protocol):
     name: str
 
     def check(self, result: Result, ctx: RunContext) -> Verdict | None: ...
+
+
+# --- the stateful, history-aware Monitor (§1.7 deterministic rail) ---------
+#
+# A ``Detector`` judges a SINGLE observation/turn/final (``Scope``). A ``Monitor``
+# is its stateful generalisation: it folds the WHOLE event history via
+# ``ctx.events`` (the read-only ``_EventsView``) and returns the current state of
+# a deterministic automaton over that stream — the temporal-property checker a
+# Detector cannot be. It is PURE: a function of the event history, no model, no
+# I/O (the deterministic machinery DISPOSES). That purity keeps it LTL-compilable
+# later — an LTL→Monitor compiler emits an object satisfying THIS SAME shape with
+# no caller change.
+#
+# The verdict vocabulary is deliberately policy-NEUTRAL (OK/WARN/VIOLATION), kept
+# separate from ``Severity``: the Monitor→Severity bridge lives in the loop, not
+# in the port, so the automaton stays a pure property and the runtime owns the
+# escalation semantics (VIOLATION→TERMINAL, WARN→record-and-continue in v1).
+# ``evaluate`` returns ``None`` when inert (mirrors ``Detector.inspect``).
+
+
+class MonitorState(str, Enum):
+    OK = "ok"
+    WARN = "warn"
+    VIOLATION = "violation"
+
+
+class MonitorVerdict(BaseModel):
+    monitor: str
+    state: MonitorState
+    detail: str | None = None
+    # The ctx.events index the verdict was decided at (the folded step); optional.
+    step: int | None = None
+
+
+@runtime_checkable
+class Monitor(Protocol):
+    name: str
+
+    def evaluate(self, ctx: RunContext) -> MonitorVerdict | None: ...
 
 
 # --- the pre-execution gate (ZU-CORE-2) ----------------------------------

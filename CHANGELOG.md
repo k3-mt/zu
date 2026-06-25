@@ -7,6 +7,157 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — §4/§5 cross-tool session sharing + the opaque-handle invariant (adversarial-review follow-up)
+An adversarial review found that the §4/§5 cross-tool wiring was non-functional in
+production and the §11.3 confused-deputy invariant was inverted — both masked by test
+fakes that injected ONE backend/session into BOTH tools. Root cause: the loop
+instantiates each discovered Tool class with NO arguments, so `ActionSurface`,
+`PointerControl` and `VisionCapture` each built their OWN `LocalDockerBackend` with a
+private `_sessions` dict — putting the run-scoped registry on a per-tool-instance
+backend shared nothing.
+
+- **Shared, module-level run registry** (`packages/zu-tools/src/zu_tools/_session.py`):
+  the cross-tool lookup now lives in a process-wide registry keyed by
+  `run_key = str(ctx.spec.task_id)` (RunContext carries only the string key; the live
+  handle + handle_map live here, never on RunContext — a socket must never be
+  serialised across resume). Helpers: `get_or_open(run_key, opener)` (open once, reuse),
+  `attach(run_key)` (pure read — pointer/vision find the run's open page),
+  `put_handle_map`/`resolve_handle` (the harness-side handle→{role,name} map), and
+  `close_run(run_key)` (authoritative teardown). ALL browser-family tools
+  (`action_surface`, `browser`, `pointer`, `vision`) now reach THIS registry, not a
+  per-tool `backend._sessions`. The backend still actually opens the live session;
+  the registry is the shared lookup. Fixes CRITICAL #1 (pointer/vision failing with
+  "needs an open browser session" on every real run).
+- **Handle-only model surface** (`pointer.py`): removed the model-facing `locator`
+  parameter from the pointer schema. The model sends ONLY an opaque `handle`;
+  `PointerControl` resolves it to `{role, name}` via the shared handle_map
+  (`resolve_handle`) HARNESS-SIDE and sends THAT to the container `locate` op. A handle
+  not in the map is a `stale_handle` escalation — never a model-supplied selector
+  fallback. Fixes CRITICAL #2 (the §11.3 indirection was inverted — the model was
+  expected to emit the role+name selector itself).
+- **handle_map stays harness-side** (`action_surface.py`): `_emit` no longer returns
+  `handle_map` in the model-visible observation (it leaked through `_shrink_for_model`,
+  which only shapes large CONTENT fields). It is stored in the shared registry via
+  `put_handle_map` and on the instance for the offline reduce-only path; the
+  model-visible obs carries only the affordance list + `surface_blind`. Fixes the
+  MEDIUM leak.
+- **Run-end teardown wired** (`packages/zu-core/src/zu_core/runlifecycle.py`, new):
+  a GENERIC run-lifecycle seam — a plugin registers a run-end cleanup hook
+  (`register_run_cleanup`), and `run_task` invokes the registered hooks once at every
+  TRUE run end (terminal/escalate/success/crash — never a human pause) via a thin
+  `try/finally` wrapper delegating to the renamed `_run_task` body (no re-indent of the
+  ~310-line body, no scattered-return edits). zu-core imports nothing but pydantic; the
+  hook contract is one generic string (the run key), never a live handle. zu-tools
+  registers `close_run`. Replaces the previously-DEFERRED `aclose_run` wiring and the
+  container-idle-timeout backstop with an authoritative release. Fixes the HIGH leak.
+- **LOW (container)** (`images/render-chromium/_browser_session.py`): `_ensure_page`
+  now re-navigates a HELD page when re-opened to a DIFFERENT url (a run that reuses one
+  shared session must land on the requested page), and clears captured network. Cursor
+  remains authoritative across pointer ops only — the selector-based `act` op leaves it
+  unchanged by design (no reliable post-action coordinate); documented here. The
+  container ops are otherwise unchanged; re-navigation needs the rebuilt image to prove
+  live (the primary cross-tool live test does not depend on it).
+- **Tests now exercise the PRODUCTION wiring** — no injected shared backend, no session
+  injected into BOTH tools: `test_pointer.py::test_action_surface_open_then_pointer_attaches_same_run_no_shared_backend`
+  (a: same-run attach; b: handle-only harness-side resolution, with the fake `locate`
+  REQUIRING a resolved locator like the real container; c: no handle_map/selector in the
+  model obs; d: `close_run` drops the entry — no leak), plus
+  `test_vision.py::test_capture_attaches_to_the_run_scoped_session_no_injection` and the
+  handle-only/stale-handle pointer cases. These fail against the pre-fix code (verified
+  by defect injection) and pass after. A `conftest.py` resets the module registry per
+  test.
+
+### Added — §4/§5: the LIVE in-browser arm of the Action Surface and pointer
+The pure halves of the Action Surface (§11) and pointer (§12) shipped earlier; this
+finishes their LIVE execution arm against real Chromium.
+
+- **Container ops** (`images/render-chromium/_browser_session.py`): four new
+  `handle_command` ops over the persistent `zu-browser` session —
+  - `axtree` — enables the CDP Accessibility domain and returns the raw
+    `Accessibility.getFullAXTree` nodes verbatim (the harness owns normalisation),
+    plus the page title/url; opens a page first when given a url and none is held.
+  - `locate` — resolves a `{role, name}` locator to on-screen `bounds` via Playwright
+    `get_by_role(...).bounding_box()`, plus the tracked `cursor`; a miss is an error
+    the tool surfaces as `stale_handle`, never a crash.
+  - `pointer` — streams the harness-computed samples as TRUSTED input via
+    `page.mouse` (isTrusted=true, §5.2; Playwright owns the button-state machine),
+    honouring per-sample `dt`, then `down`/`up` on `click`; updates `cursor`.
+  - `screenshot` — a base64 PNG of the held page (the JSON-line protocol is UTF-8;
+    binary must be base64) — the tier-4 capture source.
+  Proof: `images/render-chromium/test_browser_session.py` (fake page, no Chromium).
+- **Run-scoped session sharing** (`packages/zu-backends/src/zu_backends/local_docker.py`):
+  a `_RunScopedSession` refcount wrapper + `LocalDockerBackend.open_run_session(spec,
+  *, run_key)` / `aclose_run(run_key)` + a `_sessions` registry, so one tool opens a
+  browser and another (the pointer, vision) ATTACHES to the SAME live page within a
+  run — keyed by `trace_id`. `open_session` is untouched (open-close-per-call is just
+  refcount 1→0). `ActionSurface`/`Browser` lease via `open_run_session`; the pointer
+  and vision ATTACH via `zu_tools._session.attach_shared` and never lease a fresh,
+  page-less browser. Proof: `packages/zu-backends/tests/test_local_docker.py` (refcount
+  reuse/teardown) + `packages/zu-tools/tests/test_pointer.py::test_pointer_attaches_to_the_run_scoped_session_no_injection`.
+- **Tier-4 vision tool** `vision` (`packages/zu-tools/src/zu_tools/vision.py`,
+  `VisionCapture`, `tier=4`): a THIN screenshot-capture tool that reuses the
+  run-scoped page the a11y surface was blind on and returns a
+  `zu_core.content.Image` a VLM policy reads via `Observation.parts('image')`. It
+  captures pixels only — no element detection (that is the vision MODEL, §6/Phase 3).
+  The `action-surface-blind` ESCALATE now lands on a real tier-4 rung in the loop's
+  ladder. Registered under `[project.entry-points."zu.tools"]`. Proof:
+  `packages/zu-tools/tests/test_vision.py`.
+- **Perception/action audit events** (`packages/zu-core/src/zu_core/events.py`):
+  `data.surface.captured` (§4.5 — the surface shown to the policy: counts + handle
+  list + blind flag; role+name locators stay harness-side) and
+  `data.pointer.dispatched` (§5.4 — the trajectory summary). Both added to
+  `DATA_TYPES`. Emitted from the loop's tool-return path keyed on observation SHAPE
+  (`_perception_action_events`), tool-agnostic like `data.source.fetched`. Proof:
+  `packages/zu-core/tests/test_loop.py::test_surface_and_pointer_land_on_the_audit_log`.
+
+No conformance family is forced this phase: the audit (surface-recording) and ZU-CD
+(handle-indirection) properties are real but either deferrable as a follow-up row or
+already held by the pre-built pure halves; the event constants + offline assertions
+deliver their substance now.
+
+> NOTE (superseded): the cross-tool sharing originally went through
+> `zu_tools._session.attach_shared(backend, ctx)` reading `backend._sessions`, and
+> the run-end `aclose_run` wiring was DEFERRED. The **Fixed** section above supersedes
+> both: sharing now goes through the module-level run registry (a per-tool backend
+> shares nothing), and run-end teardown is wired via the generic `runlifecycle` seam.
+
+### Added — ZU-RAIL-5: a stateful, history-aware Monitor over the event stream
+The `Monitor` port (`zu_core.ports.Monitor`, `MonitorState`, `MonitorVerdict`) is
+the stateful generalisation of a `Detector`: it folds the WHOLE event history via
+`ctx.events` and returns a policy-neutral `OK`/`WARN`/`VIOLATION`. A new
+`zu.monitors` registry kind + `_monitor_checkpoint` (in
+`packages/zu-core/src/zu_core/loop.py`) run it beside the detector checkpoints; the
+`_MONITOR_SEVERITY` bridge maps a `VIOLATION` to a `TERMINAL` `Verdict` routed
+through the existing halting/`_escalate` path (a `WARN` is recorded-and-continued).
+Pure — no model, no I/O — and LTL-compilable later with no caller change. New event
+`harness.monitor.fired`. Inert by default (empty monitor list ⇒ byte-identical event
+sequence). Proof: `packages/zu-core/tests/test_monitor.py::test_monitor_violation_escalates_to_terminal`.
+
+### Added — ZU-RAIL-6: invariants declared as DATA compile down to a Monitor
+New module `packages/zu-core/src/zu_core/invariants.py` — `Invariant`/`Predicate`
+(a tagged union by `kind`: budget caps, domain allowlists, required-field presence;
+pre/post/throughout) carried as DATA an `agent.yaml` declares, with
+`compile_invariant`/`compile_spec` bridging a declared invariant into a `Monitor`
+detected over the log. Pure evaluators; LTL-forward-compatible (callers unchanged).
+Proof: `packages/zu-core/tests/test_invariants.py::test_compiled_invariant_escalates_in_loop`.
+
+### Added — ZU-RAIL-7: a pure reachability checker over an induced FSM
+New module `packages/zu-core/src/zu_core/reachability.py` — a NEW branching
+`Fsm`/`FsmEdge` (not the linear `Track`), with `co_reachable` (backward fixpoint
+from the accepting states), `trap_states`, and `check_reachability` returning a
+`ReachabilityVerdict` (`reachable_goal`/`traps`/`unreachable_from_initial`). Pure
+stdlib + pydantic, loop-agnostic, $0. Proof:
+`packages/zu-core/tests/test_reachability.py::test_trap_state_detected`.
+
+### Added — ZU-RAIL-8: restore-to-last-known-good rollback
+`last_known_good` + `_rebuild_to` + `rollback_and_replan` + `run.mark_checkpoint`
+(in `packages/zu-core/src/zu_core/loop.py`) re-seat a run at a prior LKG event by
+folding ONLY the good prefix of the log (dropping the failed tail) for a DIFFERENT
+on-rail re-plan — building on the existing `_rebuild_run_state`/`_resume_from_log`
+event-sourcing and preserving consume-once, distinct from forward-resume-from-pause.
+New events `harness.checkpoint.marked`, `harness.run.rolled_back`. Proof:
+`packages/zu-core/tests/test_rollback.py::test_rollback_restores_state_and_replans`.
+
 ## [0.2.4] — 2026-06-24
 
 ### Fixed — ZU-NET-5: the attestation measurement is now signed (#26)

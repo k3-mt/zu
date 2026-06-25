@@ -128,8 +128,12 @@ async def test_tool_reduce_op_with_nodes() -> None:
                      title="Checkout — Acme", url="/cart")
     assert out["surface_blind"] is False
     assert len(out["action_surface"]["affordances"]) == 5
-    # the handle map is held on the instance and echoed
-    assert out["handle_map"]["a3"]["name"] == "Place order"
+    # the handle map is HARNESS-SIDE and must NOT leak into the model-visible obs
+    assert "handle_map" not in out
+    assert "handle_map" not in out["action_surface"]
+    # nor any raw locator/selector for an affordance the model sees
+    for aff in out["action_surface"]["affordances"]:
+        assert "role" in aff and "name" not in aff  # role is shown; the {role,name} locator is not
 
 
 async def test_tool_resolve_and_stale_handle() -> None:
@@ -172,11 +176,49 @@ async def test_tool_open_op_captures_and_reduces_live_tree() -> None:
     ]
     backend = _FakeAxBackend(cdp)
     tool = ActionSurface(backend=backend, allow_private=True)
-    out = await tool(None, op="open", url="http://shop.test/")
+    out = await tool(_AxCtx("run-open"), op="open", url="http://shop.test/")
     assert [a["label"] for a in out["action_surface"]["affordances"]] == ["Buy", "Home"]
     assert out["action_surface"]["url"] == "http://shop.test/"
-    await tool.aclose()
+    assert "handle_map" not in out  # harness-side only
+    # The AUTHORITATIVE run-end teardown closes the shared session (not the tool's
+    # aclose, which only drops its reference).
+    from zu_tools._session import close_run
+    await close_run("run-open")
     assert backend.sessions[0].closed
+
+
+class _RunScopedAxBackend:
+    """A fake backend exposing open_run_session (the run-scoped lease) so the Action
+    Surface's shared-session path is exercised: a ctx with a task_id routes through
+    open_run_session keyed by it, the cross-tool sharing seam."""
+
+    def __init__(self, axtree: list[dict]) -> None:
+        self._axtree = axtree
+        self.run_keys: list[str] = []
+        self._sessions: dict = {}
+
+    async def open_session(self, spec: dict) -> _FakeAxSession:
+        return _FakeAxSession(self._axtree)
+
+    async def open_run_session(self, spec: dict, *, run_key: str) -> _FakeAxSession:
+        self.run_keys.append(run_key)
+        s = _FakeAxSession(self._axtree)
+        self._sessions[run_key] = s
+        return s
+
+
+class _AxCtx:
+    def __init__(self, task_id: str) -> None:
+        self.spec = type("S", (), {"task_id": task_id})()
+
+
+async def test_open_op_uses_run_scoped_session_when_ctx_has_a_task_id() -> None:
+    cdp = [{"role": {"value": "button"}, "name": {"value": "Buy"}, "ignored": False}]
+    backend = _RunScopedAxBackend(cdp)
+    tool = ActionSurface(backend=backend, allow_private=True)
+    out = await tool(_AxCtx("run-7"), op="open", url="http://shop.test/")
+    assert [a["label"] for a in out["action_surface"]["affordances"]] == ["Buy"]
+    assert backend.run_keys == ["run-7"]            # leased under the run key for sharing
 
 
 def test_blind_detector_escalates_on_blind_surface() -> None:

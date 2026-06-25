@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle, SessionBackend
 
+from ._session import close_run, get_or_open, run_key
 from .net import validate_and_pin
 
 _DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
@@ -108,14 +109,20 @@ class Browser:
         if op == "open":
             if not url:
                 return {"error": "op=open requires a url"}
-            await self._close_session()  # one session at a time; replace any prior
             # Same SSRF backstop + DNS pin as render_dom, before leasing a browser.
             pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
             spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
             host = urlsplit(url).hostname
             if pinned_ip is not None and host:
                 spec["extra_hosts"] = {host: pinned_ip}
-            self._session = await self._resolve_backend().open_session(spec)
+            # Open via the SHARED run-scoped registry: the run's session is shared with
+            # action_surface/pointer/vision. A reused same-host session re-navigates via
+            # the open command's url (the container honours it).
+            key = run_key(ctx)
+            backend = self._resolve_backend()
+            self._session = await get_or_open(
+                key, lambda: self._open_session(backend, spec, key)
+            )
             cmd: dict[str, Any] = {"op": "open", "url": url}
             if wait_until:
                 cmd["wait_until"] = wait_until
@@ -140,10 +147,22 @@ class Browser:
             return self._normalise(await self._session.send(cmd))
 
         if op == "close":
-            await self._close_session()
+            # The model explicitly closed the page: tear down the run's SHARED session
+            # authoritatively (the registry owns the live container), and drop our ref.
+            self._session = None
+            await close_run(run_key(ctx))
             return {"closed": True}
 
         return {"error": f"unknown op {op!r}; use open/act/read/close"}
+
+    @staticmethod
+    async def _open_session(backend: SessionBackend, spec: dict, key: str) -> Any:
+        """Lease the live session the run shares (refcounted ``open_run_session`` when
+        the backend has it, else the one-shot ``open_session``)."""
+        opener = getattr(backend, "open_run_session", None)
+        if key and callable(opener):
+            return await opener(spec, run_key=key)
+        return await backend.open_session(spec)
 
     @staticmethod
     def _normalise(obs: Any) -> dict:
@@ -159,14 +178,9 @@ class Browser:
                 out[k] = obs[k]
         return out
 
-    async def _close_session(self) -> None:
-        if self._session is not None:
-            session, self._session = self._session, None
-            try:
-                await session.close()
-            except Exception:  # noqa: BLE001 - teardown must not raise over a result
-                pass
-
     async def aclose(self) -> None:
-        """Close a lingering session — for run teardown so a container never leaks."""
-        await self._close_session()
+        """Drop this instance's reference to the shared session. The AUTHORITATIVE
+        run-end teardown is the shared registry's ``close_run`` (wired into the loop's
+        run-end lifecycle), so the container is released exactly once — this tool must
+        not close it out from under another tool that shares the same run page."""
+        self._session = None

@@ -2130,7 +2130,7 @@ wheels = [
 
 [[package]]
 name = "zu-backends"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/zu-backends" }
 dependencies = [
     { name = "zu-core" },
@@ -2203,7 +2203,7 @@ provides-extras = ["serve", "mcp", "test"]
 
 [[package]]
 name = "zu-core"
-version = "0.2.4"
+version = "0.2.7"
 source = { editable = "packages/zu-core" }
 dependencies = [
     { name = "pydantic" },
@@ -2279,7 +2279,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-runtime"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/zu" }
 dependencies = [
     { name = "zu-backends" },
@@ -2371,7 +2371,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-tools"
-version = "0.2.4"
+version = "0.2.6"
 source = { editable = "packages/zu-tools" }
 dependencies = [
     { name = "httpx" },

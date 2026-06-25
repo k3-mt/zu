@@ -44,6 +44,8 @@ from .ports import (
     Finish,
     ModelProvider,
     ModelRequest,
+    MonitorState,
+    MonitorVerdict,
     ReplayDecision,
     RunContext,
     Scope,
@@ -53,6 +55,7 @@ from .ports import (
     declared_envelope,
 )
 from .registry import REGISTRY, Registry
+from .runlifecycle import close_run as _run_cleanup
 from .security import SecurityBlock, _needs_containment, enforce_containment
 from .track import MAX_REPLAY_WAIT_MS, Track, TrackStep, replay_extra_delay_ms
 
@@ -65,6 +68,16 @@ _RANK = {
     Severity.ESCALATE: 2,
     Severity.DENY: 3,
     Severity.TERMINAL: 4,
+}
+
+# The Monitor→Severity bridge (ZU-RAIL-5). The Monitor port speaks a policy-neutral
+# vocabulary (OK/WARN/VIOLATION); the runtime owns what that MEANS for the loop:
+# a VIOLATION halts the run (TERMINAL), a WARN is recorded and the run continues.
+# Kept in the loop (not the port) so the automaton stays a pure property and the
+# escalation semantics live with the interpreter that owns them.
+_MONITOR_SEVERITY: dict[MonitorState, Severity] = {
+    MonitorState.WARN: Severity.WARN,
+    MonitorState.VIOLATION: Severity.TERMINAL,
 }
 
 # How many consecutive SOFT misses (no-op actions) the replay navigator tolerates
@@ -219,6 +232,44 @@ def _summarize_observation(obs: dict) -> dict:
         if isinstance(obs.get(k), str):
             summary[f"{k}_len"] = len(obs[k])
     return summary
+
+
+def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
+    """Map a tool observation's SHAPE to the perception/action data events (§4.5 /
+    §5.4) — tool-agnostic, the same way ``_CONTENT_KEYS`` drives data.source.fetched.
+
+    * an ``action_surface`` key → ``data.surface.captured``: the EXACT surface shown
+      to the policy (counts + handle list + blind flag), so a reviewer can
+      reconstruct what the agent could perceive/do here. The role+name locators stay
+      harness-side (never on the log); the handle list is the auditable record.
+    * a ``pointer`` key → ``data.pointer.dispatched``: the trajectory summary (the
+      full per-sample path rides in the tool observation for replay).
+    """
+    out: list[tuple[str, dict]] = []
+    surface = obs.get("action_surface")
+    if isinstance(surface, dict):
+        affordances = surface.get("affordances") or []
+        out.append((ev.SURFACE_CAPTURED, {
+            "url": surface.get("url", ""),
+            "title": surface.get("title", ""),
+            "affordances": len(affordances) if isinstance(affordances, list) else 0,
+            "handles": [a.get("handle") for a in affordances if isinstance(a, dict)]
+            if isinstance(affordances, list) else [],
+            "context": len(surface.get("context") or []),
+            "blind": bool(obs.get("surface_blind", surface.get("blind", False))),
+            "blind_reason": surface.get("blind_reason"),
+        }))
+    pointer = obs.get("pointer")
+    if isinstance(pointer, dict):
+        out.append((ev.POINTER_DISPATCHED, {
+            "handle": pointer.get("handle"),
+            "clicked": bool(pointer.get("clicked", False)),
+            "samples": pointer.get("samples", 0),
+            "duration_ms": pointer.get("duration_ms", 0.0),
+            "dest": pointer.get("dest", {}),
+            "seed": str(pointer.get("seed", "")),
+        }))
+    return out
 
 
 # Map-reduce extraction over a too-big page. A blunt cap keeps the first N chars
@@ -398,6 +449,22 @@ def _safe_inspect(detector: Any, ctx: RunContext) -> Verdict | None:
         log.warning(
             "detector %r raised %s: %s — skipping it",
             getattr(detector, "name", detector), type(exc).__name__, exc,
+        )
+        return None
+
+
+def _safe_evaluate(monitor: Any, ctx: RunContext) -> MonitorVerdict | None:
+    """Run a Monitor in isolation (ZU-RAIL-5): a raising third-party monitor is
+    logged and skipped, never allowed to crash the run — the same isolation
+    ``_safe_inspect`` gives detectors. A Monitor is pure, but a buggy one must not
+    halt the loop."""
+    try:
+        verdict: MonitorVerdict | None = monitor.evaluate(ctx)
+        return verdict
+    except Exception as exc:  # noqa: BLE001 - a broken monitor must not halt the run
+        log.warning(
+            "monitor %r raised %s: %s — skipping it",
+            getattr(monitor, "name", monitor), type(exc).__name__, exc,
         )
         return None
 
@@ -614,6 +681,15 @@ class _Run:
             await self.emit(
                 ev.EXECUTION_CLAIMED, {"key": key}, parent=parent or self.root
             )
+
+    async def mark_checkpoint(self, label: str) -> UUID:
+        """Mark a last-known-good (LKG) rollback point (ZU-RAIL-8). Emits
+        ``harness.checkpoint.marked`` {"label", "step"} parented to run.root; the
+        ``step`` is the current log length, so ``last_known_good`` can locate the
+        marker. Returns the marker event's id (the restore target)."""
+        return await self.emit(
+            ev.CHECKPOINT_MARKED, {"label": label, "step": len(self.events)}, parent=self.root
+        )
 
     async def terminal(self, reason: str) -> Result:
         await self.emit(ev.TASK_TERMINAL, {"reason": reason}, parent=self.root)
@@ -849,6 +925,59 @@ async def run_task(
     ledger: Any = None,
     resume_from: Sequence[Event] | None = None,
     approved_rail_hash: str | None = None,
+    _rollback: Any = None,
+) -> Result:
+    """Drive one task to a Result, then fire run-end cleanup at TRUE run end.
+
+    A thin wrapper over :func:`_run_task` whose only job is the run-end lifecycle:
+    in a ``finally`` it invokes the registered run-cleanup hooks
+    (:func:`zu_core.runlifecycle.close_run`) so a plugin's run-scoped resources (e.g.
+    a shared browser container) are released exactly once when the run ENDS —
+    terminal/escalate/success, or a crash — but NOT on a human pause, which suspends
+    the run for resume and must keep its run-scoped state alive. The cleanup contract
+    is one generic string (the run key, ``str(spec.task_id)``) — never a live handle —
+    so zu-core stays SDK-free and the seam is inert until a plugin registers a hook."""
+    result: Result | None = None
+    try:
+        result = await _run_task(
+            spec, provider, registry, bus,
+            providers=providers, containment=containment, trace_id=trace_id,
+            max_observation_chars=max_observation_chars,
+            observation_strategy=observation_strategy, max_context_chars=max_context_chars,
+            track=track, replay_budget=replay_budget, finish_provider=finish_provider,
+            replay_jitter_median_ms=replay_jitter_median_ms, grants=grants, ledger=ledger,
+            resume_from=resume_from, approved_rail_hash=approved_rail_hash, _rollback=_rollback,
+        )
+        return result
+    finally:
+        # A human pause SUSPENDS the run (it resumes later) — keep its run-scoped
+        # state. Any other outcome (incl. an exception, where ``result`` is None)
+        # is a true run end: release run-scoped resources exactly once.
+        if result is None or result.status is not Status.PAUSED:
+            await _run_cleanup(str(spec.task_id))
+
+
+async def _run_task(
+    spec: TaskSpec,
+    provider: ModelProvider,
+    registry: Registry | None = None,
+    bus: EventBus | None = None,
+    *,
+    providers: Mapping[int, ModelProvider] | None = None,
+    containment: str = "audit",
+    trace_id: UUID | None = None,
+    max_observation_chars: int | None = None,
+    observation_strategy: str = "truncate",
+    max_context_chars: int | None = None,
+    track: Track | None = None,
+    replay_budget: Budget | None = None,
+    finish_provider: ModelProvider | None = None,
+    replay_jitter_median_ms: int = 0,
+    grants: Any = None,
+    ledger: Any = None,
+    resume_from: Sequence[Event] | None = None,
+    approved_rail_hash: str | None = None,
+    _rollback: Any = None,
 ) -> Result:
     """Drive one task to a Result against the given provider and registry.
 
@@ -910,6 +1039,9 @@ async def run_task(
     # existing challenge/soft-miss → hand-to-model behaviour is unchanged.
     arbiters = [_materialize(registry.get("replay_arbiters", n))
                 for n in registry.names("replay_arbiters")]
+    # The stateful, history-aware monitors (ZU-RAIL-5). Empty by default ⇒ the
+    # monitor checkpoint short-circuits and the event sequence is unchanged.
+    monitors = [_materialize(registry.get("monitors", n)) for n in registry.names("monitors")]
 
     # Fail-closed containment floor: refuse before anything runs if a tool needs a
     # sandbox we're not inside. Raised (not a Result) — a misconfigured posture is
@@ -922,7 +1054,15 @@ async def run_task(
     start = time.monotonic()
     tokens = 0
 
-    if resume_from is None:
+    if _rollback is not None:
+        # --- restore-to-last-known-good rollback (ZU-RAIL-8) -----------------
+        # Re-seat the spine from the GOOD PREFIX of a prior log (dropping the failed
+        # tail), then RE-ENTER THE MODEL LOOP from a fresh turn so the model picks a
+        # DIFFERENT path — distinct from the forward-resume branch below, which
+        # executes the one pending approved invocation and moves forward past a pause.
+        tokens = await _seed_from_rollback(run, ladder, _rollback)
+        messages = _initial_messages(spec, ladder.active().values())
+    elif resume_from is None:
         run.root = await run.emit(
             ev.TASK_STARTED,
             {"query": spec.query, "target": spec.target, "tainted": run.tainted, "mode": run.mode},
@@ -1116,6 +1256,11 @@ async def run_task(
                 )
                 dispatched += 1
                 halting = await _detector_checkpoint(run, turn, detectors, obs, {Scope.PER_OBSERVATION})
+                if halting is None:
+                    # The history-aware monitors fold the WHOLE log so far (ZU-RAIL-5),
+                    # right beside the per-observation detector checkpoint; a VIOLATION
+                    # joins the SAME halting handling below as a TERMINAL Verdict.
+                    halting = await _monitor_checkpoint(run, turn, monitors, obs)
                 if halting is not None:
                     break  # stop dispatching this turn's remaining calls; act on it
             # A detector that halted mid-turn left the rest of THIS turn's tool
@@ -1131,6 +1276,11 @@ async def run_task(
                 )
             if halting is None:
                 halting = await _detector_checkpoint(run, turn, detectors, None, {Scope.PER_TURN})
+            if halting is None:
+                # A per-turn monitor pass: even a turn with no tool calls (or one whose
+                # per-observation passes were clean) is folded once, so a temporal
+                # property over the turn boundary is checked.
+                halting = await _monitor_checkpoint(run, turn, monitors, None)
             if halting is not None:
                 if halting.severity == Severity.TERMINAL:
                     return await run.terminal(halting.detector)
@@ -1385,6 +1535,13 @@ async def _invoke(
         returned = _summarize_observation(obs)
     else:
         returned = obs
+    # Record perception/action on the audit log (§4.5 / §5.4): the action surface
+    # the policy was shown, and each pointer trajectory it produced. Keyed on the
+    # observation's SHAPE (an ``action_surface``/``pointer`` key), so the loop stays
+    # tool-agnostic — exactly like data.source.fetched above.
+    if isinstance(obs, dict):
+        for etype, payload in _perception_action_events(obs):
+            await run.emit(etype, payload, parent=turn, source=name)
     await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": returned}, parent=turn, source=name)
     return obs
 
@@ -1417,6 +1574,41 @@ async def _detector_checkpoint(
             source=verdict.detector,
         )
         verdicts.append(verdict)
+    worst = _worst(verdicts)
+    if worst is not None and worst.severity in (Severity.ESCALATE, Severity.TERMINAL):
+        return worst
+    return None
+
+
+async def _monitor_checkpoint(
+    run: _Run, turn: UUID, monitors: list, observation: Any
+) -> Verdict | None:
+    """Fold every registered Monitor over the run's event history (ZU-RAIL-5),
+    emit ``harness.monitor.fired`` for each non-OK verdict, and return the worst
+    halting Verdict for the caller to act on — a VIOLATION maps (via
+    ``_MONITOR_SEVERITY``) to a TERMINAL Verdict routed through the SAME halting
+    path detectors use; a WARN is recorded and the run continues.
+
+    Short-circuits on an empty monitor list BEFORE touching ``run.ctx`` or the
+    log, so a run with no registered monitor is byte-identical to the baseline —
+    the seam is inert until used, exactly like gates/arbiters.
+    """
+    if not monitors:
+        return None
+    ctx = run.ctx(observation)
+    verdicts: list[Verdict] = []
+    for m in monitors:
+        mv = _safe_evaluate(m, ctx)
+        if mv is None or mv.state == MonitorState.OK:
+            continue
+        await run.emit(
+            ev.MONITOR_FIRED,
+            {"monitor": mv.monitor, "state": mv.state.value, "detail": mv.detail, "step": mv.step},
+            parent=turn,
+            source=mv.monitor,
+        )
+        severity = _MONITOR_SEVERITY[mv.state]
+        verdicts.append(Verdict(severity=severity, detector=mv.monitor, detail=mv.detail))
     worst = _worst(verdicts)
     if worst is not None and worst.severity in (Severity.ESCALATE, Severity.TERMINAL):
         return worst
@@ -1600,6 +1792,132 @@ def _rebuild_run_state(events: Sequence[Event]) -> dict:
         "pending": pending,
         "resolution": resolution,
     }
+
+
+# --- restore-to-last-known-good rollback (ZU-RAIL-8) ----------------------
+#
+# Builds on the EXISTING event-sourcing (``_rebuild_run_state``): it does NOT
+# invent a parallel snapshot mechanism. The distinction from forward-resume is
+# load-bearing — ``_resume_from_log`` keeps the WHOLE log and executes the one
+# pending human-approved invocation (it moves FORWARD past a pause); rollback folds
+# only the GOOD PREFIX (dropping the failed tail) and executes NOTHING pinned,
+# handing control back to the model to choose a DIFFERENT path (it moves BACKWARD
+# to a known-good fork point). RETRY severity only re-prompts in place and does not
+# roll back state; this primitive is the missing piece it complements.
+
+
+class _RollbackSeed:
+    """Carries a rollback request from ``rollback_and_replan`` into ``run_task``'s
+    spine-seeding branch: the prior log and the resolved LKG event to fold to."""
+
+    __slots__ = ("prior", "lkg")
+
+    def __init__(self, prior: Sequence[Event], lkg: UUID) -> None:
+        self.prior = prior
+        self.lkg = lkg
+
+
+async def _seed_from_rollback(run: _Run, ladder: _Ladder, seed: _RollbackSeed) -> int:
+    """Re-seat ``run`` at the LKG by folding ONLY the good prefix (ZU-RAIL-8), emit
+    ``harness.run.rolled_back`` with the dropped-tail count, and return the rebuilt
+    token count. Mirrors ``_resume_from_log``'s spine restore (root/tier/tokens/
+    taint/dispatch-counter/grant load/claim load) but over the truncated prefix —
+    so the failed tail is dropped and consume-once claims from the good prefix are
+    preserved."""
+    idx = _index_of(seed.prior, seed.lkg)
+    dropped = len(seed.prior) - (idx + 1)
+    state = _rebuild_to(seed.prior, seed.lkg)
+    run.root = state["root"]
+    ladder.current = max(ladder.current, int(state["tier"]))
+    run.tainted = bool(state["tainted"])
+    run._ctx.tainted = run.tainted
+    run._call_seq = int(state["call_seq"])
+    loader = getattr(run.grant_state, "load", None)
+    if loader is not None:
+        for grant_id, key, value in state["grant_updates"]:
+            loader(grant_id, key, value)
+    claim_loader = getattr(run.exec_ledger, "load", None)
+    if claim_loader is not None:
+        for ckey in state["execution_claims"]:
+            claim_loader(ckey)
+    await run.emit(ev.RUN_ROLLED_BACK, {"to": str(seed.lkg), "dropped": dropped}, parent=run.root)
+    return int(state["tokens"])
+
+
+def last_known_good(events: Sequence[Event]) -> UUID | None:
+    """The event_id of the most recent last-known-good (LKG) marker (ZU-RAIL-8).
+
+    Prefers the latest explicit ``harness.checkpoint.marked``; falling back to the
+    latest successfully-returned step (the last ``harness.tool.returned`` with no
+    later halting verdict) when none was explicitly marked. Returns ``None`` when
+    there is no good point to restore to.
+    """
+    last_marker: UUID | None = None
+    last_returned: UUID | None = None
+    halted_after_returned = False
+    for e in events:
+        if e.type == ev.CHECKPOINT_MARKED:
+            last_marker = e.event_id
+        elif e.type == ev.TOOL_RETURNED:
+            last_returned = e.event_id
+            halted_after_returned = False
+        elif e.type in (ev.TASK_TERMINAL, ev.DETECTOR_FIRED, ev.MONITOR_FIRED):
+            halted_after_returned = True
+    if last_marker is not None:
+        return last_marker
+    if last_returned is not None and not halted_after_returned:
+        return last_returned
+    return last_returned  # the last good return even if a halt followed (the LKG)
+
+
+def _index_of(events: Sequence[Event], event_id: UUID) -> int:
+    for i, e in enumerate(events):
+        if e.event_id == event_id:
+            return i
+    raise KeyError(f"event {event_id} not found in the prior log")
+
+
+def _rebuild_to(events: Sequence[Event], lkg_id: UUID) -> dict:
+    """Fold ONLY the good prefix of the log up to and including the LKG event
+    (ZU-RAIL-8). Reuses ``_rebuild_run_state`` over ``events[: index+1]`` — so
+    tier/tokens/taint/grant-counters/claimed-set come from the GOOD prefix ONLY and
+    the failed tail is dropped. Distinct from ``_rebuild_run_state`` over the full
+    log, which would re-seat the failed tail."""
+    idx = _index_of(events, lkg_id)
+    return _rebuild_run_state(events[: idx + 1])
+
+
+async def rollback_and_replan(
+    spec: TaskSpec,
+    provider: ModelProvider,
+    *,
+    prior: Sequence[Event],
+    to: UUID | None = None,
+    registry: Registry | None = None,
+    bus: EventBus | None = None,
+    grants: Any = None,
+    ledger: Any = None,
+    trace_id: UUID | None = None,
+    max_observation_chars: int | None = None,
+    observation_strategy: str = "truncate",
+) -> Result:
+    """Re-seat a run at a prior last-known-good event for a DIFFERENT on-rail retry
+    (ZU-RAIL-8), then re-enter the model loop so the model picks a new path.
+
+    Rebuilds state to ``to`` (or ``last_known_good(prior)`` when ``None``), emits
+    ``harness.run.rolled_back`` {"to", "dropped"}, re-seats the run spine exactly
+    as ``_resume_from_log`` does (root/tier/tokens/taint/dispatch-counter/grant
+    load/claim load) from the GOOD PREFIX only, and runs the model loop from a fresh
+    turn. Consume-once is preserved: claimed keys from the good prefix are re-loaded
+    so an already-executed irreversible side effect is NOT re-run, while the dropped
+    failed tail's claims are gone.
+    """
+    lkg = to if to is not None else last_known_good(prior)
+    return await run_task(
+        spec, provider, registry, bus, grants=grants, ledger=ledger, trace_id=trace_id,
+        max_observation_chars=max_observation_chars, observation_strategy=observation_strategy,
+        _rollback=_RollbackSeed(prior=prior, lkg=lkg) if lkg is not None else None,
+    )
 
 
 async def _resume_from_log(

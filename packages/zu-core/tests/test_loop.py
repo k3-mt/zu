@@ -256,6 +256,77 @@ async def test_loop_fetch_then_finalise() -> None:
     ]
 
 
+class _FakeSurfaceTool:
+    """Returns an action_surface observation shape (the live arm's output) so the
+    loop's perception-event mapping (§4.5) is exercised with no browser."""
+
+    name = "action_surface"
+    tier = 1  # tier 1 so the scripted run can call it without climbing
+    schema = {"name": "action_surface", "parameters": {"type": "object", "properties": {}}}
+
+    async def __call__(self, ctx, **kwargs) -> dict:
+        return {
+            "action_surface": {
+                "title": "Checkout", "url": "https://shop.test/cart",
+                "affordances": [
+                    {"handle": "a1", "role": "button", "label": "Place order"},
+                    {"handle": "a2", "role": "link", "label": "Continue shopping"},
+                ],
+                "context": ["Checkout — Acme"],
+                "blind": False, "blind_reason": None,
+            },
+            "handle_map": {"a1": {"role": "button", "name": "Place order"}},
+            "surface_blind": False,
+        }
+
+
+class _FakePointerTool:
+    name = "pointer"
+    tier = 1
+    schema = {"name": "pointer", "parameters": {"type": "object", "properties": {}}}
+
+    async def __call__(self, ctx, **kwargs) -> dict:
+        return {
+            "pointer": {"handle": "a1", "clicked": True, "samples": 42,
+                        "duration_ms": 311.4, "dest": {"x": 460.1, "y": 327.8}, "seed": "run-1"},
+            "samples": [{"x": 1.0, "y": 2.0, "dt": 16.0, "t": 16.0}],
+        }
+
+
+async def test_surface_and_pointer_land_on_the_audit_log() -> None:
+    # §4.5 / §5.4: the surface shown to the policy and each pointer trajectory are
+    # recorded as data.* events, keyed on the observation SHAPE (tool-agnostic).
+    reg = Registry()
+    reg.register("tools", "action_surface", _FakeSurfaceTool())
+    reg.register("tools", "pointer", _FakePointerTool())
+    provider = ScriptedProvider.from_moves(
+        [
+            {"tool": "action_surface", "args": {"op": "open", "url": "https://shop.test/cart"}},
+            {"tool": "pointer", "args": {"handle": "a1"}},
+            {"text": '{"done": true}', "finish": "stop"},
+        ]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="click place order"), provider, reg, bus)
+    assert result.status == Status.SUCCESS
+
+    events = await bus.query()
+    surface = next(e for e in events if e.type == "data.surface.captured")
+    assert surface.payload["url"] == "https://shop.test/cart"
+    assert surface.payload["affordances"] == 2
+    assert surface.payload["handles"] == ["a1", "a2"]      # the auditable affordance handles
+    assert surface.payload["context"] == 1
+    assert surface.payload["blind"] is False
+    # no role+name locator leaks into the model-facing audit payload (handles only)
+    assert "handle_map" not in surface.payload
+
+    pointer = next(e for e in events if e.type == "data.pointer.dispatched")
+    assert pointer.payload["handle"] == "a1" and pointer.payload["clicked"] is True
+    assert pointer.payload["samples"] == 42
+    assert pointer.payload["dest"] == {"x": 460.1, "y": 327.8}
+    assert pointer.payload["seed"] == "run-1"
+
+
 async def test_loop_is_deterministic() -> None:
     def make():
         return ScriptedProvider.from_moves(

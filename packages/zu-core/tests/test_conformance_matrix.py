@@ -42,6 +42,10 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-RAIL-2": ("packages/zu-core/tests/test_rail.py", "test_explore_mode_disarms_capability_bearing_call"),
     "ZU-RAIL-3": ("packages/zu-core/tests/test_rail.py", "test_arbiter_escalates_high_step_to_human"),
     "ZU-RAIL-4": ("packages/zu-core/tests/test_rail.py", "test_annotations_reach_the_replayed_tool_invoked_ctx"),
+    "ZU-RAIL-5": ("packages/zu-core/tests/test_monitor.py", "test_monitor_violation_escalates_to_terminal"),
+    "ZU-RAIL-6": ("packages/zu-core/tests/test_invariants.py", "test_compiled_invariant_escalates_in_loop"),
+    "ZU-RAIL-7": ("packages/zu-core/tests/test_reachability.py", "test_trap_state_detected"),
+    "ZU-RAIL-8": ("packages/zu-core/tests/test_rollback.py", "test_rollback_restores_state_and_replans"),
 }
 
 
