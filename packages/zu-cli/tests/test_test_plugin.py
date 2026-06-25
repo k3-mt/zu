@@ -18,10 +18,23 @@ def test_unknown_package_exits_2() -> None:
 
 
 def test_resolves_a_real_packages_plugins() -> None:
-    # zu-checks ships both built-in detectors and validators.
+    # zu-checks ships both built-in detectors and validators, incl. the human-routing
+    # captcha / human_gate detectors added with the HITL surface.
     plugins, _notes = main._resolve_package_plugins("zu-checks")
     names = {n for _k, n, _o in plugins}
     assert {"empty", "error", "js-shell", "bot-wall", "schema", "grounding"} <= names
+    assert {"captcha", "human-gate"} <= names
+
+
+def test_resolves_the_patterns_group() -> None:
+    # Regression: the gate's discovery derives from the canonical registry.GROUPS, so a
+    # newer plugin group (zu.patterns) is gateable — not a stale hardcoded subset that
+    # silently makes zu-patterns invisible to `zu test-plugin`.
+    plugins, _notes = main._resolve_package_plugins("zu-patterns")
+    kinds = {k for k, _n, _o in plugins}
+    names = {n for _k, n, _o in plugins}
+    assert kinds == {"patterns"}
+    assert {"login_form", "search_box", "cookie_banner"} <= names
 
 
 def test_passes_a_safe_plugin(monkeypatch) -> None:

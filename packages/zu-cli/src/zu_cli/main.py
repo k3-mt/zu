@@ -1339,10 +1339,15 @@ def _resolve_package_plugins(package: str) -> tuple[list[tuple[str, str, object]
     skipped with a note — the gate stands up what it can instantiate no-arg."""
     from importlib.metadata import PackageNotFoundError, distribution
 
-    groups = {
-        "zu.providers": "providers", "zu.tools": "tools", "zu.detectors": "detectors",
-        "zu.validators": "validators", "zu.backends": "backends", "zu.sinks": "sinks",
-    }
+    from zu_core.registry import GROUPS
+
+    # The plugin kinds the gate's contract/interop/adversarial stages know how to
+    # stand up (mirror zu_redteam.contract's handled kinds). Derived from the
+    # canonical GROUPS so a newly registered group (e.g. zu.patterns) is gated the
+    # moment the contract supports its kind — never a stale hardcoded subset.
+    _gateable = {"providers", "tools", "detectors", "validators", "backends",
+                 "sinks", "patterns"}
+    groups = {GROUPS[k]: k for k in _gateable if k in GROUPS}
     try:
         dist = distribution(package)
     except PackageNotFoundError:

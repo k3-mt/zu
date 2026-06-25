@@ -7,6 +7,18 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — plugin-gate discovery omitted newer groups (zu-cli 0.2.6 → 0.2.7)
+`zu test-plugin` discovered plugins via a stale hardcoded group list
+(providers/tools/detectors/validators/backends/sinks), so the `zu.patterns` (and
+`zu.monitors`) groups were invisible — `zu test-plugin zu-patterns` reported "no Zu
+plugins found". `_resolve_package_plugins` now derives its gateable groups from the
+canonical `zu_core.registry.GROUPS`, filtered to the kinds the contract gate supports,
+so a newly registered group is gated the moment its kind is contract-supported.
+Verified: zu-patterns, zu-checks (incl. the new captcha/human_gate detectors), and
+zu-tools all pass the unit · contract · interop · adversarial gate (the container/
+production form needs the published `zu-redteam` image + proxy sidecar — CI infra).
+Regression: `test_test_plugin.py::test_resolves_the_patterns_group`.
+
 ### Fixed / Hardened — cleanup batch (zu-core 0.2.11 → 0.2.12, zu-huggingface 0.2.5 → 0.2.6)
 A pass of five small, well-scoped fixes from the review backlog; each ships with an
 offline, deterministic ($0) proof and keeps the bar green.
