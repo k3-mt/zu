@@ -287,7 +287,14 @@ class EstimateDepth(_HfTool):
         image = _decode_media(data_b64, path)
         _ = Image(data=image)
         out = self._c().depth_estimation(image, self.model)
-        return {"depth_png_b64": out["depth_png_b64"], "model": self.model}
+        result = {"depth_png_b64": out["depth_png_b64"], "model": self.model}
+        # Raw per-pixel depth magnitudes, when the backend exposes them: the PNG is a
+        # min/max-normalised visualisation (lossy for absolute distance), so surface
+        # the raw grid + min/max so a consumer can recover real distances.
+        for key in ("depth", "depth_min", "depth_max"):
+            if key in out:
+                result[key] = out[key]
+        return result
 
 
 class AskDocument(_HfTool):

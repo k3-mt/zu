@@ -1,6 +1,6 @@
 [project]
 name = "zu-huggingface"
-version = "0.2.5"
+version = "0.2.6"
 description = "Zu HuggingFace adapter: task models as typed tools/detectors/validators, behind the supply-chain guards"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -161,6 +161,42 @@ async def test_rollback_preserves_consume_once() -> None:
     assert ledger.claim("tail-only-B") is True
 
 
+async def test_rollback_honors_per_tier_provider() -> None:
+    # The good prefix climbed to tier 2; the rollback re-seats the run at that tier.
+    # A per-tier ``providers`` override for tier 2 must drive the re-plan — proving
+    # the same model-loop kwargs a normal run_task accepts are threaded through.
+    tier2_tool = Echo()
+    tier2_tool.tier = 2
+    reg = Registry()
+    reg.register("tools", "echo", tier2_tool)
+
+    start = _started()
+    climb = _ev(ev.TASK_ESCALATED, {"from_tier": 1, "to_tier": 2})
+    marker = _ev(ev.CHECKPOINT_MARKED, {"label": "g", "step": 2})
+    prior = [
+        start,
+        climb,
+        _ev(ev.TOOL_INVOKED, {"tool": "echo"}),
+        marker,
+        _ev(ev.TASK_TERMINAL, {"reason": "boom"}),
+    ]
+
+    # The GLOBAL provider would refuse to call the tool (asserts if used); only the
+    # per-tier (tier-2) provider drives the replan, so its move must be the one taken.
+    global_provider = ScriptedProvider.from_moves([{"text": "should-not-run", "finish": "stop"}])
+    tier2_provider = ScriptedProvider.from_moves(
+        [{"tool": "echo", "args": {"replan": 7}}, {"text": '{"ok": true}', "finish": "stop"}]
+    )
+    bus = EventBus()
+    result = await rollback_and_replan(
+        TaskSpec(query="q", max_tier=2), global_provider, prior=prior, to=marker.event_id,
+        registry=reg, bus=bus, providers={2: tier2_provider}, trace_id=_TRACE,
+    )
+    assert result.status == Status.SUCCESS
+    # The tier-2 provider's move executed — the per-tier override was honored.
+    assert tier2_tool.calls == [{"replan": 7}]
+
+
 async def test_rollback_differs_from_forward_resume() -> None:
     # The same prior log: the full fold (forward-resume basis) sees the failed-tail
     # tier climb; the rollback fold (good prefix only) does not.

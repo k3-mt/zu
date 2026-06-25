@@ -116,10 +116,61 @@ def _segments(raw: Any) -> list[dict]:
     return out
 
 
-def _depth_to_b64(depth: Any) -> dict:
-    """A depth-estimation result as ``{"depth_png_b64": <str>}`` — the depth map
-    serialised as a base64 PNG so the observation is compact and JSON-safe."""
-    return {"depth_png_b64": _pil_to_png_b64(depth)}
+def _to_nested_floats(raw: Any) -> list | None:
+    """A raw depth tensor/ndarray (torch/numpy) or nested sequence → a 2-D nested
+    list of floats, JSON-safe. Returns None when there is nothing recoverable. The
+    visualisation PNG is min/max-normalised (0–255), so it loses absolute distance;
+    this preserves the RAW per-pixel magnitudes so a consumer can recover them."""
+    if raw is None:
+        return None
+    arr = raw
+    # torch tensor → numpy (detach if it carries grad); numpy stays as-is.
+    if hasattr(arr, "detach"):
+        arr = arr.detach()
+    if hasattr(arr, "cpu"):
+        arr = arr.cpu()
+    if hasattr(arr, "numpy"):
+        try:
+            arr = arr.numpy()
+        except Exception:  # noqa: BLE001 - fall through to the generic tolist() path
+            pass
+    if hasattr(arr, "squeeze"):
+        try:
+            arr = arr.squeeze()
+        except Exception:  # noqa: BLE001 - some sequences lack squeeze; ignore
+            pass
+    if hasattr(arr, "tolist"):
+        arr = arr.tolist()
+    if not isinstance(arr, list):
+        return None
+    # Collapse a leading singleton batch/channel dim (e.g. [[ [row…], … ]]).
+    while len(arr) == 1 and arr and isinstance(arr[0], list):
+        arr = arr[0]
+    if not arr or not isinstance(arr[0], list):
+        return None
+    return [[float(v) for v in row] for row in arr]
+
+
+def _depth_magnitudes(raw: Any) -> dict:
+    """Summarise raw depth magnitudes into a JSON-safe block: ``min``/``max`` and the
+    full per-pixel ``depth`` grid (2-D nested floats). Empty ``{}`` when no raw depth
+    is available (a backend that only returns the visualisation) — additive, so the
+    existing ``depth_png_b64`` shape is never broken."""
+    grid = _to_nested_floats(raw)
+    if grid is None:
+        return {}
+    flat = [v for row in grid for v in row]
+    if not flat:
+        return {}
+    return {"depth": grid, "depth_min": min(flat), "depth_max": max(flat)}
+
+
+def _depth_to_b64(depth: Any, raw: Any = None) -> dict:
+    """A depth-estimation result: ``{"depth_png_b64": <str>}`` (the normalised
+    visualisation) PLUS, when the backend exposes them, the RAW per-pixel depth
+    magnitudes (``depth``/``depth_min``/``depth_max``) so a consumer needing real
+    distances can recover them — the PNG alone is min/max-normalised and lossy."""
+    return {"depth_png_b64": _pil_to_png_b64(depth), **_depth_magnitudes(raw)}
 
 
 def _qa_top(raw: Any) -> dict:
@@ -242,7 +293,9 @@ class InferenceClientBackend:
     def depth_estimation(self, image: bytes, model: str) -> dict:
         r = self._c().depth_estimation(image, model=model)
         depth = getattr(r, "depth", None) if not isinstance(r, dict) else r.get("depth")
-        return _depth_to_b64(depth)
+        raw = (r.get("predicted_depth") if isinstance(r, dict)
+               else getattr(r, "predicted_depth", None))
+        return _depth_to_b64(depth, raw)
 
     def document_question_answering(self, image: bytes, question: str, model: str) -> dict:
         return _qa_top(
@@ -366,7 +419,10 @@ class PipelineBackend:
 
     def depth_estimation(self, image: bytes, model: str) -> dict:
         r = self._pipe("depth-estimation", model)(image)
-        return _depth_to_b64(r["depth"] if isinstance(r, dict) else getattr(r, "depth", None))
+        depth = r["depth"] if isinstance(r, dict) else getattr(r, "depth", None)
+        raw = (r.get("predicted_depth") if isinstance(r, dict)
+               else getattr(r, "predicted_depth", None))
+        return _depth_to_b64(depth, raw)
 
     def document_question_answering(self, image: bytes, question: str, model: str) -> dict:
         return _qa_top(

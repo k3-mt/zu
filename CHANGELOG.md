@@ -7,6 +7,38 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed / Hardened — cleanup batch (zu-core 0.2.11 → 0.2.12, zu-huggingface 0.2.5 → 0.2.6)
+A pass of five small, well-scoped fixes from the review backlog; each ships with an
+offline, deterministic ($0) proof and keeps the bar green.
+
+- **`loop.last_known_good` dead flag removed** (`zu-core`): the `halted_after_returned`
+  flag was computed but both branches returned the same `last_returned`, so it was
+  dead. Removed with zero behaviour change (the LKG is still the last explicit
+  checkpoint, else the last successful return). `test_rollback.py` unchanged-green.
+- **`rollback_and_replan` threads the run_task model-loop kwargs** (`zu-core`):
+  per-tier `providers`, the `containment` floor, and `max_context_chars` now flow
+  through a rolled-back re-plan, so it supports the same options as a normal
+  `run_task`. The replay-navigator kwargs (`track`/`replay_budget`/`finish_provider`/
+  `replay_jitter_median_ms`) are deliberately NOT threaded and documented inline: a
+  rollback exists to pick a DIFFERENT path, so re-driving the recorded track would
+  re-walk the failed route. New proof: `test_rollback_honors_per_tier_provider`.
+- **Hosted VLM data-URL request shape now tested** (`zu-huggingface`): a new offline
+  test stubs the underlying `InferenceClient`, captures the `chat_completion`
+  messages, and asserts the user message carries the text part AND an `image_url`
+  whose url is a real `data:<mime>;base64,<…>` data-URL (the real router shape).
+- **HITL consume-once refusal proven at the API layer** (`zu-cli`, test-only): a new
+  offline `TestClient` proof reconstructs and re-resumes a resolved run the same way
+  the handoff path does and asserts the approved side effect executes EXACTLY ONCE —
+  the duplicate resume is refused by the consume-once ledger with a
+  `harness.defense.blocked` `duplicate_execution` on the log (ZU-CD-6), not merely a
+  queue 404.
+- **Depth tool surfaces raw magnitudes** (`zu-huggingface`): `EstimateDepth` (and the
+  `_depth_to_b64` normaliser) now include the raw per-pixel `depth` grid plus
+  `depth_min`/`depth_max` alongside the normalised `depth_png_b64` visualisation, so a
+  consumer needing real distances can recover them (the PNG alone is min/max-normalised
+  and lossy). Additive — the existing `depth_png_b64` shape is unchanged; the block is
+  empty when a backend exposes no raw depth.
+
 ### Added — §9 defence-in-depth worked threat model: the malicious-PDF phone-home chain, contained (zu-redteam 0.2.5 → 0.2.6)
 A worked threat model (RED_TEAM.md §9) proving the EXISTING containment does its
 job, frozen as a deterministic, offline ($0) regression the red team owns. It is

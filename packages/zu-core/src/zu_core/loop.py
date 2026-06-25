@@ -1880,19 +1880,13 @@ def last_known_good(events: Sequence[Event]) -> UUID | None:
     """
     last_marker: UUID | None = None
     last_returned: UUID | None = None
-    halted_after_returned = False
     for e in events:
         if e.type == ev.CHECKPOINT_MARKED:
             last_marker = e.event_id
         elif e.type == ev.TOOL_RETURNED:
             last_returned = e.event_id
-            halted_after_returned = False
-        elif e.type in (ev.TASK_TERMINAL, ev.DETECTOR_FIRED, ev.MONITOR_FIRED):
-            halted_after_returned = True
     if last_marker is not None:
         return last_marker
-    if last_returned is not None and not halted_after_returned:
-        return last_returned
     return last_returned  # the last good return even if a halt followed (the LKG)
 
 
@@ -1921,11 +1915,14 @@ async def rollback_and_replan(
     to: UUID | None = None,
     registry: Registry | None = None,
     bus: EventBus | None = None,
+    providers: Mapping[int, ModelProvider] | None = None,
+    containment: str = "audit",
     grants: Any = None,
     ledger: Any = None,
     trace_id: UUID | None = None,
     max_observation_chars: int | None = None,
     observation_strategy: str = "truncate",
+    max_context_chars: int | None = None,
 ) -> Result:
     """Re-seat a run at a prior last-known-good event for a DIFFERENT on-rail retry
     (ZU-RAIL-8), then re-enter the model loop so the model picks a new path.
@@ -1937,11 +1934,22 @@ async def rollback_and_replan(
     turn. Consume-once is preserved: claimed keys from the good prefix are re-loaded
     so an already-executed irreversible side effect is NOT re-run, while the dropped
     failed tail's claims are gone.
+
+    The same model-loop options a normal ``run_task`` supports are threaded through
+    the re-plan: per-tier ``providers`` (a tier climbed in the good prefix re-enters
+    on its bound provider), the ``containment`` floor, and the observation/context
+    bounds. The REPLAY-NAVIGATOR kwargs (``track``/``replay_budget``/
+    ``finish_provider``/``replay_jitter_median_ms``) are deliberately NOT threaded:
+    a rollback exists precisely so the model picks a DIFFERENT path, so re-driving
+    the recorded track would re-walk the failed route — they are mutually exclusive
+    with a re-plan and are left at their defaults (no replay).
     """
     lkg = to if to is not None else last_known_good(prior)
     return await run_task(
-        spec, provider, registry, bus, grants=grants, ledger=ledger, trace_id=trace_id,
+        spec, provider, registry, bus, providers=providers, containment=containment,
+        grants=grants, ledger=ledger, trace_id=trace_id,
         max_observation_chars=max_observation_chars, observation_strategy=observation_strategy,
+        max_context_chars=max_context_chars,
         _rollback=_RollbackSeed(prior=prior, lkg=lkg) if lkg is not None else None,
     )
 

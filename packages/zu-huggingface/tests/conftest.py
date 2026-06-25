@@ -60,7 +60,14 @@ class FakeHfClient:
 
     def depth_estimation(self, image: bytes, model: str) -> dict:
         self.calls.append(("depth_estimation", image, model))
-        return {"depth_png_b64": "ZGVwdGg="}
+        # The real backends surface raw per-pixel magnitudes alongside the PNG
+        # visualisation when the model exposes them; mirror that shape here.
+        return {
+            "depth_png_b64": "ZGVwdGg=",
+            "depth": [[1.0, 2.0], [3.0, 4.0]],
+            "depth_min": 1.0,
+            "depth_max": 4.0,
+        }
 
     def document_question_answering(self, image: bytes, question: str, model: str) -> dict:
         self.calls.append(("document_question_answering", image, question, model))

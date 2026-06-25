@@ -104,7 +104,12 @@ async def test_segment_image(fake_client) -> None:
 async def test_estimate_depth(fake_client) -> None:
     out = await EstimateDepth("Intel/dpt-large", client=fake_client)(None, data_b64=_B64)
     assert out["depth_png_b64"] == "ZGVwdGg="  # depth map is a base64 PNG string
-    assert "predicted_depth" not in out  # kept compact/JSON-safe
+    assert "predicted_depth" not in out  # the raw tensor name is never leaked
+    # Raw per-pixel magnitudes are surfaced so a consumer can recover real distances
+    # (the PNG alone is min/max-normalised and lossy).
+    assert out["depth"] == [[1.0, 2.0], [3.0, 4.0]]
+    assert out["depth_min"] == 1.0
+    assert out["depth_max"] == 4.0
     assert fake_client.calls[0][0] == "depth_estimation"
 
 

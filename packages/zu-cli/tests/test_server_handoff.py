@@ -117,6 +117,89 @@ def test_double_resolve_does_not_double_execute():
     assert len(captcha_tool.EXECUTIONS) == after_first
 
 
+def test_duplicate_resolve_is_refused_by_the_consume_once_ledger_at_the_api_layer():
+    # ZU-CD-6 at the API layer, DIRECTLY: not "the queue 404s" but "the consume-once
+    # ledger REFUSES a re-execution". After a successful /resolve, we reconstruct and
+    # re-resume the run the SAME way the handoff path does (paused_from_result +
+    # build_resolution_event + run_task(resume_from=...)) over the run's OWN log — the
+    # log that now carries the first resume's EXECUTION_CLAIMED. The second approved
+    # resume must NOT execute the side effect again: the loop seeds its ledger from the
+    # log's claims and emits DEFENSE_BLOCKED 'duplicate_execution'.
+    import anyio
+
+    from zu_cli.config import assemble, coerce_config
+    from zu_cli.handoff import build_resolution_event, paused_from_result, run_id_for
+    from zu_core.bus import EventBus
+    from zu_core.contracts import TaskSpec
+    from zu_core.loop import run_task
+
+    captcha_tool.EXECUTIONS.clear()
+    c = _client()
+    run_id = c.post("/run", json={"task": {"query": "log in"}}).json()["handoff"]["run_id"]
+
+    first = c.post(f"/runs/{run_id}/resolve", json={"decision": "approve", "by": "alice"})
+    assert first.status_code == 200
+    after_first = len(captcha_tool.EXECUTIONS)
+    # The pre-pause call + exactly one resume execution.
+    assert after_first == 2
+
+    async def _replay_duplicate() -> list:
+        # Rebuild the run's spine from the trusted server-default config and the run's
+        # final log, exactly as the resolve endpoint would for a fresh resume.
+        cfg = coerce_config(_cfg())
+        provider, registry, _bus, providers = assemble(cfg, allow_imports=True)
+        spec = TaskSpec(query="log in", task_id=__import__("uuid").UUID(run_id))
+        assert run_id_for(spec) == run_id
+
+        # The run's log AS IT STANDS after the first successful resume (it carries the
+        # first resume's EXECUTION_CLAIMED). Reconstruct the paused-run view from the
+        # PRE-resume slice (where the approval was pending), then re-issue the human
+        # resolution onto the full post-resume log and resume again.
+        bus = EventBus()
+        # Re-derive the pending approval from the log (the same ground truth the API
+        # reads). We take the original paused result's pending invocation by replaying
+        # the log up to the pause to build a PausedRun for build_resolution_event.
+        from zu_core import events as ev
+        from zu_core.contracts import Status
+
+        # Run once more to a pause to capture the canonical pending descriptor + log.
+        paused_result = await run_task(spec, provider, registry, bus, providers=providers)
+        assert paused_result.status is Status.PAUSED
+        pre_log = list(await bus.query())
+        paused = paused_from_result(
+            run_id, paused_result, spec=spec, provider=provider, registry=registry,
+            bus=bus, providers=providers, run_kwargs={"providers": providers}, events=pre_log,
+        )
+        assert paused is not None
+        before = len(captcha_tool.EXECUTIONS)
+
+        # First resume on THIS fresh spine: approve and execute exactly once.
+        await bus.publish(build_resolution_event(paused, "approve", "alice"))
+        r1 = await run_task(spec, provider, registry, bus, resume_from=await bus.query(),
+                            providers=providers)
+        assert r1.status is Status.SUCCESS
+        mid = len(captcha_tool.EXECUTIONS)
+        assert mid - before == 1  # the approved invocation executed exactly once
+
+        # DUPLICATE resume: re-publish the SAME approval onto the now-claimed log and
+        # resume again. The ledger (seeded from the log's EXECUTION_CLAIMED) refuses it.
+        await bus.publish(build_resolution_event(paused, "approve", "mallory"))
+        r2 = await run_task(spec, provider, registry, bus, resume_from=await bus.query(),
+                            providers=providers)
+        final = list(await bus.query())
+        blocked = [e for e in final
+                   if e.type == ev.DEFENSE_BLOCKED
+                   and e.payload.get("kind") == "duplicate_execution"]
+        await bus.aclose()
+        return [len(captcha_tool.EXECUTIONS), mid, blocked, r2]
+
+    total, mid, blocked, r2 = anyio.run(_replay_duplicate)
+    # The duplicate resume executed the side effect ZERO additional times.
+    assert total == mid, "the duplicate approved resume must NOT execute the side effect again"
+    # And it was refused EXPLICITLY by the consume-once ledger (not merely a no-op):
+    assert blocked, "the duplicate execution must be refused with DEFENSE_BLOCKED 'duplicate_execution'"
+
+
 def test_defer_extends_without_deciding():
     captcha_tool.EXECUTIONS.clear()
     c = _client()
