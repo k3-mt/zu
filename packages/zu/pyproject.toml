@@ -1,6 +1,6 @@
 [project]
 name = "zu-runtime"
-version = "0.2.4"
+version = "0.2.5"
 description = "An opinionated, backend-agnostic runtime for agents that work in production — deterministic, auditable, injection-resistant. Import as `zu`."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -23,9 +23,9 @@ keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", 
 # the Docker sandbox, MCP); every plugin is also installable standalone (pip install
 # zu-tools, …) so a plugin author can depend on just what they need (the ecosystem).
 dependencies = [
-    "zu-cli==0.2.4",
+    "zu-cli==0.2.6",
     "zu-providers==0.2.4",
-    "zu-checks==0.2.4",
+    "zu-checks==0.2.5",
     "zu-backends==0.2.4",
     "zu-tools==0.2.4",       # web tools — the common case, so it ships in the base
 ]

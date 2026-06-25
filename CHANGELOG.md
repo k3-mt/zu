@@ -7,6 +7,794 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the live executor + `zu shadow run`: the agent runs a recording itself and generalises (zu-shadow 0.1.10 → 0.1.11, zu-cli 0.2.7 → 0.2.8)
+`zu shadow run <recording> --url <url> [--set search=collars] [--model-base-url ...]` drives the
+recorded path on a real site in a Chrome you watch: it PERCEIVES the live affordances in-page
+(role+name, opaque data-zu-handle), re-resolves each demonstrated control, applies --set value
+overrides, asks the model (if configured) for a control the demo no longer matches, and STOPS
+at the commit boundary (payment is a §8 brokered capability, not auto-run). Validated headless
+end-to-end incl. generalisation: a muzzle recording re-run for collars searched "collars" and
+the model picked a collar product. Live drive behind zu-shadow[live]; the resolution logic is
+the unit-tested executor.
+
+### Added — the live executor: the agent uses a recording and GENERALISES it (zu-shadow 0.1.9 → 0.1.10)
+zu_shadow.executor.execute() drives the demonstrated path on a live BrowserSession, resolving
+each step three ways: EXACT (re-resolve a fixed-flow control like "Add to cart" by role+name),
+PARAM (type an override — "muzzles" → "collars", or the customer's own details), or MODEL (the
+demonstrated specific control is gone, so the model picks the best handle from the CURRENT
+affordances — generalising the choice; it emits a handle, never a selector). The commit
+boundary (a payment / place-order step) is never auto-crossed: it escalates (a real payment is
+a §8 brokered capability). The browser is injected (a fake at $0 in tests; live Playwright
+next). Proven: record a muzzle purchase, re-run for collars — the search value is overridden
+AND the model picks a collar product, while Add to cart / Check out re-resolve exactly.
+
+### Improved — synthesizer cleans the induced path; it slots into the §5 pathfinder (zu-shadow 0.1.8 → 0.1.9)
+The induced FSM now reads as clean GENERALISED steps: a focus-click immediately followed by a
+type on the same target collapses to the type, consecutive duplicate steps (a widget firing
+twice) collapse to one, and baked-in prices / option-dumps are stripped from target names
+(Von Wolf: 33 → 22 states, "Add to cart £46.00" → "Add to cart"). Proven that a recording
+slots into the §5 pathfinder: induce_fsm → fsm_from_shadow → a transition model the guided
+search plan() reaches the goal over (all states co-reachable, zero traps), and a second
+recording merges/grows it (apprenticeship). The recording IS the empirical forward model.
+
+### Improved — live capture resolves real element names + cuts network noise (zu-shadow 0.1.7 → 0.1.8)
+A real Von Wolf run exposed two capture-quality problems. Fixed both:
+- Element/name resolution: a clicked icon/path now climbs to the REAL control, and the
+  accessible name uses innerText (skipping <style>/<script> CSS soup), then value/placeholder/
+  title/alt, an inner icon label, and form context (an unlabeled submit in a search form is
+  "Search"). The search-button step that captured ".cls-1{fill:none;...}" now captures "Search".
+- Network noise: each egress host is recorded once, not on every request — a 458-event
+  recording with 414 tracker pings collapses to a handful, with the same egress signal.
+
+### Fixed — redact payment-card data at capture (zu-shadow 0.1.6 → 0.1.7)
+A real run revealed a card number captured in PLAINTEXT: the CVV/security-code field was
+blanked (it matched a credential hint) but the "Card number" / "Expiration date" fields were
+not, so the PAN sat in the recording. Card/expiry/CVC/IBAN/sort-code/account fields are now
+credential fields (blanked wholesale), and a Luhn-valid PAN in any free text is swept too
+(Luhn-gated so a random long id — e.g. a Shopify variant id — is not a false positive). The
+distinction held: card data is a SECRET (redacted; a real payment is brokered, §8) while
+name/address/phone are TASK PARAMETERS the agent fills (kept, parameterized via --scale).
+
+### Fixed — live capture must not crash when you close the window (zu-shadow 0.1.5 → 0.1.6)
+Closing the Chrome window (the recommended stop) killed the page mid `wait_for_timeout`, and
+Playwright raised a "target closed" error the loop only guarded against `KeyboardInterrupt` —
+so capture crashed and the recording was lost. The pump now treats a page/browser close (and
+any error on session exit) as the STOP signal: it breaks the loop and writes the recording it
+already has. Validated by killing Chrome mid-session — the recording is written, no crash.
+
+### Added — live capture: prompt on text fields + track scrolls (zu-core 0.2.14 → 0.2.15, zu-shadow 0.1.4 → 0.1.5)
+- The "why?" prompt now also fires when you click a TEXT FIELD (search/textbox/combobox),
+  not just buttons/links. A text field doesn't navigate, so its click isn't held — the box
+  appears, you answer, and focus is handed back so you can type. (Forks stay held.)
+- New `data.shadow.user.scroll` event: settled scrolls (debounced, direction up/down +
+  position) are captured as CONTEXT — recording that the human had to scroll to reach the
+  next affordance, without counting as an action step. Wired through capture/recorder and
+  the live binding; tested offline and validated headless (a search-bar click prompts; a
+  scroll down then up is recorded).
+
+### Added — the "why?" intent prompt in live capture (§2.4) (zu-shadow 0.1.2 → 0.1.3)
+`zu shadow capture` now captures INTENT, not just actions: at a decision fork (a click on
+a button/link/toggle/row) a small floating "why?" input appears at the cursor — Enter
+saves the reason onto that step's `intent`, Esc skips. It is selective (forks only, never
+every keystroke) so the first run stays frictionless, and the typed reason is redacted like
+everything else before it reaches the recording. This is what makes a recording GENERALIZE
+rather than merely replay — the synthesizer surfaces the whys for review and turns the
+conditional ones into rail invariants/detectors. The pure attachment (`_attach_intent`,
+`_payload_to_raw` carrying `intent`) is unit-tested offline; the headed prompt is exercised
+by hand. Validated end-to-end by a headless smoke test (a fork click → typed why → the
+intent lands on that click).
+
+### Added — `zu shadow capture`: author by clicking on a real webpage (zu-shadow 0.1.1 → 0.1.2)
+The live headed half of Shadow — the "do the job once" entrypoint. `zu shadow capture
+--url <page> --site <site>` launches a dedicated Chrome (its own profile; your normal
+Chrome is untouched), instruments it over CDP via Playwright (connected to your Chrome —
+no extra browser download, behind the `zu-shadow[live]` extra), and turns each of your
+clicks / typing / navigations into the SAME redacted `data.shadow.*` stream the offline
+recorder consumes. Capture is SEMANTIC — accessibility role + accessible name, never a
+selector or pixel coordinate — and a password field's value is dropped at source on top
+of the recorder's credential-field blanking. Stop with Ctrl-C (or `--seconds N`); it
+writes `recording.json`, ready for `zu shadow synthesize`. The pure translation
+(`_payload_to_raw`) is unit-tested offline; the headed drive is the manual entrypoint.
+
+### Tested — Shadow live-recorder CDP→RawInput translation (zu-shadow 0.1.0 → 0.1.1)
+The live recorder's pure translation (`ax_node_to_target` / `_cdp_to_raw`) — the contract
+that the live CDP binding produces the SAME abstract `RawInput` stream the offline recorder
+consumes, captured semantically ({role,name,label}, selectors/coordinates dropped) — was
+behind a `pragma: no cover` although it is pure dict→value logic. The stale pragma is
+removed and `test_live.py` pins the contract offline ($0); only `record_live` (real Chromium
++ a human) remains manual.
+
+### Fixed — §8 credential broker spend-accounting: the cap reflects only ACTUAL captures (zu-core 0.2.13 → 0.2.14)
+An adversarial review of the shipped broker found SPEND-ACCOUNTING bugs in
+`InMemoryCredentialBroker.use`. None weaken containment (secret/scope/TTL/revocation/
+audit-binding/high-consequence-to-human are unchanged); they correct how the
+cumulative cap is accounted, restructuring `use` around an **authorize→capture
+reconciliation** so the cumulative counter commits ONLY to real captures.
+
+- **Retry no longer double-counts the cap (FIX A).** `use` previously reserved the
+  cumulative spend via `incr_if_below` BEFORE calling the instrument, so a retried use
+  with the same `idempotency_key` — which the instrument correctly dedupes (no
+  re-charge) — still took a SECOND reservation AND emitted a SECOND
+  `harness.capability.used`. The broker now wraps a consume-once `ExecutionLedger`
+  (`zu_core.ledger`, REUSED — ZU-CD-6 style) keyed by `idempotency_key`: a replay
+  returns the PRIOR `UseOutcome` verbatim, takes NO new reservation, and emits NO
+  duplicate event. The first claim journals `harness.execution.claimed` so the dedupe
+  survives pause/resume. New optional `ledger=` constructor arg (defaults to
+  `InMemoryExecutionLedger`).
+- **A DECLINED charge consumes nothing and is not `ok` (FIX A).** The reservation is
+  now DEFERRED to AFTER the instrument returns: only a `status=="captured"` outcome
+  commits to the cumulative counter (atomic `incr_if_below`, unchanged race-proof
+  guard). A non-captured outcome (decline/reject) commits NOTHING, emits a contained
+  `harness.defense.blocked` (`kind="charge_declined"`) instead of a success
+  `harness.capability.used`, and returns `UseOutcome(ok=False, refused="declined",
+  detail=<reason>)`. The cap check stays FAIL-CLOSED: a read-only pre-check refuses a
+  use that WOULD exceed the cap BEFORE the instrument is charged. (Chosen over adding a
+  GrantStore decrement/release — reserve-on-capture with a fail-closed pre-check is the
+  lower-risk option: no new mutable release path to get wrong, and the atomic
+  `incr_if_below` after capture stays the real commit.) `FakeCardInstrument` gained a
+  decline path (`decline_payees`/`decline_amounts`) so this is provable offline.
+- **Consent PRESENCE is enforced, not just mismatch (FIX B).** `use` previously refused
+  only on a consent_ref MISMATCH, so a use with NO `consent_ref` still executed. A
+  grant now refuses a use with an absent `consent_ref` (`refused="no_consent"`,
+  `kind="consent_absent"`, logged). A grant may opt OUT explicitly via the new
+  `Grant.requires_consent: bool` (default **True** — consent REQUIRED).
+- **Structuring is caught by the velocity monitor (FIX C, confirmed).** The per-use
+  `requires_human_over` gate can be evaded by splitting one high-consequence spend into
+  many sub-threshold charges; the `SPEND_VELOCITY` monitor is the backstop. Confirmed
+  the predicate sums windowed `harness.capability.used` captures (3×400 over a 1000/
+  window cap → VIOLATION) — no predicate change needed. The per-use human threshold and
+  the velocity monitor TOGETHER cover high-consequence; neither alone does.
+- **Proofs (extend `test_credential_broker.py`).**
+  `test_retry_same_idempotency_key_does_not_double_count_the_cap`,
+  `test_declined_charge_does_not_consume_the_cap_and_is_not_ok`,
+  `test_use_without_consent_is_refused`,
+  `test_structuring_is_caught_by_the_velocity_monitor`. Each fails against the
+  pre-fix code and passes after. The existing ZU-CD-7/8/AUDIT-5 proofs now supply a
+  `consent_ref` (the contract is now presence-enforced) and stay green.
+
+### Added — §8 credential broker: the contained, scoped, revocable USE of an instrument (zu-core 0.2.12 → 0.2.13)
+"Capability acquisition is the HARNESS job, never the model." §8 generalises the
+existing inference-credential containment to ALL credentials/instruments (a card via
+an issuer, a vault/KMS, an inbox, an OAuth grant). The thesis: the INSTRUMENT exists
+or a third party issues it; Zu builds the CONTAINMENT — how the agent USES it without
+ever holding the secret, exceeding scope, overspending, or being hijacked. **Zu is
+the thing that makes it safe to hand the agent a wallet, NOT the wallet.** The
+reference instrument is FAKE; a real issuer is a FUTURE pluggable adapter.
+
+- **`CredentialBroker` + `Instrument` ports (`zu_core.ports`).** The ONE primitive: a
+  scoped, time-boxed, revocable, harness-held, fully-audited capability to USE an
+  instrument, where the policy only ever gets "a door already locked behind it",
+  NEVER the secret. The policy holds an opaque capability HANDLE (`Grant.id`) and
+  emits a typed `UseRequest`; it gets a `UseOutcome` (a charge id, never the PAN/
+  token). There is **no signature on the policy-facing side that can carry a secret**
+  — the boundary is mechanical, not asked-nicely. The `Instrument` is the pluggable
+  issuer/vault seam: it ALONE holds the secret and `perform`s the real op; the secret
+  never crosses back. New registry kind `credential_brokers` (`zu.credential_brokers`,
+  interface v1) + `@credential_broker` decorator, mirroring `monitors`/`patterns`.
+- **`Grant`/`Consent`/`CapScope` data model (pydantic; frozen).** A `Grant` carries
+  `instrument_ref`, `scope` (operations + payee allowlist + `requires_human_over`),
+  `per_use_limit`, `cumulative_limit` (+ key), `ttl_s`, the authorizing `consent`, and
+  `revoked`. `Grant.expired(now)` is a pure function of time.
+- **`InMemoryCredentialBroker` (`zu_core.broker`) — the reference enforcer over a FAKE
+  instrument.** Fail-closed: every refusal is logged (`harness.defense.blocked`) and
+  the instrument is touched ONLY on a full allow. Enforces scope → payee-allowlist →
+  TTL → consent-match → per-use → cumulative (atomic `incr_if_below`, REUSING the
+  `GrantStore` primitive that closes the TOCTOU race) → then the instrument op, the
+  ONE place the secret is used, harness-side. Emits `harness.capability.used` bound to
+  the grant + consent under `payload["ctx"]` (ZU-AUDIT-3 convention), plus
+  `harness.grant.issued`/`harness.grant.revoked`.
+- **`FakeCardInstrument`/`FakeVaultInstrument` (`zu_core.instruments`).** The in-memory
+  doubles (alongside `grants.py`/`ledger.py`). The card holds a private `_pan` and
+  charges a counter (idempotent on the ZU-CORE-4 key); the vault derives an HMAC token
+  from a private `_root_secret`. NO payment SDK, NO network, NO real secret.
+- **Wiring, reusing the shipped machinery.** HIGH-CONSEQUENCE → HUMAN: `BrokerGate`
+  (`zu_core.broker_gate`) maps a use over `scope.requires_human_over` (or a new payee)
+  — computed HARNESS-SIDE from the Grant + the literal call args, never policy
+  self-report — to `Verdict(kind="human")`, routing to the EXISTING `_pause_for_human`
+  (ZU-CD-1/2/5/6 unchanged): the large spend pauses BEFORE the instrument op, a human
+  approves, the broker use runs exactly once. SPEND-VELOCITY → MONITOR: a new
+  `PredicateKind.SPEND_VELOCITY` (`{window_s, limit}`) folds `harness.capability.used`
+  over a sliding window and compiles to a Monitor via the unchanged
+  `compile_invariant`, joining the existing VIOLATION→TERMINAL path (declared as DATA,
+  ZU-RAIL-6).
+- **Conformance (three-way synced + named offline proofs).** `ZU-CD-7` (secret never
+  in the policy context/log), `ZU-CD-8` (use refused if it exceeds
+  scope/limits/TTL/revocation) — the next integers in the FIXED `ZU-CD` family; and
+  `ZU-AUDIT-5` (every use on the hash-chained log bound to its consent) — the next in
+  `ZU-AUDIT`. Proofs in `test_credential_broker.py` (a ScriptedProvider policy + the
+  FAKE instrument), including an adversarial policy that tries to read the secret /
+  overspend / pay an off-allowlist payee and is CONTAINED. TCB updated.
+
+### Added — §9.5 non-executing PDF extract: read the doc, never run its JS (zu-tools 0.2.8 → 0.2.9)
+§9.5 (the worked threat model) prefers a NON-EXECUTING document path: "extract
+text/structure WITHOUT running embedded JS … do not give the attacker the primitive
+in the first place. Prevention above containment." Phase 7 deferred this for lack of
+a PDF library; pypdf is now available, so the tool exists.
+
+- **`pdf_extract` (tier 1, no egress) — a PURE PARSER, not a renderer.** It reads a
+  PDF's content streams + object graph with pypdf, which has NO JavaScript engine, so
+  a malicious doc's embedded JS is data we read, never code we run. Input is the PDF
+  as base64 (`pdf_b64`) or a local `path` — NO url fetch, so the tool does not egress
+  (`capabilities`/`egress` are both empty `frozenset()`). If a URL is needed, the agent
+  composes `http_fetch` (SSRF-guarded + egress-allowlisted) and passes the bytes here;
+  keeping `pdf_extract` egress-free is the least-privilege point.
+- **Output is typed `zu_core.content`** — the extracted `Text` plus structure: page
+  count, per-page text, document metadata (title/author), and the outline if present.
+- **The §9.5 safety signal, made testable.** The tool DETECTS and REPORTS active
+  content it deliberately did NOT execute — embedded JavaScript (`/JS`/`/JavaScript`,
+  the `/Names/JavaScript` tree, an `/OpenAction`/`/AA` that would run JS), and
+  launch/URI actions — surfacing `{"active_content": {"javascript": true,
+  "open_action": …, "launch": …, "uri": …, "names": [...], "executed": false}}`. The
+  agent and the audit log thus SEE that the doc carried active content AND that it was
+  not run. pypdf cannot run it; the tool only reports its presence.
+- **Wiring.** pypdf is an OPTIONAL extra (`zu-tools[pdf]`, `pypdf>=6`), lazy-imported
+  inside the call with a clear hint (`pdf_extract needs pypdf: pip install
+  'zu-tools[pdf]'`) so a base install still imports/discovers the tool. Registered as
+  `pdf_extract = "zu_tools.pdf:PdfExtract"`. pypdf is in the workspace dev group so the
+  offline suite installs and tests it.
+- **Tests (`test_pdf.py`, all offline/$0).** Fixture PDFs are built IN-TEST with
+  pypdf's writer — a 1-page doc with known text + an embedded JS action, and a benign
+  one. Asserts: text + page count extracted; `active_content.javascript == true` AND
+  `executed == false` (the JS was SEEN but NOT run); a benign PDF reports
+  `javascript == false`; the tool declares no `CAP_NET`/egress AND a full parse
+  succeeds with `socket.socket` poisoned to raise (nothing network touched).
+
+### Fixed — blind-surface escalation message at the last tier (zu-checks 0.2.5 → 0.2.6)
+`ActionSurfaceBlindDetector` only read `action_surface` for the blind reason, so a
+blind VISION surface (which emits `vision_surface`) fell back to a misleading
+"escalate to vision" message at the last perception tier. It now reads whichever
+tier produced the signal and words the reason "escalate to a human" when the vision
+surface itself is blind (no tier-5, §4.3). Test:
+`test_blind_detector_reads_vision_surface_and_words_for_the_last_tier`.
+
+### Added — §4.4 vision reducer: 4K screenshot → the SAME action surface (zu-tools 0.2.7 → 0.2.8)
+The §4.4 pattern ("heavy observation in → DETERMINISTIC reduction to the action
+surface → the policy decides on the small thing") applied to the PIXEL modality,
+so a screenshot reducer is a future adapter of the SAME modality-agnostic
+interface (§4.5) the a11y Action Surface already implements — all offline ($0).
+
+- **`vision_surface.reduce_vision_surface` — MODEL PROPOSES, deterministic reducer
+  DISPOSES.** Finding a control in raw pixels genuinely needs a model (the one
+  irreducible step), so an INJECTED `VisionDetector` (Image → `DetectedElement`s:
+  role/label/bbox/confidence) PROPOSES the raw detections — adaptable from HF
+  `hf_detect`/`hf_vlm` or any cloud vision API, behind a Protocol so zu-tools does
+  NOT hard-depend on a model package. The deterministic reducer then runs the SAME
+  six steps as `action_surface.reduce_surface` (filter interactive+meaningful →
+  prune the unusable → resolve a label → assign an opaque handle → emit) and emits
+  the SAME `Surface`/core `SurfaceView`. It NEVER ranks/prunes by guessed
+  task-relevance (enumerate the possible, never choose the reasonable, §4.2); it
+  filters ONLY on PERCEPTIBILITY — a generic confidence floor and minimum area
+  (parameters, sane defaults), off-screen, and occlusion.
+- **The vision handle registry.** The model emits a HANDLE, never a pixel
+  coordinate: the handle → click-point map (`{"point": [x,y], "bbox": [...]}`, the
+  bbox centre) is stored harness-side in the run registry, so the POINTER (a
+  different tool instance) re-resolves the same handle the model emitted. A stale
+  handle is an ESCALATION, not a crash — the same indirection currency as a11y.
+- **Escalate-when-blind (last tier).** If the reduction yields no actionable
+  affordances despite content (all below the floor, all occluded, only context, or
+  too many unlabeled controls) the surface is `blind`. Vision is the LAST tier;
+  blind here ⇒ escalate to a human (no tier-5).
+- **Tier-3 → tier-4 wiring lands on a REAL vision SURFACE.** `VisionCapture` keeps
+  its thin `op=capture` (raw pixels) and gains `op=surface` (capture → injected
+  detector → `reduce_vision_surface` → a `SurfaceView` the policy acts on with
+  handles) and `op=resolve`. The a11y `action-surface-blind` ESCALATE now climbs to
+  a vision surface, not just a screenshot.
+- **Modality-agnostic proof.** A test shows `zu_patterns.recognize` matches the
+  `login_form` archetype over a VISION-produced `SurfaceView` identically to an
+  a11y one (zu-tools production code never imports zu-patterns; only the test
+  imports both leaves — a clean direction, no production cycle), plus a
+  shape-identity test that the two producers are interchangeable.
+
+### Added — §5.2 live guided-MPC loop + Shadow-sourced transition model (zu-patterns 0.2.1 → 0.2.2)
+The two deferred pieces of the §5 pattern/search stack, both pure/offline ($0):
+
+- **The live guided-MPC step (`live_mpc_step`) — MODEL PROPOSES, HARNESS DISPOSES.**
+  The `ModelProvider` proposes ≤K candidate next actions over the current
+  `SurfaceView` (policy-pruned branching); the pattern recognizer supplies the
+  move-ordering PRIOR (recognized archetypes/handles explored first). A SHALLOW
+  lookahead over the LEARNED `reachability.Fsm` estimates where each candidate
+  leads, SCORED by the rail evaluator (`co_reachable` to the goal / not a `trap`).
+  The deterministic lookahead+rail DISPOSES — MPC picks the goal-reachable on-rail
+  candidate, NOT the model's naive first pick; a pattern's prediction is a PRIOR
+  confirmed by the lookahead, never ground truth. (Replaces the `NotImplementedError`
+  stub.)
+- **STOP AT THE COMMIT BOUNDARY.** The chosen candidate is re-classified by
+  `reversibility.classify_action` (DEFAULT-TO-COMMITTING on uncertainty). A
+  COMMITTING/side-effecting next step is the live-search boundary: the loop STOPS
+  and ESCALATES rather than auto-crossing it; only REVERSIBLE/idempotent steps
+  execute. The §1 commit-boundary married to the §5 search.
+- **The driver loop (`mpc_run`).** `live_mpc_step` → execute ONE step via an
+  INJECTED executor callback (a fake returning scripted next-surfaces in tests; a
+  real browser in production) → re-plan from the REAL resulting state → repeat until
+  the goal, a trap/terminal, or an escalation. `live_mpc_step` stays pure decision
+  logic (no real I/O), so the whole loop runs offline with `ScriptedProvider` + a
+  hand-built `Fsm` + a fake executor.
+- **The Shadow-sourced transition model (`fsm_from_shadow` / `merge_transition_models`).**
+  Folds a Shadow recording — either the synthesizer's already-emitted induced
+  `reachability.Fsm` or the raw `data.shadow.user.*` action sequence — into the SAME
+  search transition model `fsm_from_events` produces, so a recording and the event
+  log feed one model. Accumulating recordings GROWS the learned graph (the
+  apprenticeship premise). DEP-DIRECTION: zu-shadow depends on zu-core AND zu-cli, so
+  to avoid a package cycle and keep zu-patterns dependency-light, `fsm_from_shadow`
+  takes PLAIN inputs (the `Fsm`, the shadow events, or a `RecordedSession`-shaped
+  duck) and does NOT import zu-shadow — zu-patterns still depends only on zu-core.
+- Tests: `packages/zu-patterns/tests/test_mpc_and_shadow.py` (MPC picks the on-rail
+  candidate over the model's first pick; a committing candidate STOPS the loop before
+  the executor runs; `fsm_from_shadow` folds + a second recording grows it).
+
+### Fixed — plugin-gate discovery omitted newer groups (zu-cli 0.2.6 → 0.2.7)
+`zu test-plugin` discovered plugins via a stale hardcoded group list
+(providers/tools/detectors/validators/backends/sinks), so the `zu.patterns` (and
+`zu.monitors`) groups were invisible — `zu test-plugin zu-patterns` reported "no Zu
+plugins found". `_resolve_package_plugins` now derives its gateable groups from the
+canonical `zu_core.registry.GROUPS`, filtered to the kinds the contract gate supports,
+so a newly registered group is gated the moment its kind is contract-supported.
+Verified: zu-patterns, zu-checks (incl. the new captcha/human_gate detectors), and
+zu-tools all pass the unit · contract · interop · adversarial gate (the container/
+production form needs the published `zu-redteam` image + proxy sidecar — CI infra).
+Regression: `test_test_plugin.py::test_resolves_the_patterns_group`.
+
+### Fixed / Hardened — cleanup batch (zu-core 0.2.11 → 0.2.12, zu-huggingface 0.2.5 → 0.2.6)
+A pass of five small, well-scoped fixes from the review backlog; each ships with an
+offline, deterministic ($0) proof and keeps the bar green.
+
+- **`loop.last_known_good` dead flag removed** (`zu-core`): the `halted_after_returned`
+  flag was computed but both branches returned the same `last_returned`, so it was
+  dead. Removed with zero behaviour change (the LKG is still the last explicit
+  checkpoint, else the last successful return). `test_rollback.py` unchanged-green.
+- **`rollback_and_replan` threads the run_task model-loop kwargs** (`zu-core`):
+  per-tier `providers`, the `containment` floor, and `max_context_chars` now flow
+  through a rolled-back re-plan, so it supports the same options as a normal
+  `run_task`. The replay-navigator kwargs (`track`/`replay_budget`/`finish_provider`/
+  `replay_jitter_median_ms`) are deliberately NOT threaded and documented inline: a
+  rollback exists to pick a DIFFERENT path, so re-driving the recorded track would
+  re-walk the failed route. New proof: `test_rollback_honors_per_tier_provider`.
+- **Hosted VLM data-URL request shape now tested** (`zu-huggingface`): a new offline
+  test stubs the underlying `InferenceClient`, captures the `chat_completion`
+  messages, and asserts the user message carries the text part AND an `image_url`
+  whose url is a real `data:<mime>;base64,<…>` data-URL (the real router shape).
+- **HITL consume-once refusal proven at the API layer** (`zu-cli`, test-only): a new
+  offline `TestClient` proof reconstructs and re-resumes a resolved run the same way
+  the handoff path does and asserts the approved side effect executes EXACTLY ONCE —
+  the duplicate resume is refused by the consume-once ledger with a
+  `harness.defense.blocked` `duplicate_execution` on the log (ZU-CD-6), not merely a
+  queue 404.
+- **Depth tool surfaces raw magnitudes** (`zu-huggingface`): `EstimateDepth` (and the
+  `_depth_to_b64` normaliser) now include the raw per-pixel `depth` grid plus
+  `depth_min`/`depth_max` alongside the normalised `depth_png_b64` visualisation, so a
+  consumer needing real distances can recover them (the PNG alone is min/max-normalised
+  and lossy). Additive — the existing `depth_png_b64` shape is unchanged; the block is
+  empty when a backend exposes no raw depth.
+
+### Added — §9 defence-in-depth worked threat model: the malicious-PDF phone-home chain, contained (zu-redteam 0.2.5 → 0.2.6)
+A worked threat model (RED_TEAM.md §9) proving the EXISTING containment does its
+job, frozen as a deterministic, offline ($0) regression the red team owns. It is
+**not** a new runtime feature: it exercises the ZU-NET-1 egress-allowlist guarantee
+already in the trusted base. The attack: a malicious PDF runs embedded JavaScript
+that (1) fingerprints the host, (2) phones home to a command-and-control (C2) server
+to exfiltrate the fingerprint and pull a second-stage payload, then (3) the second
+stage would attempt a container escape.
+
+- **`PdfPhoneHomeFetch` + `connection_to_c2` fixtures** (`zu-redteam` `fixtures.py`):
+  a document tool that declares ONLY its legitimate doc source (`docs.example`) as
+  egress, opens the malicious PDF, and — when the embedded JS attempts the off-
+  allowlist C2 callback — has the egress floor refuse it via `SecurityBlock`
+  (`kind="egress"`), so the loop records a `harness.defense.blocked` event.
+  `connection_to_c2` is the egress proxy's out-of-band record of the REFUSED C2
+  attempt (`allowed: false`, `bytes_out: 0`).
+- **`pdf_phone_home` corpus case** (`zu-redteam` `corpus.py`, objective `escape`):
+  the staged attack as a deterministic Zu run; the corpus only ever grows, so every
+  future plugin is replayed against it.
+- **The named offline proof** (`zu-redteam` `tests/test_pdf_phone_home.py`) asserts
+  the §9.6 outcome via the OUT-OF-BAND verdict observers (never self-asserted by the
+  simulated attacker): (a) stage 2 is SEVERED — the C2 callback returns nothing;
+  (b) the denial is VISIBLE on the append-only log (`harness.defense.blocked` in-
+  process; a refused `harness.egress.observed` in the container form), attributable;
+  (c) NOTHING exfiltrates — the fingerprint (the planted secret) never leaves, and
+  the inference channel excludes arbitrary egress (no tunnel-out through the LLM
+  API); (d) stage 3 is MOOT — with the callback severed, the second-stage payload is
+  never fetched, so the escape never arrives.
+- **Honest scope (encoded in the test docstrings): CONTAINMENT, not prevention.** Zu
+  does not stop the PDF being malicious or the JS engine firing; it contains the
+  blast radius so the exploit lands in a box that cannot phone home. Boundary noted:
+  a C2 on an already-allowlisted host would not be caught by egress filtering alone —
+  the regression uses an un-allowlisted C2 to exercise the layer that DOES catch it.
+
+### Added — Human handoff + the apprenticeship loop (§3.4) (zu-core 0.2.10 → 0.2.11; zu-checks 0.2.4 → 0.2.5; zu-cli 0.2.5 → 0.2.6)
+When an agent hits friction on a system it is *entitled* to operate — a captcha /
+anti-bot wall, or a declared human-only step (a final "yes, send the wire") — it
+routes to a PERSON instead of failing or guessing. The stance is **route, never
+defeat**: Zu ships no captcha solver; it presents the challenge to an authorized
+human and resumes from exactly where it paused. Each resolved rescue then becomes a
+labelled demonstration — the escalation points are a curriculum at the edge of the
+agent's competence.
+
+- **`captcha` + `human-gate` detectors** (`zu-checks`, registered under
+  `zu.detectors`) emit `Verdict.kind="human"` — the human-routing siblings of the
+  plain tier-climb detectors. `captcha` reuses `bot-wall`'s deterministic signal but
+  routes to a person; `human-gate` is inert until a tool/config arms a declared
+  human-only step (`obs["human_gate"]`/`requires_human"]`, with an optional
+  `human_gate_reason`).
+- **The loop honors a detector/monitor `kind="human"`** (`zu-core` `run_task` halting
+  block): it pauses on the invocation that produced the observation via the EXISTING
+  `_pause_for_human`, reusing every resume/consume-once guarantee unchanged
+  (ZU-CD-1/2/5/6). The idempotency key is minted exactly as `_invoke` minted it for
+  that call, so a resume binds to it. Additive — a non-`human` ESCALATE still climbs
+  the tier ladder.
+- **The handoff API** on the `zu serve` FastAPI app (`zu-cli` `server.py`):
+  `GET /runs/{id}/pending` reads the paused run's `approval.requested`/`run.paused`
+  state FROM THE LOG and returns a REDACTED descriptor (Shadow redaction discipline,
+  so a token in a captcha URL never leaks to the operator); `POST /runs/{id}/resolve`
+  builds the `approval.resolved` event and resumes via `run_task(resume_from=…)` —
+  approve / deny / **defer**. An async **pending-escalation queue** with per-run
+  TIMEOUTS and a DEFER path (`zu_cli.handoff.HandoffQueue`) — never a tight
+  synchronous loop — plus `GET /runs/pending` and a minimal operator console at
+  `GET /handoff`.
+- **The apprenticeship loop** (`zu_cli.apprentice`): a resolved human intervention is
+  folded into a REDACTED `zu-shadow` `RecordedSession` WITH the operator's "why"
+  intent (semantic `{role,name,label}` capture, redacted at capture before append),
+  feeding the same synthesizer/induction. Promotion stays REVIEW-GATED — reused
+  `zu_shadow.replay_gate.verify_and_gate` BLOCKS a rescue-derived agent that does not
+  reproduce the recorded outcome; it is NEVER auto-promoted. `GET /apprenticeship`
+  surfaces the curriculum for review.
+- **Conformance `ZU-EXT-5`** — "a human-rescue-derived demonstration is review-gated,
+  never auto-promoted" — added to the `ZU-EXT` family with full three-way sync (prose
+  + §9 table row in `zu-upstream-conformance.md`, a MATRIX entry in
+  `test_conformance_matrix.py`, and the named proof
+  `test_apprentice.py::test_unverified_rescue_agent_is_blocked_from_promotion`). The
+  resume-exactly-once guarantee is already ZU-CD-2/6; a named test
+  (`test_server_handoff.py::test_double_resolve_does_not_double_execute`) shows the
+  handoff API path honors it.
+- **All offline, $0**: ScriptedProvider + a captcha-serving test tool; the captcha
+  detector fires `kind="human"` on a synthetic wall, `/pending` shows a blocked run
+  redacted, `/resolve` resumes and continues, a double-resolve does NOT double-execute,
+  and a synthetic rescue → Shadow demonstration with the review gate blocking an
+  unverified one.
+
+### Hardened — HITL handoff (review follow-ups)
+- **Concurrent-resolve consume-once**: `POST /runs/{id}/resolve` now serialises the whole
+  resume critical section under a per-run lock (`HandoffQueue.resolve_lock`), with the
+  existence check moved inside it — a *concurrent* double-resolve can no longer race the
+  log query before the first resume's `EXECUTION_CLAIMED` lands (the loser 404s). The
+  sequential consume-once guarantee was already ZU-CD-6.
+- **Human gate never silently downgrades** (`loop.py`): a `kind="human"` verdict that has
+  no invocation to bind the approval to now halts the run loudly rather than falling
+  through to a tier climb — making "a human gate that cannot bind stops, never proceeds"
+  an explicit invariant (defensive; the per-turn checkpoint structure already keeps a
+  dispatched call present on the reachable path).
+
+### Added — Shadow: author an agent by demonstration (§2.8) — new `zu-shadow` 0.1.0 (zu-core 0.2.9 → 0.2.10; zu-cli 0.2.4 → 0.2.5)
+A Shadow recording IS the event bus run over a HUMAN session — the human is the
+policy for that one run — so recording costs almost nothing architecturally. The
+new `zu-shadow` package turns one demonstrated run into a production agent + a rail.
+
+- **`data.shadow.*` event taxonomy** in `zu_core.events` (+ `DATA_TYPES`):
+  `session.start`/`session.end`, `user.click`/`user.type`/`user.navigate`,
+  `page.loaded`, `network.response`. Namespacing is enforced (`data.`-prefixed);
+  user-action events carry an optional reviewed `intent` ("why") field.
+- **Default-ON capture-time redaction** (`zu_shadow.redaction`) that strips
+  passwords, `Authorization`/`Cookie`/`Set-Cookie` headers, token/API-key shapes,
+  and configurable PII — INCLUDING the "why" text — and runs in `Recorder._emit`
+  BEFORE `EventBus.publish` (the only caller of `EventSink.append`). The secret is
+  gone before the event is hashed into the audit chain.
+- **Semantic-target capture** (`zu_shadow.capture`): every action is named by its
+  target's `{role, name, label}` (reusing `zu_core.surface`), never a CSS selector
+  or pixel coordinate — so the synthesized agent re-resolves on a changed page.
+- **The synthesizer is itself a Zu agent** (`zu_shadow.synthesizer`, driven by a
+  `ModelProvider`, offline-tested with `ScriptedProvider`). It PROPOSES an agent
+  spec + an induced `zu_core.reachability.Fsm` + `zu_core.invariants.Invariant`s (NO
+  new FSM/invariant types). The egress allowlist WRITES ITSELF from the recorded
+  `network.response` hosts; the FSM aligns with the §1 rail check and the §5
+  event-log→Fsm builder.
+- **Verification-replay promotion gate** (`zu_shadow.replay_gate`) reusing zu-cli's
+  `offline.py`/`build.py`: a synthesized agent does NOT run on real data until it
+  reproduces the recorded outcome; the "why" resolutions are surfaced for REVIEW,
+  never auto-promoted.
+- **`--scale` runner** (`zu_shadow.scale`): parameterize the identified variable and
+  fan out one GOVERNED run per CSV row (same agent contract for every row).
+- **`zu shadow record / synthesize / scale`** CLI subcommands (lazy-imported in
+  zu-cli so the dependency runs one way only); a live CDP binding behind the
+  `zu-shadow[live]` extra + a manual entrypoint (`zu_shadow.live`).
+- **Conformance `ZU-AUDIT-4`** — "secrets are redacted at capture, before any event
+  reaches the append-only log" — added to the `ZU-AUDIT` family with full three-way
+  sync: prose + §9 table row (Satisfied) in `zu-upstream-conformance.md`, a MATRIX
+  entry in `test_conformance_matrix.py`, and the named proof
+  `zu-shadow/tests/test_conformance_audit4.py::test_secrets_are_redacted_before_reaching_the_log`.
+
+Honest scope: robustness comes from the runtime machinery (semantic re-resolution,
+detectors, replay, the rail), not a single recording; on a structurally different
+site the agent ESCALATES rather than silently erring. The live human recorder is
+demo/manual; the offline core is fully tested against a synthetic input/CDP stream
+at $0.
+
+### Fixed — ZU-RAIL-9 success-criterion semantics now liveness-by-deadline (zu-core 0.2.8 → 0.2.9; zu-patterns 0.2.0 → 0.2.1)
+An adversarial review found ZU-RAIL-9 was hollow: a pattern's SUCCESS criterion
+compiled to `InvariantKind.THROUGHOUT`, which means "the success element must be
+present at EVERY surface." But a success element is, by definition, ABSENT until
+*after* the interaction completes, so the compiled Monitor returned `VIOLATION` on
+the very first pre-interaction `data.surface.captured` event in EVERY run — success
+and failure alike. The named proof only happened to test the mismatch direction.
+
+- **New additive `InvariantKind.EVENTUALLY`** in `zu_core.invariants` — a
+  liveness-by-DEADLINE property (LTL "eventually p, bounded by a deadline"): the
+  predicate need NOT hold on early/in-progress steps; the Monitor is INERT until
+  the predicate first holds (then satisfied forever) OR a deadline event arrives
+  without it (then, and only then, `VIOLATION`). The deadline is the
+  `Invariant.applies_to` event TYPE; `None` ⇒ any terminal event
+  (`TASK_TERMINAL`/`TASK_COMPLETED`) marking the interaction/run complete. Generic,
+  LTL-forward-compatible, no pattern-specific special-casing in core. Also a
+  `require_present` option on `SURFACE_CONTAINS` so a non-negated liveness token
+  must genuinely appear by the deadline (absence-of-evidence is unsatisfied, not
+  vacuously true).
+- **`rail.surface_shows` gained `liveness=`/`deadline=`.** Every pattern's
+  `success_invariants` now compile to `EVENTUALLY` (so pre-interaction surfaces do
+  NOT fire), and every `failure_invariants` now compile to the correct SAFETY
+  shape `THROUGHOUT NOT contains(failure-context)` (fire-on-appearance of a known
+  failure context such as an error alert), replacing the prior
+  positive-must-contain-THROUGHOUT mis-modelling. All 8 patterns updated.
+- **Two-sided ZU-RAIL-9 proof.** `test_pattern_mismatch_fires_detector`
+  strengthened (the success surface never appears AND the deadline arrives →
+  `VIOLATION`; inert before the deadline) and a NEW `test_pattern_match_does_not_fire`
+  (a SUCCEEDING run: pre-interaction surface lacking the affordance, then the
+  post-interaction surface showing it, then the deadline → NO `VIOLATION` at ANY
+  prefix). The match test fails against the old THROUGHOUT compilation and passes
+  only under EVENTUALLY — confirmed empirically.
+- **Commit-boundary discipline (LOW).** Documented `search._default_classifier`'s
+  `REVERSIBLE` default as OFFLINE-EXPLORATION-ONLY (it only lets the planner look
+  past an unknown edge during $0 offline search; it never gates a live
+  side-effecting action — the commit boundary is FLAGGED on each `PlanStep`, and
+  the live seam re-classifies with `reversibility.classify_action`, which
+  DEFAULTS TO COMMITTING). Added `test_live_classifier_defaults_to_committing`
+  (named in the comment as the proof) and
+  `test_offline_default_classifier_is_reversible_exploration_only`.
+
+### Added — §5 Pattern recognition & guided search (new zu-patterns 0.2.0; zu-core 0.2.7 → 0.2.8)
+The policy-prior / move-ordering layer over the Action Surface — the *AlphaZero*
+shape (recognize → propose → the rail verifies), not brute-force enumeration.
+
+- **New `Pattern` port** (`zu_core.ports.Pattern`, group `zu.patterns`, registry
+  decorator `@zu.pattern`, `INTERFACE_VERSION["patterns"]=1`). A pattern is
+  READ-ONLY: it `recognize`s a situation over a core `SurfaceView` and emits
+  `success_invariants`/`failure_invariants`; it never calls a tool and never
+  decides the task action. With it: `PatternStep`/`RecognitionResult` value
+  objects.
+- **New core `SurfaceView`** (`zu_core/surface.py`) — a pure-pydantic,
+  modality-agnostic surface view (`SurfaceAffordance`/`SurfaceView`). The crux of
+  the design: `recognize` takes this CORE type, never zu-tools' `Surface`
+  (zu-core stays pydantic-only). zu-tools projects its `Surface` onto it one-way
+  (`zu_tools.surface_adapter.to_surface_view`, dropping `handle_map`), so
+  zu-patterns depends only on zu-core.
+- **New `data.pattern.recognized` event** — the auditable record of what the
+  agent inferred (archetype, confidence, matched_handles, blind); a low-confidence
+  recognition emits NOTHING (no hint as ground truth).
+- **Additive `PredicateKind.SURFACE_CONTAINS`** in `zu_core.invariants` (one enum
+  value + one evaluator; `compile_invariant`/`compile_spec` unchanged) — folds
+  `data.surface.captured` / `data.pattern.recognized` events to verify an expected
+  post-state appeared (or, negated, is gone).
+- **New `zu-patterns` package** (0.2.0): the recognizer pass (`recognize`,
+  confidence-gated, low-confidence ⇒ fall-through), a principled reversible-vs-
+  committing classifier (`reversibility.py` — HTTP-method/idempotency, affordance
+  semantics, extensible priors, **default-to-committing**, no site constants), the
+  pattern→rail helpers (`rail.py`), an offline best-first planner over the Phase-1
+  `zu_core.reachability.Fsm` with the recognizer as the move-ordering prior plus an
+  event-log → FSM transition builder (`search.py`), and **8 starter patterns**:
+  `cookie_banner`, `login_form`, `search_box`, `modal_dialog`, `paginated_list`,
+  `sortable_table`, `autocomplete`, `cart_checkout` (the canonical irreversible-
+  boundary pattern — its place-order/pay step is classified COMMITTING and the
+  script stops before it).
+- **ZU-RAIL-9** — a recognized pattern's predicted outcome is VERIFIED by a rail
+  Monitor; a behaviour mismatch fires a detector (the pattern is a prior, never
+  ground truth). Full sync: prose + §9 table + matrix entry + the named proof
+  `test_pattern_mismatch_fires_detector`.
+- **Plugin-gate `patterns` case** (`zu_redteam.contract`, zu-redteam 0.2.4 →
+  0.2.5) — the cheap Gate-2 shape check for the read-only pattern kind.
+- **DEFERRED (documented seams, not built):** the live guided-MPC loop
+  (`search.live_mpc_step` is a stub) and the Shadow-sourced transition model
+  (Shadow is the next phase; `fsm_from_events` is the event-log source now).
+
+### Added — §6.4 HuggingFace task breadth + VLM-as-tool + proven policy path (zu-huggingface 0.2.4 → 0.2.5)
+Broadened the HuggingFace task surface from 8 tools to 18, added a vision-language
+model exposed **as a tool** (not the policy), and proved the chat policy path against
+the HuggingFace serving surfaces by shape (offline, no live call).
+
+- **Ten new task tools** (`zu_huggingface.tools`), each typed `zu_core.content` I/O,
+  each working hosted (InferenceClient task method) **and** local (transformers
+  pipeline) behind the one `HfClient` contract, each deriving its capability envelope
+  from the backend (hosted ⇒ `CAP_NET` + `router.huggingface.co`; local ⇒ nothing):
+  `SegmentImage` (`hf_segment`, image → labelled masks; masks base64-PNG, never raw
+  bytes), `EstimateDepth` (`hf_depth`, image → base64-PNG depth map), `AskDocument`
+  (`hf_doc_qa`, document image + question → answer), `AskImage` (`hf_vqa`, VQA),
+  `Speak` (`hf_speak`, text → `Audio` base64 WAV — the only non-text Content output),
+  `ClassifyAudio` (`hf_classify_audio`, audio → labels, the **same `[{label,score}]`
+  shape** as the text classifier so it is interchangeable with
+  `HfClassifierDetector`/`Validator`), `AskTable` (`hf_table_qa`), `ClassifyTable`
+  (`hf_tabular_classify`) and `PredictTable` (`hf_tabular_regress`).
+- **VLM-as-tool** — `VlmDescribe` (`hf_vlm`, **image + text prompt → text**): a
+  vision-language model's vision exposed as a *verb* so a TEXT policy can reason over a
+  picture. Hosted: a multimodal `chat_completion` (text part + `image_url` data-URL).
+  Local: an `image-text-to-text` pipeline. The policy stays text; only the tool sees
+  pixels.
+- **HfClient additions** (Protocol + both backends): `image_segmentation`,
+  `depth_estimation`, `document_question_answering`, `visual_question_answering`,
+  `text_to_speech`, `audio_classification`, `image_text_to_text`,
+  `table_question_answering`, `tabular_classification`, `tabular_regression`. New pure
+  helpers `_segments`/`_depth_to_b64`/`_qa_top` (shape normalisers) and `_wav_bytes`
+  (stdlib `wave` encoder for the local-TTS ndarray→bytes path, no new dependency).
+- **Tabular is hosted-only**: transformers has no first-class local tabular pipeline,
+  so `PipelineBackend.tabular_*` raise a clear hosted-only `RuntimeError` — they fetch
+  no model, so they cannot bypass the supply-chain guard.
+- **Supply-chain re-proof** (`test_supply_chain.py`): every new local task tool builds
+  its pipeline through `safe_pipeline_kwargs` (parametrised assertion that
+  `trust_remote_code=False`, the model id is carried, and an unpinned revision is
+  refused before any pipeline is built) — no new task can bypass §8.3.
+- **`pillow` added to the `[hosted]` extra**: depth/segmentation hosted responses are
+  PIL images the backend encodes to base64 PNG.
+- **Proven policy path** (`zu-providers/tests/test_hf_router_policy.py`, no live call):
+  an `httpx.MockTransport` serving the OpenAI `/v1/chat/completions` shape proves the
+  existing `openai-compatible` adapter against the HF chat surfaces — the request path
+  (`<base_url>/chat/completions`), the `Bearer` derived from `HF_TOKEN`, the body, and
+  identical response parsing. **The HF router `/v1`, a dedicated Inference Endpoint
+  `/v1`, and a local vLLM `/v1` are the same adapter + config** (only `base_url`
+  differs; `api_key_env=HF_TOKEN`) — asserted parametrically over all three base URLs.
+  A **VLM policy** (image in the chat request, a multimodal `content` list with an
+  `image_url` data-URL) is shown to ride the same adapter, the image part intact on the
+  wire. No new provider code — config only.
+- **Conformance**: none. This is tool breadth over the fixed family set; the one
+  guarantee worth checking ("no HF tool can fetch a local model bypassing
+  supply-chain") is already covered by §8.3 and re-proved for the new tasks above. No
+  new `ZU-*` requirement.
+
+### Fixed — §4/§5 cross-tool session sharing + the opaque-handle invariant (adversarial-review follow-up)
+An adversarial review found that the §4/§5 cross-tool wiring was non-functional in
+production and the §11.3 confused-deputy invariant was inverted — both masked by test
+fakes that injected ONE backend/session into BOTH tools. Root cause: the loop
+instantiates each discovered Tool class with NO arguments, so `ActionSurface`,
+`PointerControl` and `VisionCapture` each built their OWN `LocalDockerBackend` with a
+private `_sessions` dict — putting the run-scoped registry on a per-tool-instance
+backend shared nothing.
+
+- **Shared, module-level run registry** (`packages/zu-tools/src/zu_tools/_session.py`):
+  the cross-tool lookup now lives in a process-wide registry keyed by
+  `run_key = str(ctx.spec.task_id)` (RunContext carries only the string key; the live
+  handle + handle_map live here, never on RunContext — a socket must never be
+  serialised across resume). Helpers: `get_or_open(run_key, opener)` (open once, reuse),
+  `attach(run_key)` (pure read — pointer/vision find the run's open page),
+  `put_handle_map`/`resolve_handle` (the harness-side handle→{role,name} map), and
+  `close_run(run_key)` (authoritative teardown). ALL browser-family tools
+  (`action_surface`, `browser`, `pointer`, `vision`) now reach THIS registry, not a
+  per-tool `backend._sessions`. The backend still actually opens the live session;
+  the registry is the shared lookup. Fixes CRITICAL #1 (pointer/vision failing with
+  "needs an open browser session" on every real run).
+- **Handle-only model surface** (`pointer.py`): removed the model-facing `locator`
+  parameter from the pointer schema. The model sends ONLY an opaque `handle`;
+  `PointerControl` resolves it to `{role, name}` via the shared handle_map
+  (`resolve_handle`) HARNESS-SIDE and sends THAT to the container `locate` op. A handle
+  not in the map is a `stale_handle` escalation — never a model-supplied selector
+  fallback. Fixes CRITICAL #2 (the §11.3 indirection was inverted — the model was
+  expected to emit the role+name selector itself).
+- **handle_map stays harness-side** (`action_surface.py`): `_emit` no longer returns
+  `handle_map` in the model-visible observation (it leaked through `_shrink_for_model`,
+  which only shapes large CONTENT fields). It is stored in the shared registry via
+  `put_handle_map` and on the instance for the offline reduce-only path; the
+  model-visible obs carries only the affordance list + `surface_blind`. Fixes the
+  MEDIUM leak.
+- **Run-end teardown wired** (`packages/zu-core/src/zu_core/runlifecycle.py`, new):
+  a GENERIC run-lifecycle seam — a plugin registers a run-end cleanup hook
+  (`register_run_cleanup`), and `run_task` invokes the registered hooks once at every
+  TRUE run end (terminal/escalate/success/crash — never a human pause) via a thin
+  `try/finally` wrapper delegating to the renamed `_run_task` body (no re-indent of the
+  ~310-line body, no scattered-return edits). zu-core imports nothing but pydantic; the
+  hook contract is one generic string (the run key), never a live handle. zu-tools
+  registers `close_run`. Replaces the previously-DEFERRED `aclose_run` wiring and the
+  container-idle-timeout backstop with an authoritative release. Fixes the HIGH leak.
+- **LOW (container)** (`images/render-chromium/_browser_session.py`): `_ensure_page`
+  now re-navigates a HELD page when re-opened to a DIFFERENT url (a run that reuses one
+  shared session must land on the requested page), and clears captured network. Cursor
+  remains authoritative across pointer ops only — the selector-based `act` op leaves it
+  unchanged by design (no reliable post-action coordinate); documented here. The
+  container ops are otherwise unchanged; re-navigation needs the rebuilt image to prove
+  live (the primary cross-tool live test does not depend on it).
+- **Tests now exercise the PRODUCTION wiring** — no injected shared backend, no session
+  injected into BOTH tools: `test_pointer.py::test_action_surface_open_then_pointer_attaches_same_run_no_shared_backend`
+  (a: same-run attach; b: handle-only harness-side resolution, with the fake `locate`
+  REQUIRING a resolved locator like the real container; c: no handle_map/selector in the
+  model obs; d: `close_run` drops the entry — no leak), plus
+  `test_vision.py::test_capture_attaches_to_the_run_scoped_session_no_injection` and the
+  handle-only/stale-handle pointer cases. These fail against the pre-fix code (verified
+  by defect injection) and pass after. A `conftest.py` resets the module registry per
+  test.
+
+### Added — §4/§5: the LIVE in-browser arm of the Action Surface and pointer
+The pure halves of the Action Surface (§11) and pointer (§12) shipped earlier; this
+finishes their LIVE execution arm against real Chromium.
+
+- **Container ops** (`images/render-chromium/_browser_session.py`): four new
+  `handle_command` ops over the persistent `zu-browser` session —
+  - `axtree` — enables the CDP Accessibility domain and returns the raw
+    `Accessibility.getFullAXTree` nodes verbatim (the harness owns normalisation),
+    plus the page title/url; opens a page first when given a url and none is held.
+  - `locate` — resolves a `{role, name}` locator to on-screen `bounds` via Playwright
+    `get_by_role(...).bounding_box()`, plus the tracked `cursor`; a miss is an error
+    the tool surfaces as `stale_handle`, never a crash.
+  - `pointer` — streams the harness-computed samples as TRUSTED input via
+    `page.mouse` (isTrusted=true, §5.2; Playwright owns the button-state machine),
+    honouring per-sample `dt`, then `down`/`up` on `click`; updates `cursor`.
+  - `screenshot` — a base64 PNG of the held page (the JSON-line protocol is UTF-8;
+    binary must be base64) — the tier-4 capture source.
+  Proof: `images/render-chromium/test_browser_session.py` (fake page, no Chromium).
+- **Run-scoped session sharing** (`packages/zu-backends/src/zu_backends/local_docker.py`):
+  a `_RunScopedSession` refcount wrapper + `LocalDockerBackend.open_run_session(spec,
+  *, run_key)` / `aclose_run(run_key)` + a `_sessions` registry, so one tool opens a
+  browser and another (the pointer, vision) ATTACHES to the SAME live page within a
+  run — keyed by `trace_id`. `open_session` is untouched (open-close-per-call is just
+  refcount 1→0). `ActionSurface`/`Browser` lease via `open_run_session`; the pointer
+  and vision ATTACH via `zu_tools._session.attach_shared` and never lease a fresh,
+  page-less browser. Proof: `packages/zu-backends/tests/test_local_docker.py` (refcount
+  reuse/teardown) + `packages/zu-tools/tests/test_pointer.py::test_pointer_attaches_to_the_run_scoped_session_no_injection`.
+- **Tier-4 vision tool** `vision` (`packages/zu-tools/src/zu_tools/vision.py`,
+  `VisionCapture`, `tier=4`): a THIN screenshot-capture tool that reuses the
+  run-scoped page the a11y surface was blind on and returns a
+  `zu_core.content.Image` a VLM policy reads via `Observation.parts('image')`. It
+  captures pixels only — no element detection (that is the vision MODEL, §6/Phase 3).
+  The `action-surface-blind` ESCALATE now lands on a real tier-4 rung in the loop's
+  ladder. Registered under `[project.entry-points."zu.tools"]`. Proof:
+  `packages/zu-tools/tests/test_vision.py`.
+- **Perception/action audit events** (`packages/zu-core/src/zu_core/events.py`):
+  `data.surface.captured` (§4.5 — the surface shown to the policy: counts + handle
+  list + blind flag; role+name locators stay harness-side) and
+  `data.pointer.dispatched` (§5.4 — the trajectory summary). Both added to
+  `DATA_TYPES`. Emitted from the loop's tool-return path keyed on observation SHAPE
+  (`_perception_action_events`), tool-agnostic like `data.source.fetched`. Proof:
+  `packages/zu-core/tests/test_loop.py::test_surface_and_pointer_land_on_the_audit_log`.
+
+No conformance family is forced this phase: the audit (surface-recording) and ZU-CD
+(handle-indirection) properties are real but either deferrable as a follow-up row or
+already held by the pre-built pure halves; the event constants + offline assertions
+deliver their substance now.
+
+> NOTE (superseded): the cross-tool sharing originally went through
+> `zu_tools._session.attach_shared(backend, ctx)` reading `backend._sessions`, and
+> the run-end `aclose_run` wiring was DEFERRED. The **Fixed** section above supersedes
+> both: sharing now goes through the module-level run registry (a per-tool backend
+> shares nothing), and run-end teardown is wired via the generic `runlifecycle` seam.
+
+### Added — ZU-RAIL-5: a stateful, history-aware Monitor over the event stream
+The `Monitor` port (`zu_core.ports.Monitor`, `MonitorState`, `MonitorVerdict`) is
+the stateful generalisation of a `Detector`: it folds the WHOLE event history via
+`ctx.events` and returns a policy-neutral `OK`/`WARN`/`VIOLATION`. A new
+`zu.monitors` registry kind + `_monitor_checkpoint` (in
+`packages/zu-core/src/zu_core/loop.py`) run it beside the detector checkpoints; the
+`_MONITOR_SEVERITY` bridge maps a `VIOLATION` to a `TERMINAL` `Verdict` routed
+through the existing halting/`_escalate` path (a `WARN` is recorded-and-continued).
+Pure — no model, no I/O — and LTL-compilable later with no caller change. New event
+`harness.monitor.fired`. Inert by default (empty monitor list ⇒ byte-identical event
+sequence). Proof: `packages/zu-core/tests/test_monitor.py::test_monitor_violation_escalates_to_terminal`.
+
+### Added — ZU-RAIL-6: invariants declared as DATA compile down to a Monitor
+New module `packages/zu-core/src/zu_core/invariants.py` — `Invariant`/`Predicate`
+(a tagged union by `kind`: budget caps, domain allowlists, required-field presence;
+pre/post/throughout) carried as DATA an `agent.yaml` declares, with
+`compile_invariant`/`compile_spec` bridging a declared invariant into a `Monitor`
+detected over the log. Pure evaluators; LTL-forward-compatible (callers unchanged).
+Proof: `packages/zu-core/tests/test_invariants.py::test_compiled_invariant_escalates_in_loop`.
+
+### Added — ZU-RAIL-7: a pure reachability checker over an induced FSM
+New module `packages/zu-core/src/zu_core/reachability.py` — a NEW branching
+`Fsm`/`FsmEdge` (not the linear `Track`), with `co_reachable` (backward fixpoint
+from the accepting states), `trap_states`, and `check_reachability` returning a
+`ReachabilityVerdict` (`reachable_goal`/`traps`/`unreachable_from_initial`). Pure
+stdlib + pydantic, loop-agnostic, $0. Proof:
+`packages/zu-core/tests/test_reachability.py::test_trap_state_detected`.
+
+### Added — ZU-RAIL-8: restore-to-last-known-good rollback
+`last_known_good` + `_rebuild_to` + `rollback_and_replan` + `run.mark_checkpoint`
+(in `packages/zu-core/src/zu_core/loop.py`) re-seat a run at a prior LKG event by
+folding ONLY the good prefix of the log (dropping the failed tail) for a DIFFERENT
+on-rail re-plan — building on the existing `_rebuild_run_state`/`_resume_from_log`
+event-sourcing and preserving consume-once, distinct from forward-resume-from-pause.
+New events `harness.checkpoint.marked`, `harness.run.rolled_back`. Proof:
+`packages/zu-core/tests/test_rollback.py::test_rollback_restores_state_and_replans`.
+
 ## [0.2.4] — 2026-06-24
 
 ### Fixed — ZU-NET-5: the attestation measurement is now signed (#26)

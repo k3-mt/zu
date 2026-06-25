@@ -37,7 +37,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle, SessionBackend
+from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle
+
+from ._session import attach, resolve_handle, run_key
 
 # Fitts's-law constants (seconds). MT = a + b·log₂(2D/W). The defaults give
 # plausible sub-second moves for typical web targets; both are tunable per run.
@@ -228,7 +230,6 @@ class PointerControl:
             "properties": {
                 "op": {"type": "string", "enum": ["move_click", "move"]},
                 "handle": {"type": "string", "description": "an action_surface handle (a1, a2 …)"},
-                "locator": {"type": "object", "description": "an explicit {role, name} locator"},
             },
             "required": ["handle"],
         },
@@ -244,40 +245,60 @@ class PointerControl:
     def __init__(
         self,
         session: BrowserSessionHandle | None = None,
-        backend: SessionBackend | None = None,
         *,
         seed: int | str | None = None,
         fitts_a: float = FITTS_A,
         fitts_b: float = FITTS_B,
     ) -> None:
-        # A pointer acts on an ALREADY-OPEN page, so it shares a session opened by
-        # action_surface/browser. ``session`` is that live handle; ``backend`` is
-        # an escape hatch for opening one standalone (rare).
+        # A pointer acts on an ALREADY-OPEN page, so it shares the session opened by
+        # action_surface/browser. ``session`` is an explicit live handle (injected for
+        # tests); when absent, the pointer ATTACHES to the run's SHARED session via the
+        # module-level run registry (keyed by the run id action_surface opened under) —
+        # the cross-tool sharing that makes a real run work. It never LEASES a fresh
+        # empty browser of its own (that would have no page to act on).
         self._session = session
-        self._backend = backend
         self._seed = seed
         self._fitts_a = fitts_a
         self._fitts_b = fitts_b
+
+    def _acquire_session(self, ctx: Any) -> BrowserSessionHandle | None:
+        """The live session to act on: the injected one if present (tests), else the
+        run's SHARED session this run already opened — ATTACHED via the module-level
+        run registry (NOT a per-tool backend, which would be a different instance with
+        an empty session map). Never leases a fresh, page-less browser. None when
+        nothing is open for this run."""
+        if self._session is not None:
+            return self._session
+        return attach(run_key(ctx))
 
     async def __call__(
         self,
         ctx: Any,
         op: str = "move_click",
         handle: str | None = None,
-        locator: dict | None = None,
     ) -> dict:
         if op not in ("move_click", "move"):
             return {"error": f"unknown op {op!r}; use move_click/move"}
-        if not handle and not locator:
-            return {"error": "pointer requires a handle (or an explicit locator)"}
-        if self._session is None:
+        if not handle:
+            return {"error": "pointer requires a handle (a1, a2 … from action_surface)"}
+        session = self._acquire_session(ctx)
+        if session is None:
             return {"error": "pointer needs an open browser session (open one with "
                               "action_surface(op=open) or browser(op=open) first)"}
 
-        # Resolve the handle/locator to on-screen bounds + current cursor position.
-        located = await self._session.send(
-            {"op": "locate", "handle": handle, "locator": locator}
-        )
+        # Resolve the opaque handle to its {role, name} locator HARNESS-SIDE — the model
+        # only ever emits the handle (§11.3 confused-deputy invariant); it never supplies
+        # a selector. The map was populated by action_surface into the run's shared
+        # registry. A handle not in the map is a stale handle — an escalation, not a
+        # crash and not a model-supplied fallback.
+        locator = resolve_handle(run_key(ctx), handle)
+        if locator is None:
+            return {"stale_handle": handle,
+                    "error": f"handle {handle!r} is not on the current surface; "
+                             "re-capture with action_surface(op=open) and retry"}
+
+        # Resolve the locator to on-screen bounds + current cursor position.
+        located = await session.send({"op": "locate", "locator": locator})
         if not isinstance(located, dict) or located.get("bounds") is None:
             reason = located.get("error") if isinstance(located, dict) else "bad response"
             # A handle that no longer resolves is an escalation, not a failure.
@@ -296,7 +317,7 @@ class PointerControl:
             "samples": [s.model_dump() for s in samples],
             "click": op == "move_click",
         }
-        resp = await self._session.send(dispatch)
+        resp = await session.send(dispatch)
         if isinstance(resp, dict) and resp.get("error"):
             return {"error": f"pointer dispatch failed: {resp['error']}"}
 

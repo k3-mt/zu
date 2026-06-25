@@ -164,8 +164,95 @@ def test_embedded_widget_fires_once_then_stays_quiet() -> None:
         assert det.inspect(ctx) is None
 
 
+# --- human-handoff detectors: route to a PERSON (kind="human") ---------------
+
+
+def test_captcha_routes_to_a_human_not_a_tier_climb() -> None:
+    # The captcha detector is bot-wall's kind="human" sibling: same deterministic
+    # signal, but it ROUTES to a person (route, not defeat) rather than climbing a
+    # tier. The handoff/loop reads ``kind == "human"`` to pause for an operator.
+    from zu_checks.detectors.human_gate import CaptchaDetector
+
+    v = CaptchaDetector().inspect(
+        _ctx({"html": "<h1>Just a moment...</h1> please verify you are human"})
+    )
+    assert v is not None
+    assert v.severity is Severity.ESCALATE
+    assert v.kind == "human"  # routes to a human, NOT a plain tier climb
+
+
+def test_captcha_quiet_on_an_innocent_page() -> None:
+    from zu_checks.detectors.human_gate import CaptchaDetector
+
+    assert CaptchaDetector().inspect(_ctx({"html": "<p>opening hours: 9-5</p>"})) is None
+
+
+def test_human_gate_inert_until_armed() -> None:
+    # The generic gate fires ONLY on an explicitly declared human-only step, so it
+    # is a no-op until a tool/config arms it — never a surprise pause.
+    from zu_checks.detectors.human_gate import HumanGateDetector
+
+    det = HumanGateDetector()
+    assert det.inspect(_ctx({"html": "a normal page"})) is None
+    assert det.inspect(_ctx({"text": "confirm the wire"})) is None
+
+
+def test_human_gate_fires_with_reason_when_armed() -> None:
+    from zu_checks.detectors.human_gate import HumanGateDetector
+
+    v = HumanGateDetector().inspect(
+        _ctx({"human_gate": True, "human_gate_reason": "yes, send the wire"})
+    )
+    assert v is not None
+    assert v.severity is Severity.ESCALATE and v.kind == "human"
+    assert "yes, send the wire" in (v.detail or "")
+    # the ``requires_human`` alias arms it too
+    v2 = HumanGateDetector().inspect(_ctx({"requires_human": True}))
+    assert v2 is not None and v2.kind == "human"
+
+
+async def test_captcha_detector_pauses_the_run_for_a_human() -> None:
+    # End-to-end: the captcha detector's kind="human" verdict routes through the
+    # loop to ``_pause_for_human`` — the run SUSPENDS (Status.PAUSED) and the
+    # approval record holds the literal invocation that hit the wall, so the
+    # handoff API can present it and a resume re-runs that exact call.
+    from zu_checks.detectors.human_gate import CaptchaDetector
+    from zu_core.bus import EventBus
+    from zu_core.contracts import Status, TaskSpec
+    from zu_core.loop import run_task
+    from zu_providers.scripted import ScriptedProvider
+
+    class CaptchaPage:
+        name = "open_page"
+        tier = 1
+        schema = {"name": "open_page",
+                  "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}
+        prompt_fragment = "open_page(url)"
+        capabilities: frozenset[str] = frozenset()
+        egress: frozenset[str] = frozenset()
+
+        async def __call__(self, ctx, **kw):  # noqa: ANN001, ANN003
+            return {"html": "<h1>Just a moment...</h1> please verify you are human"}
+
+    reg = Registry()
+    reg.register("tools", "open_page", CaptchaPage())
+    reg.register("detectors", "captcha", CaptchaDetector())
+    bus = EventBus()
+    provider = ScriptedProvider.from_moves(
+        [{"tool": "open_page", "args": {"url": "https://site/login"}}]
+    )
+    r = await run_task(TaskSpec(query="log in"), provider, reg, bus)
+    assert r.status is Status.PAUSED  # routed to a human, not a tier climb
+    events = await bus.query()
+    req = [e for e in events if e.type == "harness.approval.requested"][-1]
+    assert req.payload["tool"] == "open_page"
+    assert req.payload["args"] == {"url": "https://site/login"}
+    assert req.payload["reason"] == "captcha"
+
+
 def test_detectors_discoverable() -> None:
     reg = Registry()
     reg.discover()
-    for name in ("empty", "error", "js-shell", "embedded-widget", "bot-wall"):
+    for name in ("empty", "error", "js-shell", "embedded-widget", "bot-wall",
+                 "captcha", "human-gate"):
         assert name in reg.names("detectors")

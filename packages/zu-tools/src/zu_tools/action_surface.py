@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle, SessionBackend
 
+from ._session import get_or_open, put_handle_map, resolve_handle, run_key
 from .net import validate_and_pin
 
 _DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
@@ -357,7 +358,10 @@ class ActionSurface:
         if op == "resolve":
             if not handle:
                 return {"error": "op=resolve requires a handle"}
-            locator = self._handle_map.get(handle)
+            # Resolve harness-side: prefer the run's SHARED handle_map (so any tool in
+            # the run resolves the same handle), falling back to this instance's last
+            # reduction for the offline reduce-only path (no run/session).
+            locator = resolve_handle(run_key(ctx), handle) or self._handle_map.get(handle)
             if locator is None:
                 # Stale/unknown handle: signal a re-resolve, never a crash (§11.3).
                 return {"stale_handle": handle,
@@ -367,7 +371,7 @@ class ActionSurface:
         if op == "open":
             if not url:
                 return {"error": "op=open requires a url"}
-            return await self._open_op(url, title or "")
+            return await self._open_op(ctx, url, title or "")
 
         return {"error": f"unknown op {op!r}; use reduce/open/resolve"}
 
@@ -381,17 +385,23 @@ class ActionSurface:
         surface = reduce_surface(ax, title=title, url=url, unlabeled_ratio=self.unlabeled_ratio)
         return self._emit(surface)
 
-    async def _open_op(self, url: str, title: str) -> dict:
-        await self._close_session()
+    async def _open_op(self, ctx: Any, url: str, title: str) -> dict:
         pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
         spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
         host = urlsplit(url).hostname
         if pinned_ip is not None and host:
             spec["extra_hosts"] = {host: pinned_ip}
-        self._session = await self._resolve_backend().open_session(spec)
+        # Open via the SHARED run-scoped registry: the run's session is opened ONCE
+        # (here) and reused; the pointer/vision ATTACH to this same live page. The
+        # registry — NOT a per-tool-instance backend — is the cross-tool lookup, so a
+        # real run (where each tool builds its own backend) actually shares one page.
+        key = run_key(ctx)
+        backend = self._resolve_backend()
+        self._session = await get_or_open(key, lambda: self._open_session(backend, spec, key))
         # Ask the session for the accessibility tree. The browser server returns
         # ``{axtree: [...CDP nodes...], title, url}``; an older server that lacks
-        # the op returns an error, which we surface (not a crash).
+        # the op returns an error, which we surface (not a crash). The url is passed
+        # so a reused same-host session re-navigates to the requested page.
         resp = await self._session.send({"op": "axtree", "url": url})
         if not isinstance(resp, dict) or resp.get("axtree") is None:
             err = resp.get("error") if isinstance(resp, dict) else "bad session response"
@@ -403,27 +413,36 @@ class ActionSurface:
             url=str(resp.get("url", url)),
             unlabeled_ratio=self.unlabeled_ratio,
         )
-        return self._emit(surface)
+        return self._emit(surface, run_key=key)
 
-    def _emit(self, surface: Surface) -> dict:
-        """The surface as a loop-friendly observation. The handle map is held on
-        the instance (harness-side) and echoed for the harness; ``surface_blind``
-        is the top-level flag the blind detector reads."""
+    @staticmethod
+    async def _open_session(backend: SessionBackend, spec: dict, key: str) -> Any:
+        """Lease the live session the run shares. Prefers the backend's refcounted
+        ``open_run_session`` (the per-run lease in ``zu_backends.local_docker``); a
+        backend/fake with only ``open_session`` keeps working unchanged."""
+        opener = getattr(backend, "open_run_session", None)
+        if key and callable(opener):
+            return await opener(spec, run_key=key)
+        return await backend.open_session(spec)
+
+    def _emit(self, surface: Surface, *, run_key: str = "") -> dict:
+        """The surface as a loop-friendly observation. The handle map is HARNESS-SIDE:
+        it is stored in the run's shared registry (so the pointer/vision resolve a
+        handle the model only ever emits) AND on this instance (for the offline
+        reduce-only path); it is NEVER returned in the model-visible observation. Only
+        ``surface_blind`` (the flag the blind detector reads) and the affordance list
+        the model picks a handle from cross into the message."""
         self._handle_map = dict(surface.handle_map)
+        put_handle_map(run_key, surface.handle_map)
         return {
             "action_surface": surface.model_dump(exclude={"handle_map"}),
-            "handle_map": surface.handle_map,
             "surface_blind": surface.blind,
         }
 
-    async def _close_session(self) -> None:
-        if self._session is not None:
-            session, self._session = self._session, None
-            try:
-                await session.close()
-            except Exception:  # noqa: BLE001 — teardown must not raise over a result
-                pass
-
     async def aclose(self) -> None:
-        """Close any lingering session — for run teardown so a container never leaks."""
-        await self._close_session()
+        """Drop this instance's reference to the shared session. The AUTHORITATIVE
+        run-end teardown is the shared registry's ``close_run`` (wired into the loop's
+        run-end lifecycle), so the container is released exactly once regardless of how
+        many tools held the page — this tool must NOT close it out from under the
+        pointer/vision that share it."""
+        self._session = None

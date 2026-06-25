@@ -128,6 +128,49 @@ class _BrowserSession:
         await self.backend.destroy(self.sandbox)
 
 
+@dataclass
+class _RunScopedSession:
+    """A refcounted wrapper that lets one browser session be SHARED across tools in
+    a single run (e.g. ``action_surface(op=open)`` opens it; ``pointer`` reuses the
+    SAME live page). It is additive over :class:`_BrowserSession`: ``send`` delegates
+    verbatim, and ``close`` is a REF RELEASE — it decrements and only tears the real
+    session down (and de-registers from the backend) when the last holder releases.
+
+    The whole point is that a pointer acting on a page opened by the Action Surface
+    must hit the SAME container — not a fresh browser with no page. Keying lives on
+    the backend (``open_run_session``), the smallest blast radius: zu-core owns no
+    Docker/browser lifecycle and a live socket is never folded onto RunContext."""
+
+    backend: LocalDockerBackend
+    inner: _BrowserSession
+    run_key: str
+    target: str
+    refcount: int = 1
+
+    async def send(self, cmd: dict) -> dict:
+        return await self.inner.send(cmd)
+
+    async def close(self) -> None:
+        """Release ONE ref; tear the real session down only on the last release."""
+        self.refcount -= 1
+        if self.refcount > 0:
+            return
+        self.backend._sessions.pop(self.run_key, None)
+        await self.inner.close()
+
+
+def _spec_target(spec: dict) -> str:
+    """A stable key for the page a session is pointed at, so a run-scoped reuse only
+    matches the SAME target. The Action Surface / Browser pin the target host via
+    ``extra_hosts`` (host→ip); we key on that (sorted) so a re-open to a different
+    host leases a fresh container rather than acting on the wrong page. Empty when
+    no host pin is present (the session is reused for any same-image open)."""
+    hosts = spec.get("extra_hosts") or {}
+    if not isinstance(hosts, dict):
+        return ""
+    return ",".join(sorted(hosts))
+
+
 def _render_argv(args: dict) -> list[str]:
     """Build the ``zu-render`` argv from a render ToolCall's args. Purely generic —
     a URL plus optional viewport and wait/reveal flags; no site-specific logic. The
@@ -164,6 +207,11 @@ class LocalDockerBackend:
         # entrypoint's own 30s page timeout so the inner timeout normally wins
         # and we only trip on a truly wedged exec.
         self.exec_timeout_s = exec_timeout_s
+        # Run-scoped session registry (keyed by run id): the lease point that lets
+        # the Action Surface and the pointer SHARE one live browser within a run.
+        # Empty until ``open_run_session`` is used; ``open_session`` is untouched, so
+        # every existing open-close-per-call path is unaffected.
+        self._sessions: dict[str, _RunScopedSession] = {}
 
     def _docker(self) -> Any:
         if self._client is not None:
@@ -498,6 +546,46 @@ class LocalDockerBackend:
         )
         sock = await asyncio.to_thread(api.exec_start, created["Id"], socket=True, demux=False)
         return _BrowserSession(backend=self, sandbox=sandbox, sock=sock)
+
+    async def open_run_session(self, spec: dict, *, run_key: str) -> _RunScopedSession:
+        """Open (or REUSE) a browser session scoped to a run, so tools share one live
+        page. The first ``action_surface(op=open)``/``browser(op=open)`` of a run
+        creates the session (refcount=1) under ``run_key``; a later ``pointer`` (or a
+        second tool) with the SAME ``run_key`` AND the same target gets the SAME
+        wrapper with refcount bumped — the shared live page the pointer must act on.
+
+        A re-open to a DIFFERENT target releases the prior ref and leases a fresh
+        container, so a model navigating elsewhere mid-run is honoured. ``close`` on
+        the returned wrapper is a ref release; the real container tears down only on
+        the last release. ``open_session`` is never touched, so the one-shot
+        open-close-per-call path (and every test injecting a fake) is unaffected."""
+        target = str(spec.get("image", "")) + "|" + _spec_target(spec)
+        existing = self._sessions.get(run_key)
+        # Reuse when the target matches OR when this caller pins no specific target
+        # (the pointer, which has no url of its own — it ATTACHES to whatever live
+        # page this run already opened). A mismatched, explicitly-pinned target falls
+        # through to a fresh lease below.
+        if existing is not None and (existing.target == target or _spec_target(spec) == ""):
+            existing.refcount += 1
+            return existing
+        if existing is not None:
+            # A re-open to a different target: drop our hold on the old one (it tears
+            # down when its last holder releases) and lease a fresh session below.
+            self._sessions.pop(run_key, None)
+            await existing.close()
+        inner = await self.open_session(spec)
+        wrapper = _RunScopedSession(backend=self, inner=inner, run_key=run_key, target=target)
+        self._sessions[run_key] = wrapper
+        return wrapper
+
+    async def aclose_run(self, run_key: str) -> None:
+        """Force-close any session still registered for ``run_key`` — the run-end
+        teardown backstop so a shared container never outlives its run regardless of
+        whether each tool released its ref. A no-op when nothing is registered."""
+        wrapper = self._sessions.pop(run_key, None)
+        if wrapper is not None:
+            wrapper.refcount = 0  # this is the authoritative last release
+            await wrapper.inner.close()
 
     async def destroy(self, sandbox: _Sandbox) -> None:
         """Stop and remove the container. Best-effort: a teardown failure must

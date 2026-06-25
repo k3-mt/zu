@@ -1,6 +1,6 @@
 [project]
 name = "zu-huggingface"
-version = "0.2.4"
+version = "0.2.6"
 description = "Zu HuggingFace adapter: task models as typed tools/detectors/validators, behind the supply-chain guards"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,9 @@ classifiers = [
 dependencies = ["zu-core==0.2.1"]
 
 [project.optional-dependencies]
-hosted = ["huggingface_hub>=0.24"]   # the Inference Providers router / Endpoints
+# pillow is needed on the hosted surface too: depth/segmentation responses come
+# back as PIL images that the backend encodes to base64 PNG.
+hosted = ["huggingface_hub>=0.24", "pillow"]   # the Inference Providers router / Endpoints
 local = ["transformers>=4.40", "pillow"]  # local pipelines (also needs a backend, e.g. torch)
 
 # The task-model tools and the classifier detector/validator are PARAMETERISED

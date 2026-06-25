@@ -12,6 +12,15 @@ from __future__ import annotations
 from zu_tools.browser import Browser
 
 
+class _Ctx:
+    """A run context carrying a task_id — the run key the shared session registry
+    keys on. The browser tests drive the PRODUCTION path (a real run), so the session
+    is shared/torn-down through the module registry, not a per-tool backend."""
+
+    def __init__(self, task_id: str = "run-browser") -> None:
+        self.spec = type("S", (), {"task_id": task_id})()
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.sent: list[dict] = []
@@ -41,14 +50,15 @@ class _FakeBackend:
 async def test_open_then_act_read_reuse_one_session() -> None:
     backend = _FakeBackend()
     tool = Browser(backend=backend, allow_private=True)
+    ctx = _Ctx()
 
-    out = await tool(None, op="open", url="http://spa.test/", capture_network=True)
+    out = await tool(ctx, op="open", url="http://spa.test/", capture_network=True)
     assert out["rendered"] and out["text"] == "step one"
     assert len(backend.sessions) == 1
     assert backend.sessions[0].sent[0] == {"op": "open", "url": "http://spa.test/", "capture_network": True}
 
-    await tool(None, op="act", actions=[{"click": "text=Next"}])
-    await tool(None, op="read")
+    await tool(ctx, op="act", actions=[{"click": "text=Next"}])
+    await tool(ctx, op="read")
     # same session reused — open/act/read all went to the one session
     assert len(backend.sessions) == 1
     assert [c["op"] for c in backend.sessions[0].sent] == ["open", "act", "read"]
@@ -56,39 +66,36 @@ async def test_open_then_act_read_reuse_one_session() -> None:
 
 
 async def test_act_before_open_is_an_error() -> None:
-    out = await Browser(backend=_FakeBackend(), allow_private=True)(None, op="act", actions=[])
+    out = await Browser(backend=_FakeBackend(), allow_private=True)(_Ctx(), op="act", actions=[])
     assert "no open session" in out["error"]
 
 
-async def test_a_new_open_replaces_and_closes_the_prior_session() -> None:
+async def test_a_reopen_reuses_the_one_shared_run_session() -> None:
+    # In a run, the session is shared per run: a re-open does NOT lease a second
+    # container — it reuses the one shared session (the container re-navigates). One
+    # live session per run is the cross-tool sharing invariant.
     backend = _FakeBackend()
     tool = Browser(backend=backend, allow_private=True)
-    await tool(None, op="open", url="http://a.test/")
-    first = backend.sessions[0]
-    await tool(None, op="open", url="http://b.test/")
-    assert first.closed and len(backend.sessions) == 2  # prior torn down, new opened
+    ctx = _Ctx()
+    await tool(ctx, op="open", url="http://a.test/")
+    await tool(ctx, op="open", url="http://b.test/")
+    assert len(backend.sessions) == 1                  # ONE shared session, not two
+    assert [c["op"] for c in backend.sessions[0].sent] == ["open", "open"]
 
 
-async def test_close_tears_down_the_session() -> None:
+async def test_close_tears_down_the_shared_session() -> None:
     backend = _FakeBackend()
     tool = Browser(backend=backend, allow_private=True)
-    await tool(None, op="open", url="http://a.test/")
-    out = await tool(None, op="close")
+    ctx = _Ctx()
+    await tool(ctx, op="open", url="http://a.test/")
+    out = await tool(ctx, op="close")
     assert out == {"closed": True} and backend.sessions[0].closed
-    # after close, act errors (no session)
-    assert "no open session" in (await tool(None, op="act"))["error"]
-
-
-async def test_aclose_closes_a_lingering_session() -> None:
-    backend = _FakeBackend()
-    tool = Browser(backend=backend, allow_private=True)
-    await tool(None, op="open", url="http://a.test/")
-    await tool.aclose()
-    assert backend.sessions[0].closed
+    # after close, act errors (the run's shared session is gone)
+    assert "no open session" in (await tool(ctx, op="act"))["error"]
 
 
 async def test_open_requires_a_url() -> None:
-    assert "requires a url" in (await Browser(backend=_FakeBackend())(None, op="open"))["error"]
+    assert "requires a url" in (await Browser(backend=_FakeBackend())(_Ctx(), op="open"))["error"]
 
 
 def test_browser_is_tier_2_with_open_egress() -> None:
@@ -97,7 +104,7 @@ def test_browser_is_tier_2_with_open_egress() -> None:
 
 
 async def test_unknown_op() -> None:
-    out = await Browser(backend=_FakeBackend())(None, op="frobnicate")
+    out = await Browser(backend=_FakeBackend())(_Ctx(), op="frobnicate")
     assert "unknown op" in out["error"]
 
 
@@ -105,7 +112,8 @@ async def test_session_error_passed_through() -> None:
     # A command error from the server (e.g. nothing open) surfaces, not crashes.
     backend = _FakeBackend()
     tool = Browser(backend=backend, allow_private=True)
-    await tool(None, op="open", url="http://a.test/")
+    ctx = _Ctx()
+    await tool(ctx, op="open", url="http://a.test/")
     backend.sessions[0].reply = {"error": "no open page"}
-    out = await tool(None, op="read")
+    out = await tool(ctx, op="read")
     assert out == {"error": "no open page"}

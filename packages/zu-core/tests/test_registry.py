@@ -190,21 +190,23 @@ def test_discovery_isolates_an_incompatible_plugin(monkeypatch) -> None:
 
 
 def test_consumer_registers_new_kind_without_core_edit() -> None:
-    """A consumer can introduce a brand-new typed port (e.g. CredentialBroker)
-    and register implementations through the one registry the loop reads, with
-    zero edits to zu_core — the ZU-EXT-1 conformance test."""
+    """A consumer can introduce a brand-new typed port (e.g. a payment
+    orchestrator) and register implementations through the one registry the loop
+    reads, with zero edits to zu_core — the ZU-EXT-1 conformance test. (The example
+    kind is one zu_core does NOT ship: ``credential_brokers`` is now a built-in
+    after §8, so this uses a still-foreign kind to prove the no-core-edit path.)"""
     reg = Registry()
-    assert "credential_brokers" not in reg.kinds()
+    assert "payment_orchestrators" not in reg.kinds()
 
-    reg.register_kind("credential_brokers", "zu.credential_brokers")
-    assert "credential_brokers" in reg.kinds()
+    reg.register_kind("payment_orchestrators", "zu.payment_orchestrators")
+    assert "payment_orchestrators" in reg.kinds()
 
-    class FakeBroker:
+    class FakeOrchestrator:
         name = "fake"
 
-    reg.register("credential_brokers", "fake", FakeBroker)
-    assert reg.get("credential_brokers", "fake") is FakeBroker
-    assert "fake" in reg.names("credential_brokers")
+    reg.register("payment_orchestrators", "fake", FakeOrchestrator)
+    assert reg.get("payment_orchestrators", "fake") is FakeOrchestrator
+    assert "fake" in reg.names("payment_orchestrators")
 
 
 def test_register_kind_is_idempotent_but_refuses_group_conflict() -> None:

@@ -14,7 +14,7 @@ def test_corpus_is_stable_and_covers_the_objectives() -> None:
     ids = [c.id for c in build_corpus(SECRET)]
     assert ids == [
         "injected_page", "metadata_ssrf", "output_smuggle",
-        "schema_bomb", "forged_event", "injected_judge",
+        "schema_bomb", "forged_event", "injected_judge", "pdf_phone_home",
     ]
     covered = {c.objective for c in build_corpus(SECRET)}
     assert covered == set(CORPUS_OBJECTIVES)

@@ -1,7 +1,7 @@
 [project]
 name = "zu-checks"
-version = "0.2.4"
-description = "Zu built-in checks: detectors (empty, error, js-shell, embedded-widget, bot-wall) + validators (schema, grounding)"
+version = "0.2.6"
+description = "Zu built-in checks: detectors (empty, error, js-shell, embedded-widget, bot-wall, captcha, human-gate) + validators (schema, grounding)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -26,6 +26,8 @@ error = "zu_checks.detectors.error:ErrorDetector"
 js-shell = "zu_checks.detectors.js_shell:JsShellDetector"
 embedded-widget = "zu_checks.detectors.embedded_widget:EmbeddedWidgetDetector"
 bot-wall = "zu_checks.detectors.bot_wall:BotWallDetector"
+captcha = "zu_checks.detectors.human_gate:CaptchaDetector"
+human-gate = "zu_checks.detectors.human_gate:HumanGateDetector"
 action-surface-blind = "zu_checks.detectors.action_surface_blind:ActionSurfaceBlindDetector"
 
 [project.entry-points."zu.validators"]

@@ -23,6 +23,282 @@ from .config import ConfigError, assemble, load_agent, load_config
 
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
+# `zu shadow` — author an agent by demonstration (§2.8). The implementation lives in
+# the zu-shadow package; this sub-app imports it lazily so zu-cli never hard-depends
+# on zu-shadow (the dependency runs the other way), and a missing install fails with
+# an actionable hint rather than an import error.
+shadow_app = typer.Typer(
+    help="Author an agent by demonstration: record a human session, redact at capture, "
+         "synthesize an agent + rail, replay-gate promotion, scale over a CSV.",
+    no_args_is_help=True,
+)
+app.add_typer(shadow_app, name="shadow")
+
+
+def _require_shadow():
+    """Import the zu-shadow package or exit with an install hint."""
+    try:
+        import zu_shadow  # noqa: F401
+
+        return zu_shadow
+    except ModuleNotFoundError:
+        typer.echo("zu shadow needs the zu-shadow package: pip install zu-shadow", err=True)
+        raise typer.Exit(code=2) from None
+
+
+@shadow_app.command("record")
+def shadow_record(
+    stream: str = typer.Argument(..., help="A JSON file of abstract input/CDP items "
+                                           "(the synthetic or exported live stream)."),
+    site: str = typer.Option(..., "--site", help="The site/locus the session ran against."),
+    out: str = typer.Option("recording.json", "--out", "-o", help="Where to write the recording."),
+    outcome: str = typer.Option(None, "--outcome", help="The human's stated result (redacted)."),
+) -> None:
+    """Fold an abstract input/CDP stream into a REDACTED recording — secrets are
+    stripped at capture, before any event reaches the log. The stream is the same
+    shape the live CDP binding produces, so this records a synthetic OR an exported
+    live session identically.
+    """
+    import asyncio
+    import json
+    from pathlib import Path
+
+    _require_shadow()
+    from zu_core.bus import EventBus
+    from zu_shadow.capture import SemanticTarget
+    from zu_shadow.recorder import RawInput, Recorder
+
+    try:
+        items_raw = json.loads(Path(stream).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"config error: cannot read stream {stream!r}: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    def _to_item(d: dict) -> RawInput:
+        tgt = d.get("target")
+        target = SemanticTarget(**tgt) if isinstance(tgt, dict) else None
+        return RawInput(
+            kind=d.get("kind", ""), target=target, value=d.get("value"),
+            url=d.get("url", ""), title=d.get("title", ""), status=int(d.get("status", 200)),
+            host=d.get("host", ""), intent=d.get("intent"),
+        )
+
+    async def _drive():
+        bus = EventBus()
+        try:
+            rec = Recorder(bus, site=site)
+            return await rec.record_stream([_to_item(d) for d in items_raw], outcome=outcome)
+        finally:
+            await bus.aclose()
+
+    session = asyncio.run(_drive())
+    shadow_events = session.shadow_events()
+    payload = {
+        "site": session.site,
+        "outcome": session.outcome,
+        "events": [{"type": e.type, "payload": e.payload} for e in shadow_events],
+    }
+    Path(out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    typer.echo(f"shadow record: {len(shadow_events)} redacted data.shadow.* events → {out}")
+    typer.echo("note: secrets are redacted at capture, BEFORE any event reaches the log.")
+
+
+@shadow_app.command("capture")
+def shadow_capture(
+    url: str = typer.Option(..., "--url", help="The page to open and start capturing from."),
+    site: str = typer.Option(..., "--site", help="The site/locus the session runs against."),
+    out: str = typer.Option("recording.json", "--out", "-o", help="Where to write the recording."),
+    port: int = typer.Option(9222, "--port", help="Chrome remote-debugging port."),
+    profile: str = typer.Option("/tmp/zu-shadow-profile", "--profile",
+                                help="A dedicated Chrome profile dir — won't disturb your normal Chrome."),
+    seconds: float = typer.Option(None, "--seconds",
+                                  help="Auto-stop after N seconds (otherwise stop with Ctrl-C)."),
+) -> None:
+    """LIVE: launch a dedicated Chrome at --url and record YOUR clicks / typing /
+    navigations as semantic, redacted data.shadow.* events until you press Ctrl-C, then
+    write the recording — ready for `zu shadow synthesize`. Capture is by accessibility
+    role + name (never a selector/coordinate) and redacted before anything is written.
+    Needs the live extra: pip install 'zu-shadow[live]'.
+    """
+    _require_shadow()
+    try:
+        from zu_shadow.live_capture import capture
+    except ModuleNotFoundError:  # pragma: no cover - live-only path
+        typer.echo("zu shadow capture needs the live extra: pip install 'zu-shadow[live]'", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        capture(url, site=site, out=out, port=port, profile=profile, max_seconds=seconds)
+    except RuntimeError as exc:  # pragma: no cover - live-only path
+        typer.echo(f"capture error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+
+@shadow_app.command("run")
+def shadow_run(
+    recording: str = typer.Argument(..., help="A recording.json from `zu shadow record`/`capture`."),
+    url: str = typer.Option(..., "--url", help="The page to start the run from."),
+    set_: str = typer.Option("", "--set",
+                             help="Comma-separated NAME=VALUE overrides for typed values, "
+                                  "e.g. --set search=collars,size=Large."),
+    model_base_url: str = typer.Option(None, "--model-base-url",
+                                       help="An OpenAI-compatible /v1 base URL to enable "
+                                            "GENERALISATION (the model picks a control the demo "
+                                            "no longer matches). Omit for exact+override replay."),
+    model_name: str = typer.Option("gpt-4o-mini", "--model-name", help="Model id for generalisation."),
+    headless: bool = typer.Option(False, "--headless", help="Run without a visible window."),
+    seconds: float = typer.Option(None, "--seconds", help="Optional cap."),
+) -> None:
+    """LIVE: drive a recorded path on --url in a real Chrome — re-resolving each control,
+    applying --set overrides (muzzles→collars), asking the model for a control the demo no
+    longer matches, and STOPPING at the commit boundary (payment is brokered, not auto-run).
+    Needs the live extra: pip install 'zu-shadow[live]'.
+    """
+    _require_shadow()
+    try:
+        from zu_shadow.live_executor import run_live
+    except ModuleNotFoundError:  # pragma: no cover - live-only path
+        typer.echo("zu shadow run needs the live extra: pip install 'zu-shadow[live]'", err=True)
+        raise typer.Exit(code=2) from None
+    overrides: dict[str, str] = {}
+    for kv in set_.split(","):
+        kv = kv.strip()
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            overrides[k.strip()] = v
+    model = None
+    if model_base_url:  # pragma: no cover - live-only path
+        from zu_providers.openai_compatible import OpenAICompatibleProvider
+        model = OpenAICompatibleProvider(model=model_name, base_url=model_base_url)
+    try:
+        outs = run_live(recording, url, overrides=overrides, model=model,
+                        headed=not headless, max_seconds=seconds)
+    except (RuntimeError, ValueError) as exc:  # pragma: no cover - live-only path
+        typer.echo(f"run error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    done = sum(1 for o in outs if o.ok and o.handle)
+    if any(o.via == "escalated" for o in outs):
+        tail = "stopped at the commit boundary (payment is brokered / routed to a human)"
+    elif outs and outs[-1].ok:
+        tail = "completed the demonstrated path"
+    else:
+        tail = "stopped early (a step could not be resolved — escalate)"
+    typer.echo(f"shadow run: {done} step(s) executed; {tail}.")
+
+
+@shadow_app.command("synthesize")
+def shadow_synthesize(
+    recording: str = typer.Argument(..., help="A recording.json from `zu shadow record`."),
+    instruction: str = typer.Option(..., "--instruction", "-i",
+                                     help="One sentence: what the agent should do."),
+    out: str = typer.Option("proposal.json", "--out", "-o", help="Where to write the proposal."),
+) -> None:
+    """Synthesize an agent + rail PROPOSAL from a recording — a Zu agent (offline,
+    a ScriptedProvider stands in for the model). The egress allowlist writes itself
+    from the recorded network hosts; the FSM and invariants are induced from the log.
+    The proposal is REVIEWED and replay-gated before it ever runs on real data.
+    """
+    import asyncio
+    import json
+    from pathlib import Path
+
+    _require_shadow()
+    from zu_core.contracts import Event
+    from zu_shadow.recorder import RecordedSession
+    from zu_shadow.synthesizer import Synthesizer
+
+    try:
+        doc = json.loads(Path(recording).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"config error: cannot read recording {recording!r}: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    from uuid import uuid4
+
+    tid, kid = uuid4(), uuid4()
+    events = [Event(trace_id=tid, task_id=kid, type=e["type"], source="zu-shadow",
+                    payload=e.get("payload", {})) for e in doc.get("events", [])]
+    session = RecordedSession(site=doc.get("site", ""), events=events,
+                              outcome=doc.get("outcome"))
+
+    # Offline: a no-op scripted model (the verifiable parts — egress/FSM/invariants —
+    # are derived from the log, not generated, so a scripted brain suffices for review).
+    from zu_providers.scripted import ScriptedProvider
+
+    provider = ScriptedProvider.from_moves([])
+    result = asyncio.run(Synthesizer(provider).synthesize(session, instruction))
+    Path(out).write_text(json.dumps(result.to_yaml_dict(), indent=2), encoding="utf-8")
+    typer.echo(f"shadow synthesize: agent + rail proposal → {out}")
+    typer.echo(f"  egress (self-written): {', '.join(result.egress) or 'none'}")
+    typer.echo(f"  induced FSM: {len(result.fsm.states)} states; "
+               f"{len(result.invariants)} invariant(s)")
+    if result.intents_for_review:
+        typer.echo(f"  {len(result.intents_for_review)} 'why' intent(s) for REVIEW "
+                   "(never auto-promoted)")
+    typer.echo("next: replay-gate promotion (the agent must reproduce the recorded outcome).")
+
+
+@shadow_app.command("scale")
+def shadow_scale(
+    agent: str = typer.Argument("agent.yaml", help="The governed agent to fan out."),
+    rows: str = typer.Option(..., "--rows", help="A CSV; one governed run per row."),
+    var: str = typer.Option(..., "--var", help="The column to parameterize into the task."),
+    offline: bool = typer.Option(True, "--offline/--live",
+                                 help="Replay each row against fixtures (default) or run live."),
+) -> None:
+    """Fan out one GOVERNED run per CSV row — the same agent contract (tier ladder,
+    detectors/validators, rail, egress) for every row, only the parameterized variable
+    differs. Offline by default (replays the captured fixtures per row, at ~$0).
+    """
+    import asyncio
+
+    _require_shadow()
+    from zu_shadow.scale import read_rows, run_scale
+
+    try:
+        spec, cfg = load_agent(agent)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    try:
+        data = read_rows(rows)
+    except OSError as exc:
+        typer.echo(f"config error: cannot read rows {rows!r}: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    from pathlib import Path
+
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+
+    async def _run_one(query: str, row: dict):
+        if offline:
+            from .offline import Bundle, OfflineError, bundle_path, replay_offline
+
+            try:
+                bundle = Bundle.load(bundle_path(agent_dir))
+            except OfflineError as exc:
+                raise ConfigError(str(exc)) from None
+            row_spec = spec.model_copy(update={"query": query})
+            result, _ = await replay_offline(row_spec, cfg, bundle)
+            return result
+        raise NotImplementedError(
+            "live --scale runs each row through the live loop — the live lane; use --offline "
+            "to fan out against the captured fixtures at ~$0."
+        )
+
+    try:
+        report = asyncio.run(run_scale(spec.query, var, data, _run_one))
+    except (ConfigError, NotImplementedError) as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    typer.echo(f"shadow scale: {report.count} governed run(s) over '{var}'")
+    for r in report.rows:
+        status = getattr(r.result, "status", None)
+        sval = getattr(status, "value", status)
+        typer.echo(f"  row {r.index}: {var}={r.values.get(var)!r} → {sval}")
+
 
 def _installed_version(dist: str) -> str | None:
     """The installed version of ``dist`` (e.g. ``zu-runtime``), or None if it
@@ -1145,10 +1421,15 @@ def _resolve_package_plugins(package: str) -> tuple[list[tuple[str, str, object]
     skipped with a note — the gate stands up what it can instantiate no-arg."""
     from importlib.metadata import PackageNotFoundError, distribution
 
-    groups = {
-        "zu.providers": "providers", "zu.tools": "tools", "zu.detectors": "detectors",
-        "zu.validators": "validators", "zu.backends": "backends", "zu.sinks": "sinks",
-    }
+    from zu_core.registry import GROUPS
+
+    # The plugin kinds the gate's contract/interop/adversarial stages know how to
+    # stand up (mirror zu_redteam.contract's handled kinds). Derived from the
+    # canonical GROUPS so a newly registered group (e.g. zu.patterns) is gated the
+    # moment the contract supports its kind — never a stale hardcoded subset.
+    _gateable = {"providers", "tools", "detectors", "validators", "backends",
+                 "sinks", "patterns"}
+    groups = {GROUPS[k]: k for k in _gateable if k in GROUPS}
     try:
         dist = distribution(package)
     except PackageNotFoundError:

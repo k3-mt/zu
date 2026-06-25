@@ -133,6 +133,18 @@ A human approval authorises exactly ONE irreversible side effect, and that "once
 - **Conformance test:** Approve once, resume twice from the log; the side effect runs exactly once and the second resume is refused (`duplicate_execution`).
 - **Failure mode:** Per-instance dedup → a re-resumed/replayed run double-executes an irreversible action.
 
+### ZU-CD-7 — An instrument/credential secret never enters the policy context **(MUST)** (§8)
+The credential broker generalises inference-credential containment to ALL credentials/instruments (a card via an issuer, a vault/KMS, an inbox, an OAuth grant). The policy MUST hold only an opaque capability **handle**; the secret MUST be used **harness-side** (behind an `Instrument` the broker calls), and MUST appear in no event, observation, or use-outcome the policy can read.
+- **Why:** Once an agent has a card + credentials it is a financial target — every page it reads and email it gets is a prompt injection trying to make it spend the operator's money. A compromised policy must be *mechanically* unable to exfiltrate the secret: not "asked nicely", but with no signature on the policy-facing side (`UseRequest` in / `UseOutcome` out) that could carry it. The broker holds the secret behind the `Instrument` and forwards only the outcome (a charge id, a derived token), never the PAN/token.
+- **Conformance test:** A ScriptedProvider policy issues a broker `UseRequest` with a capability_id; the broker charges a `FakeCardInstrument` whose `_pan` is a known sentinel; assert the sentinel appears in NO event payload, NO observation handed to the policy, and NO `UseOutcome` — only a charge id.
+- **Failure mode:** A secret on the policy-facing surface → an injected policy exfiltrates it → containment is fiction.
+
+### ZU-CD-8 — A capability use is refused if it exceeds scope/limits/TTL/revocation **(MUST)** (§8)
+A capability use MUST be refused if it is outside the grant's scope (operation or payee allowlist), over the per-use or cumulative limit, past TTL, or revoked — the policy cannot exceed granted authority. The cumulative cap MUST be enforced atomically (`incr_if_below`) so concurrent uses cannot both pass an under-cap check.
+- **Why:** The instrument exists or a third party issues it; Zu builds the *containment*. A scoped, time-boxed, revocable capability is the one primitive: the policy gets "a door already locked behind it." A compromised policy paying an off-allowlist payee, overspending, or replaying a revoked handle must be refused and logged, never executed.
+- **Conformance test:** An adversarial ScriptedProvider tries an off-scope operation, an off-allowlist payee, an over-per-use amount, an over-cumulative sequence (via `incr_if_below`), an expired grant, and a revoked grant; each is refused with the right `refused` code + a `harness.defense.blocked` event; only the in-scope/in-limit use produces a charge.
+- **Failure mode:** A use that exceeds authority executes → the slow-drip drain / off-allowlist payment the containment layer exists to stop.
+
 ---
 
 ## 5. Cross-cutting — the audit log (`ZU-AUDIT`)
@@ -156,6 +168,18 @@ Zu's event schema MUST accept consumer-defined fields (`grant_id`, `consent_ref`
 - **Why:** Category 1's chain (Consent → Grant → Capability → Invocation) must be recorded in Zu's single system of record. If the schema is fixed, the consumer keeps a parallel log and attribution splits across two sources of truth.
 - **Conformance test:** Emit an event carrying Category 1 fields; replay and recover them.
 - **Failure mode:** Fixed schema → two systems of record → attribution fractures.
+
+### ZU-AUDIT-4 — Secrets are redacted at capture, before any event reaches the log **(MUST)**
+When a capture path folds a *human* session onto the log (Shadow, §2.8 — a recording IS the event bus run over a human session), the human's secrets — typed passwords, `Authorization`/`Cookie`/`Set-Cookie` headers, token/API-key shapes, configured PII — MUST be redacted by a default-ON stage that runs BEFORE `EventSink.append`, including the free-text "why" intent narration. The secret is gone before the event is hashed into the chain, never scrubbed afterward.
+- **Why:** The log is append-only and tamper-evident (ZU-AUDIT-1) — which means a secret that reaches it cannot be deleted later. A capture that recorded the human's password verbatim would make the immutable system of record itself the leak. Redaction must therefore be a *pre-append* property, not a post-hoc filter.
+- **Conformance test:** Drive the recorder with a synthetic stream carrying secrets through every channel (a credential field, a token in a URL, a header, a "why" note); read the sink and show no secret is present.
+- **Failure mode:** Post-hoc redaction → the secret was on the append-only chain first → it is unforgeably, permanently recorded.
+
+### ZU-AUDIT-5 — Every instrument use is recorded on the hash-chained log, bound to the authorizing consent **(MUST)** (§8)
+Every credential-broker use of an instrument MUST be recorded on the per-trace hash chain bound to the **consent** that authorized it (the grant id + consent id under `payload["ctx"]`, the ZU-AUDIT-3 convention) — so "acted within granted authority" is reconstructable purely from the log.
+- **Why:** The log is the consumer's system of record and the artifact that proves the consent → grant → capability → invocation chain. A charge that did not name the consent that justified it cannot be attributed; the audit invariant (every action either matched a pre-consented template or was human-approved on its exact bytes) becomes unprovable.
+- **Conformance test:** A broker use emits `harness.capability.used` naming `grant_id` + `consent_id` under `payload["ctx"]`; the grant issuance (`harness.grant.issued`) names the same consent; reconstruct "this charge was authorized by this consent" purely from the log; `verify_chain` holds.
+- **Failure mode:** A use the log cannot bind to a consent → attribution fractures; the audit invariant is fiction.
 
 ---
 
@@ -186,6 +210,13 @@ A compromised or buggy plugin MUST NOT be able to acquire capabilities beyond th
 - **Why:** "Don't trust the integration — bound it." Integration breadth is only compatible with a small trusted base if a bad plugin is contained. This is the mechanical reason adding the fiftieth integration adds capability but zero trusted surface.
 - **Conformance test:** A misbehaving plugin cannot read another plugin's secret, invoke an ungranted capability, or write the log directly.
 - **Failure mode:** Plugin compromise spreads → every added integration enlarges the real attack surface → capability and security trade off after all, which is the failure the whole architecture exists to avoid.
+
+### ZU-EXT-5 — A human-rescue-derived demonstration is review-gated, never auto-promoted **(MUST)**
+When a human resolves a handoff escalation (a captcha wall, a declared human-only step), that intervention is recorded as a Shadow demonstration and may *propose* a rescue-derived agent — but it MUST NOT become agent behavior until it earns it by reproducing the recorded outcome through the same offline replay gate every synthesized agent passes.
+- **Why:** The apprenticeship loop turns escalation points (the edge of the agent's competence) into a curriculum — the compounding payoff of the human-in-the-loop path. But a rescue is *one* human's resolution of *one* hard case; promoting it directly into the agent would let an unverified, possibly-overfit demonstration silently become production behavior. The same discipline that protects a captured Shadow session (`replay_gate.verify_and_gate`) protects a rescue-derived one: propose freely, promote only on reproduced outcome, never auto-apply. Mirrors the Shadow "why never auto-promoted" rule.
+- **Mechanism (Zu):** the resolve path records the rescue via `zu_cli.apprentice` (redacted, with the operator's "why" intent) and surfaces it for REVIEW (`promoted: False`); promotion is gated by `zu_shadow.replay_gate.verify_and_gate`, which BLOCKS an agent whose replay does not reproduce the recorded outcome.
+- **Conformance test:** a synthetic resolved escalation becomes a redacted Shadow demonstration, and `verify_and_gate` holds (does not promote) a rescue-derived agent whose replay diverges from the recorded outcome.
+- **Failure mode:** rescues auto-promote → an unverified/overfit human intervention becomes agent behavior with no earn-it gate → the apprenticeship loop teaches the agent the wrong lesson silently.
 
 ---
 
@@ -252,6 +283,99 @@ divergence surfacing + escalate-to-human, annotation carriage. The consumer keep
 the judgment. The most consequential is ZU-RAIL-3's escalate-to-a-**human** (Zu's
 default escalates a broken path to the *model*).
 
+### ZU-RAIL-5 — A deterministic, history-aware Monitor over the event stream **(MUST)**
+- **Mechanism (Zu):** the `Monitor` port (`evaluate(ctx) -> MonitorVerdict | None`,
+  `zu_core.ports`) — the stateful generalisation of a `Detector` that folds the
+  WHOLE event history via `ctx.events` and returns a policy-neutral
+  `OK`/`WARN`/`VIOLATION` automaton state. The `zu.monitors` registry kind +
+  `_monitor_checkpoint` run it beside the detector checkpoints; the
+  `_MONITOR_SEVERITY` bridge (in the loop, not the port) maps a `VIOLATION` to a
+  `TERMINAL` `Verdict` routed through the EXISTING halting/`_escalate` path, and a
+  `WARN` is recorded-and-continued. It is pure — no model, no I/O — which keeps it
+  LTL-compilable later with no caller change. An empty monitor list is inert (a
+  byte-identical event sequence). **Policy (consumer):** the automaton/predicate
+  the Monitor encodes.
+- **Conformance test:** a scripted Monitor that returns `VIOLATION` once a forbidden
+  tool appears on the log ends the run `TERMINAL` with the monitor name and a
+  `harness.monitor.fired` `state="violation"` on the log.
+
+### ZU-RAIL-6 — Invariants declared as DATA compile down to a Monitor **(MUST)**
+- **Mechanism (Zu):** `zu_core.invariants` — `Invariant`/`Predicate` (a tagged union
+  by `kind`: budget caps, domain allowlists, required-field presence; pre/post/
+  throughout) carried as DATA an `agent.yaml` declares, plus `compile_invariant` /
+  `compile_spec` that bridge a declared invariant into a concrete `Monitor` whose
+  violation is detected over the log by the ZU-RAIL-5 checkpoint. Pure evaluators
+  over an event `Sequence`; adding an LTL predicate is one enum value + one
+  evaluator entry with callers unchanged, and an LTL→Monitor compiler emits the
+  SAME `Monitor` shape. **Policy (consumer):** the limits/allowlists as data — no
+  magic constant in Zu.
+- **Conformance test:** a declared `budget_cap` of 1 tool call, compiled to a
+  Monitor and registered, halts a run that overshoots to 2 calls (`TERMINAL` +
+  `harness.monitor.fired`).
+
+### ZU-RAIL-7 — A pure reachability check over an induced FSM flags trap states **(MUST)**
+- **Mechanism (Zu):** `zu_core.reachability` — a NEW branching `Fsm`/`FsmEdge`
+  (deliberately NOT the linear `Track`), with `co_reachable` (a backward
+  BFS/fixpoint from the accepting/goal states over reversed edges), `trap_states`
+  (states that cannot reach the goal), and `check_reachability` returning a
+  `ReachabilityVerdict` (`reachable_goal`, `traps`, `unreachable_from_initial`). A
+  pure function — no model, no I/O — that consumes an `Fsm` a §2 synthesizer will
+  later produce from a `Track`. **Policy (consumer):** how the FSM is synthesized.
+- **Conformance test:** an FSM `A→B→GOAL` plus a sink `A→T` flags `T` as the sole
+  trap, with the goal still reachable from the initial state.
+
+### ZU-RAIL-8 — Restore-to-last-known-good rollback folds only the good prefix **(MUST)**
+- **Mechanism (Zu):** `last_known_good` (the latest `harness.checkpoint.marked`,
+  falling back to the latest successful `harness.tool.returned`) + `_rebuild_to`
+  (reuses `_rebuild_run_state` over the prefix up to the LKG, dropping the failed
+  tail) + `rollback_and_replan` (re-seats the run spine — root/tier/tokens/taint/
+  dispatch-counter/grant-load/claim-load — from the GOOD PREFIX only, emits
+  `harness.run.rolled_back` {to, dropped}, then re-enters the model loop from a
+  fresh turn so the model RE-PLANS). It builds on the existing event-sourcing (no
+  parallel snapshot) and preserves consume-once (good-prefix `execution.claimed`
+  keys are re-loaded; the dropped tail's claims are gone) — distinct from today's
+  forward-resume-from-pause, which keeps the whole log and executes the one pinned
+  approval. **Policy (consumer):** when to mark a checkpoint and when to roll back.
+- **Conformance test:** a run to a marked checkpoint with a failed tail rolls back,
+  emits `harness.run.rolled_back` with the dropped count, and the new (different)
+  tool call from the re-plan executes; consume-once is preserved across the fold.
+
+### ZU-RAIL-9 — A recognized pattern's predicted outcome is verified by a rail Monitor; a behaviour mismatch fires a detector **(MUST)**
+- **Mechanism (Zu):** the `Pattern` port (`zu_core.ports.Pattern`, group
+  `zu.patterns`) recognizes a situation over a core `SurfaceView`
+  (`zu_core.surface`) and emits its success criteria as declarable
+  `zu_core.invariants.Invariant`s. Those compile — via the EXISTING
+  `compile_spec` — to Monitors registered for the run; the loop's ZU-RAIL-5
+  checkpoint folds the event log, and a breach yields
+  `MonitorVerdict(VIOLATION)` → the existing escalation path. The additive
+  `PredicateKind.SURFACE_CONTAINS` predicate lets "after submit, the account
+  affordance appears" be a first-class verified invariant. Crucially, a SUCCESS
+  criterion compiles to the additive `InvariantKind.EVENTUALLY` — a
+  liveness-by-DEADLINE property: the predicted success state is, by definition,
+  ABSENT until the interaction completes, so the Monitor is INERT on early /
+  pre-interaction surfaces and VIOLATES only at the deadline (a terminal event —
+  `TASK_TERMINAL`/`TASK_COMPLETED` — or a declared deadline event type) if the
+  success state never appeared. A FAILURE criterion compiles to the SAFETY shape
+  `THROUGHOUT NOT contains(failure-context)`, firing the instant a known failure
+  context (e.g. an error alert) appears and satisfied by the pre-interaction
+  state. A pattern is READ-ONLY (it recognizes + emits invariants; it never calls
+  a tool), and a recognized pattern is a PRIOR TO BE CONFIRMED BY OBSERVATION,
+  never ground truth — a wrong prior is caught as a detector firing, not a silent
+  wrong action. **Policy (consumer):** which archetypes/criteria a site trusts is
+  its own pattern set (the `zu.patterns` plugins it installs), never a core
+  constant.
+- **Conformance test (two-sided):** recognize a login form, compile its success
+  Invariant to a Monitor, and prove BOTH directions.
+  `test_pattern_mismatch_fires_detector`: an event log where the predicted
+  post-surface (an account/logout affordance) NEVER appears and the interaction
+  reaches its deadline → VIOLATION (the prior was wrong → detector fires), and the
+  same un-satisfied stream BEFORE the deadline stays inert.
+  `test_pattern_match_does_not_fire`: a SUCCEEDING run — the pre-interaction
+  surface (which lacks the affordance) followed by the post-interaction surface
+  that shows it → NO VIOLATION at ANY prefix, pre-interaction surfaces included
+  (the prior was confirmed). This second test fails against a naive THROUGHOUT
+  compilation and passes only under EVENTUALLY-by-deadline.
+
 ---
 
 ## 7. Explicit non-requirements (`ZU-NOT`)
@@ -307,17 +431,27 @@ implementations are plugins.
 | ZU-CD-4 | Validators hold durable per-grant state | MUST | **Satisfied** | `GrantStore` + `InMemoryGrantStore` + `grant.updated`; `test_invocation_gate.py::test_velocity_limit_via_grant_store` |
 | ZU-CD-5 | Pause/resume preserves gate, taint, state | MUST | **Satisfied** | `run_task(resume_from=...)` rebuilds from log; `test_pause_resume.py` |
 | ZU-CD-6 | Approval executes its side effect at most once (consume-once) | MUST | **Satisfied** | `ExecutionLedger` + `InMemoryExecutionLedger` + `execution.claimed`; loop claims before re-executing an approved invocation; `test_pause_resume.py::test_resume_twice_executes_the_approved_side_effect_only_once` |
+| ZU-CD-7 ⚑ | Instrument/credential secret never enters the policy context (§8) | MUST | **Satisfied** | `CredentialBroker`/`Instrument` ports + `InMemoryCredentialBroker` over a FAKE `FakeCardInstrument`; policy holds an opaque `capability_id`, broker uses the secret harness-side; `test_credential_broker.py::test_secret_never_reaches_the_policy_or_the_log` (sentinel PAN on no event/observation/outcome) |
+| ZU-CD-8 | Capability use refused if it exceeds scope/limits/TTL/revocation (§8) | MUST | **Satisfied** | broker enforces scope/payee-allowlist/per-use/cumulative(`incr_if_below`)/TTL/revoke; refusals logged as `defense.blocked`; adversarial ScriptedProvider contained; `test_credential_broker.py::test_over_authority_uses_are_refused_and_logged`. High-consequence→human via `BrokerGate`→`_pause_for_human` (`::test_high_consequence_use_pauses_for_human_then_executes_once`); velocity→Monitor via `SPEND_VELOCITY` (`test_invariants.py::test_spend_velocity_compiles_to_a_violating_monitor`) |
 | ZU-AUDIT-1 | Log append-only & tamper-evident | MUST | **Satisfied** | `chain.py` per-trace hash chain + `verify_chain`; `test_chain.py` |
 | ZU-AUDIT-2 | Log records decision, rule, escalation binding | MUST | **Satisfied** | `gate.decided`/`approval.*` events, parented to `tool.invoked`; `test_invocation_gate.py` |
 | ZU-AUDIT-3 | Log accepts consumer-defined fields | MUST | **Satisfied** | `payload["ctx"]` + `register_event_filter` + SQLite index; `test_chain.py`, `test_sqlite_sink.py` |
+| ZU-AUDIT-4 | Secrets redacted at capture, before any event reaches the log | MUST | **Satisfied** | `zu_shadow.redaction` default-ON stage in `Recorder._emit` before `EventBus.publish`; `zu-shadow/tests/test_conformance_audit4.py::test_secrets_are_redacted_before_reaching_the_log` |
+| ZU-AUDIT-5 | Every instrument use is on the hash-chained log, bound to the authorizing consent (§8) | MUST | **Satisfied** | broker emits `harness.capability.used` with `grant_id`+`consent_id` under `payload["ctx"]` (ZU-AUDIT-3 convention) + `harness.grant.issued`/`harness.grant.revoked`; `verify_chain` holds; `test_credential_broker.py::test_use_is_audit_bound_to_consent_and_chains` |
 | ZU-EXT-1 | New port types without forking the core | MUST | **Satisfied** | `Registry.register_kind` + `zu.kinds`; `test_registry.py::test_consumer_registers_new_kind_without_core_edit` |
 | ZU-EXT-2 | Trusted/untrusted boundary explicit & documented | MUST | **Satisfied** | [`docs/TCB.md`](docs/TCB.md) |
 | ZU-EXT-3 | Port framework supports narrow typed contracts | SHOULD | **Satisfied** | typed Protocols + narrow broker verbs (mint/introspect); `test_oop_channel.py` |
 | ZU-EXT-4 | Plugin failure contained; no self-privilege-escalation | MUST | **Satisfied** | envelope + OOP memory boundary + gate; `test_oop_channel.py` |
+| ZU-EXT-5 | Human-rescue-derived demonstration is review-gated, never auto-promoted | MUST | **Satisfied** | `zu_cli.apprentice` records the redacted rescue (`promoted: False`); `zu_shadow.replay_gate.verify_and_gate` holds a non-reproducing rescue agent; `test_apprentice.py::test_unverified_rescue_agent_is_blocked_from_promotion` |
 | ZU-RAIL-1 | Captured rail bound to a human approval over its content hash | MUST | **Satisfied** | `Track.content_hash()` + `run_task(approved_rail_hash=…)` verify-before-replay; `test_rail.py` |
 | ZU-RAIL-2 | Run mode; `explore` mechanically disarms capability-bearing calls | MUST | **Satisfied** | `TaskSpec.mode`; `_invoke` stubs a capability-bearing call in explore; `test_rail.py` |
 | ZU-RAIL-3 | Consequence-weighted replay divergence, escalatable to a human | MUST | **Satisfied** | `ReplayArbiter` port + `_replay_track` consult → pause-for-human/stop/handoff; `test_rail.py` |
 | ZU-RAIL-4 | Steps carry `consequence`/`destination` annotations, read at the gate | MUST | **Satisfied** | `TrackStep` annotations round-trip + stamped to `payload["ctx"]`/`RunContext`; `test_rail.py` |
+| ZU-RAIL-5 | History-aware Monitor over the event stream; VIOLATION→TERMINAL via the same escalation path | MUST | **Satisfied** | `Monitor` port + `zu.monitors` kind + `_monitor_checkpoint`/`_MONITOR_SEVERITY`; `test_monitor.py::test_monitor_violation_escalates_to_terminal` |
+| ZU-RAIL-6 | Invariants declared as DATA compile down to a Monitor | MUST | **Satisfied** | `zu_core.invariants` `Invariant`/`Predicate` + `compile_invariant`; `test_invariants.py::test_compiled_invariant_escalates_in_loop` |
+| ZU-RAIL-7 | Pure reachability over an induced FSM flags trap states | MUST | **Satisfied** | `zu_core.reachability` `Fsm` + `co_reachable`/`trap_states`/`check_reachability`; `test_reachability.py::test_trap_state_detected` |
+| ZU-RAIL-8 | Restore-to-last-known-good rollback folds only the good prefix | MUST | **Satisfied** | `last_known_good` + `_rebuild_to` + `rollback_and_replan` + `harness.run.rolled_back`; `test_rollback.py::test_rollback_restores_state_and_replans` |
+| ZU-RAIL-9 | A recognized pattern's predicted outcome is verified by a rail Monitor; a behaviour mismatch fires a detector | MUST | **Satisfied** | `Pattern` port + `zu.patterns` kind; `Pattern.success_invariants` → `compile_spec` → Monitor (`SURFACE_CONTAINS` predicate, `InvariantKind.EVENTUALLY` liveness-by-deadline for success / `THROUGHOUT`-negated safety for failure); loop ZU-RAIL-5 checkpoint; two-sided proof `test_pattern_rail.py::test_pattern_mismatch_fires_detector` + `::test_pattern_match_does_not_fire` |
 
 ---
 

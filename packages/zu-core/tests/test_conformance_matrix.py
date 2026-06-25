@@ -30,18 +30,41 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-CD-4": ("packages/zu-core/tests/test_invocation_gate.py", "test_velocity_limit_via_grant_store"),
     "ZU-CD-5": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_without_resolution_stays_paused"),
     "ZU-CD-6": ("packages/zu-core/tests/test_pause_resume.py", "test_resume_twice_executes_the_approved_side_effect_only_once"),
+    # §8 — the credential broker: scoped/audited USE of an instrument WITHOUT the
+    # policy ever holding the secret. ZU-CD-7/8 are the next integers in the FIXED
+    # ZU-CD family; the proofs use a FAKE instrument + an adversarial ScriptedProvider.
+    "ZU-CD-7": ("packages/zu-core/tests/test_credential_broker.py", "test_secret_never_reaches_the_policy_or_the_log"),
+    "ZU-CD-8": ("packages/zu-core/tests/test_credential_broker.py", "test_over_authority_uses_are_refused_and_logged"),
     "ZU-AUDIT-1": ("packages/zu-core/tests/test_chain.py", "test_content_tamper_detected"),
     "ZU-AUDIT-2": ("packages/zu-core/tests/test_invocation_gate.py", "test_gate_deny_blocks_the_call_no_side_effect"),
     "ZU-AUDIT-3": ("packages/zu-core/tests/test_chain.py", "test_consumer_field_is_queryable"),
+    # Capture-time redaction: secrets are stripped BEFORE any event reaches the
+    # append-only log. The proof lives in zu-shadow/tests (repo-relative path resolves).
+    "ZU-AUDIT-4": ("packages/zu-shadow/tests/test_conformance_audit4.py", "test_secrets_are_redacted_before_reaching_the_log"),
+    # §8 — every instrument use is on the hash-chained log, bound to the consent
+    # that authorized it (acted-within-authority provable from the log). The next
+    # integer in the FIXED ZU-AUDIT family.
+    "ZU-AUDIT-5": ("packages/zu-core/tests/test_credential_broker.py", "test_use_is_audit_bound_to_consent_and_chains"),
     "ZU-EXT-1": ("packages/zu-core/tests/test_registry.py", "test_consumer_registers_new_kind_without_core_edit"),
     "ZU-EXT-2": ("docs/TCB.md", None),
     "ZU-EXT-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
     "ZU-EXT-4": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),
+    # A human-rescue-derived demonstration is review-gated, never auto-promoted —
+    # the apprenticeship loop reuses Shadow's promotion gate. Proof in zu-cli/tests
+    # (repo-relative path resolves from _ROOT).
+    "ZU-EXT-5": ("packages/zu-cli/tests/test_apprentice.py", "test_unverified_rescue_agent_is_blocked_from_promotion"),
     # ZU-RAIL — the rail mechanisms a delegated-action consumer needs.
     "ZU-RAIL-1": ("packages/zu-core/tests/test_rail.py", "test_unapproved_rail_is_refused_before_any_step"),
     "ZU-RAIL-2": ("packages/zu-core/tests/test_rail.py", "test_explore_mode_disarms_capability_bearing_call"),
     "ZU-RAIL-3": ("packages/zu-core/tests/test_rail.py", "test_arbiter_escalates_high_step_to_human"),
     "ZU-RAIL-4": ("packages/zu-core/tests/test_rail.py", "test_annotations_reach_the_replayed_tool_invoked_ctx"),
+    "ZU-RAIL-5": ("packages/zu-core/tests/test_monitor.py", "test_monitor_violation_escalates_to_terminal"),
+    "ZU-RAIL-6": ("packages/zu-core/tests/test_invariants.py", "test_compiled_invariant_escalates_in_loop"),
+    "ZU-RAIL-7": ("packages/zu-core/tests/test_reachability.py", "test_trap_state_detected"),
+    "ZU-RAIL-8": ("packages/zu-core/tests/test_rollback.py", "test_rollback_restores_state_and_replans"),
+    # The proof lives in zu-patterns/tests; the matrix uses repo-relative paths
+    # from _ROOT (parents[3] == repo root), so it resolves.
+    "ZU-RAIL-9": ("packages/zu-patterns/tests/test_pattern_rail.py", "test_pattern_mismatch_fires_detector"),
 }
 
 

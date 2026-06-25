@@ -19,6 +19,8 @@ dependencies = [
     "zu-cli",
     "zu-huggingface",
     "zu-runtime",
+    "zu-patterns",
+    "zu-shadow",
 ]
 
 [tool.uv]
@@ -37,6 +39,8 @@ zu-redteam    = { workspace = true }
 zu-cli        = { workspace = true }
 zu-huggingface = { workspace = true }
 zu-runtime    = { workspace = true }
+zu-patterns   = { workspace = true }
+zu-shadow     = { workspace = true }
 zu-testing    = { workspace = true }
 
 # Dev tooling installed by `uv sync` (PEP 735 dependency group).
@@ -55,6 +59,8 @@ dev = [
     "httpx",              # FastAPI TestClient transport
     "docker>=7",          # exercises the local-docker backend (real tier-2 render)
     "mcp>=1.2",           # exercises `zu mcp` (the MCP server) in tests
+    "pypdf>=6",           # exercises zu-tools[pdf] (pdf_extract) in tests
+    "playwright>=1.60.0",
 ]
 
 [tool.pytest.ini_options]
@@ -96,6 +102,11 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unused_configs = true
 no_implicit_optional = true
+# Per-package test dirs each carry a top-level ``conftest.py`` (no test package
+# __init__), so mypy's flat module map collides on the shared name when more than
+# one exists. The conftests are fixture wiring, not typed surface — exclude them so
+# ``mypy packages`` stays clean as more packages add fixtures.
+exclude = "tests/conftest\\.py$"
 
 # The core contracts and ports are the load-bearing types every plugin is held
 # to — check them strictly. Adapters/CLI can tighten over time.
@@ -108,7 +119,7 @@ warn_return_any = true
 [tool.coverage.run]
 branch = true
 source = ["zu_core", "zu_providers", "zu_tools", "zu_checks",
-          "zu_backends", "zu_redteam", "zu_cli", "zu"]
+          "zu_backends", "zu_redteam", "zu_cli", "zu_patterns", "zu_shadow", "zu"]
 
 [tool.coverage.report]
 show_missing = true

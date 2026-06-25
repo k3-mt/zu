@@ -22,6 +22,22 @@ options:
   api_key_env: HF_TOKEN
 ```
 
+The **three serving surfaces are one adapter + config** — only the `base_url`
+changes (the path is always `<base_url>/chat/completions`):
+
+| Surface | `base_url` |
+|---------|-----------|
+| Inference Providers router | `https://router.huggingface.co/v1` |
+| Dedicated Inference Endpoint | `https://<id>.<region>.aws.endpoints.huggingface.cloud/v1` |
+| Local vLLM | `http://localhost:8000/v1` |
+
+A **VLM policy** (an image in the chat request) rides the *same* adapter+config:
+a multimodal `content` list (`{type:"text"}` + `{type:"image_url", image_url:{url:
+"data:<mime>;base64,…"}}`) passes straight through to the wire. This is proven
+offline by `zu-providers/tests/test_hf_router_policy.py` (an `httpx.MockTransport`
+asserting the request path, the `Bearer` from `HF_TOKEN`, the body, and that the
+response parses identically across all three base URLs — no live call).
+
 ## Task models as tools, detectors, validators — this package
 
 Most HuggingFace models are **not** chat models (OCR, ASR, detection,
@@ -38,8 +54,30 @@ their **role** (the port is the role, assigned per agent — §4.5):
 | Tool | `ZeroShotClassify` (`hf_zero_shot`) | text + labels → scores |
 | Tool | `Summarize` (`hf_summarize`) | text → text |
 | Tool | `Translate` (`hf_translate`) | text → text |
+| Tool | `SegmentImage` (`hf_segment`) | image → labelled masks |
+| Tool | `EstimateDepth` (`hf_depth`) | image → depth map (base64 PNG) |
+| Tool | `AskDocument` (`hf_doc_qa`) | document image + question → answer |
+| Tool | `AskImage` (`hf_vqa`) | image + question → answer (VQA) |
+| Tool | `Speak` (`hf_speak`) | text → audio (base64 WAV) |
+| Tool | `ClassifyAudio` (`hf_classify_audio`) | audio → labels (same shape as `Classify`) |
+| Tool | `VlmDescribe` (`hf_vlm`) | **image + text prompt → text** (VLM-as-tool) |
+| Tool | `AskTable` (`hf_table_qa`) | table + question → answer |
+| Tool | `ClassifyTable` (`hf_tabular_classify`) | rows → label per row (hosted-only) |
+| Tool | `PredictTable` (`hf_tabular_regress`) | rows → number per row (hosted-only) |
 | Detector | `HfClassifierDetector` | classify an observation → ESCALATE/stop |
 | Validator | `HfClassifierValidator` | classify the result → fail/RETRY |
+
+**VLM-as-tool.** `VlmDescribe` exposes a vision-language model's vision as a
+*verb* (not the policy): a **text** policy can call `hf_vlm(image, prompt)` to
+get a description/answer about a picture and then reason over it. It rides the
+client's `image_text_to_text` path — a multimodal chat call hosted (a `text` +
+`image_url` data-URL message), an `image-text-to-text` pipeline local — over the
+one `HfClient` seam, exactly like every other tool.
+
+**Tabular** (`ClassifyTable`/`PredictTable`) is **hosted-only**: tabular models
+are sklearn/tabular-backed on the Hub and served via the Inference API, so the
+local `PipelineBackend` raises a clear hosted-only error rather than fetch a
+model (it therefore cannot bypass the supply-chain guard).
 
 Each is **parameterised by a model id** (and the role wrappers by the labels
 that matter), so they are wired *by reference in config* per agent rather than

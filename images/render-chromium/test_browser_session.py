@@ -87,6 +87,61 @@ class _FakeFrame:
         self._act("wait_for", sel)
 
 
+class _FakeCDPSession:
+    """A fake ``page.context.new_cdp_session`` result: serves a fixed AX tree and
+    records the Accessibility domain calls. Proves the axtree op enables the domain
+    and returns the raw CDP ``nodes`` list verbatim."""
+
+    def __init__(self, ax_nodes) -> None:
+        self._ax_nodes = ax_nodes
+        self.sent: list[str] = []
+
+    def send(self, method, params=None):
+        self.sent.append(method)
+        if method == "Accessibility.getFullAXTree":
+            return {"nodes": self._ax_nodes}
+        return {}
+
+
+class _FakeContext:
+    def __init__(self, page) -> None:
+        self._page = page
+
+    def new_cdp_session(self, _page):
+        return _FakeCDPSession(self._page.ax_nodes)
+
+
+class _FakeRoleLocator:
+    """A fake ``page.get_by_role(...).first`` exposing ``bounding_box``."""
+
+    def __init__(self, box) -> None:
+        self._box = box
+
+    @property
+    def first(self):
+        return self
+
+    def bounding_box(self):
+        return self._box
+
+
+class _FakeMouse:
+    """Records the dispatched move/down/up stream — the trusted-input contract the
+    pointer op streams (geometry + button pairing)."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    def move(self, x, y):
+        self.events.append(("move", x, y))
+
+    def down(self):
+        self.events.append(("down",))
+
+    def up(self):
+        self.events.append(("up",))
+
+
 class _FakePage:
     """A page that is its own single main frame by default; pass ``frames`` for a
     multi-frame (iframe) page. ``present`` limits which selectors the main frame
@@ -101,6 +156,28 @@ class _FakePage:
         self.fail_on: str | None = None
         self.present = present
         self._frames = frames
+        # New-op fakes: an AX tree to serve, a role→box map to locate against, a
+        # mouse to record the dispatched stream, and a PNG to screenshot.
+        self.ax_nodes: list = []
+        self.role_box: dict | None = None
+        self.mouse = _FakeMouse()
+        self.png: bytes = b"\x89PNG-fake"
+        self.viewport_size = {"width": 1280, "height": 720}
+        self.context = _FakeContext(self)
+
+    def title(self):
+        return "Fake Title"
+
+    def get_by_role(self, role, name=None):
+        # A box keyed by role (and name when given), else None → "no element".
+        box = None
+        if isinstance(self.role_box, dict):
+            box = self.role_box.get((role, name)) or self.role_box.get(role)
+        return _FakeRoleLocator(box)
+
+    def screenshot(self, full_page=False):
+        self.calls.append(("screenshot", full_page))
+        return self.png
 
     @property
     def frames(self):
@@ -399,3 +476,128 @@ def test_serve_bad_json_is_reported_not_fatal() -> None:
     bs.serve(instream, out, playwright_factory=lambda: _FakePlaywright(page), idle_timeout=None)
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
     assert "bad json" in lines[0]["error"] and lines[1]["status"] == 200  # recovered
+
+
+# --- the tier-3/§4/§5 ops: axtree / locate / pointer / screenshot ------------
+
+
+def test_axtree_op_enables_domain_and_returns_raw_cdp_nodes() -> None:
+    # The axtree op enables the Accessibility domain and returns the raw CDP nodes
+    # verbatim (the harness owns normalisation) plus the page title/url.
+    nodes = [{"role": {"value": "button"}, "name": {"value": "Buy"}, "ignored": False}]
+    page = _FakePage(url="https://shop.test/")
+    page.ax_nodes = nodes
+    p = _FakePlaywright(page)
+    state: dict = {"browser": None, "page": page, "captured": []}
+    out, done = bs.handle_command(state, {"op": "axtree"}, p)
+    assert not done
+    assert out["axtree"] == nodes
+    assert out["url"] == "https://shop.test/" and out["title"] == "Fake Title"
+
+
+def test_axtree_op_opens_a_page_when_none_held_and_url_given() -> None:
+    nodes = [{"role": {"value": "link"}, "name": {"value": "Home"}}]
+    page = _FakePage(url="https://x/")
+    page.ax_nodes = nodes
+    p = _FakePlaywright(page)
+    state: dict = {"browser": None, "page": None, "captured": []}
+    out, _ = bs.handle_command(state, {"op": "axtree", "url": "https://x/"}, p)
+    assert out["axtree"] == nodes
+    assert state["page"] is page                       # navigated + held
+    assert ("goto", "https://x/", "load") in page.calls
+
+
+def test_axtree_op_renavigates_a_held_page_to_a_different_url() -> None:
+    # A run reuses ONE shared session (the registry keys on host, so a same-host new
+    # PATH reuses the container). axtree(op) with a DIFFERENT url must re-navigate the
+    # held page, not silently keep the stale one.
+    nodes = [{"role": {"value": "button"}, "name": {"value": "Buy"}}]
+    page = _FakePage(url="https://x/a")
+    page.ax_nodes = nodes
+    p = _FakePlaywright(page)
+    state: dict = {"browser": _FakeBrowser(page), "page": page, "captured": ["old"]}
+    out, _ = bs.handle_command(state, {"op": "axtree", "url": "https://x/b"}, p)
+    assert out["axtree"] == nodes
+    assert ("goto", "https://x/b", "load") in page.calls   # re-navigated to the new url
+    assert state["captured"] == []                          # captured network cleared
+
+
+def test_axtree_op_does_not_renavigate_when_url_matches_held_page() -> None:
+    nodes = [{"role": {"value": "button"}, "name": {"value": "Buy"}}]
+    page = _FakePage(url="https://x/a")
+    page.ax_nodes = nodes
+    p = _FakePlaywright(page)
+    state: dict = {"browser": _FakeBrowser(page), "page": page, "captured": []}
+    bs.handle_command(state, {"op": "axtree", "url": "https://x/a"}, p)
+    assert not any(c[0] == "goto" for c in page.calls)      # same url -> no re-navigation
+
+
+def test_axtree_op_errors_with_no_page_and_no_url() -> None:
+    out, _ = bs.handle_command({"browser": None, "page": None, "captured": []},
+                               {"op": "axtree"}, _FakePlaywright(_FakePage()))
+    assert "no open page" in out["error"]
+
+
+def test_locate_op_resolves_role_name_to_bounds_and_cursor() -> None:
+    page = _FakePage()
+    page.role_box = {("button", "Place order"): {"x": 412.0, "y": 308.5, "width": 96.0, "height": 40.0}}
+    state: dict = {"browser": None, "page": page, "captured": [], "cursor": [10.0, 10.0]}
+    out, _ = bs.handle_command(
+        state, {"op": "locate", "handle": "a3", "locator": {"role": "button", "name": "Place order"}},
+        _FakePlaywright(page))
+    assert out["bounds"] == [412.0, 308.5, 96.0, 40.0]
+    assert out["cursor"] == [10.0, 10.0]
+
+
+def test_locate_op_requires_a_locator_not_just_a_handle() -> None:
+    page = _FakePage()
+    out, _ = bs.handle_command({"browser": None, "page": page, "captured": []},
+                               {"op": "locate", "handle": "a3"}, _FakePlaywright(page))
+    assert "locator required" in out["error"]
+
+
+def test_locate_op_missing_element_is_an_error_not_a_crash() -> None:
+    page = _FakePage()
+    page.role_box = {}  # no match
+    out, _ = bs.handle_command({"browser": None, "page": page, "captured": []},
+                               {"op": "locate", "locator": {"role": "button", "name": "Nope"}},
+                               _FakePlaywright(page))
+    assert "no element" in out["error"]
+
+
+def test_pointer_op_streams_moves_then_click_and_updates_cursor() -> None:
+    page = _FakePage()
+    state: dict = {"browser": None, "page": page, "captured": [], "cursor": [0.0, 0.0]}
+    samples = [{"x": 11.2, "y": 12.0, "dt": 0.0}, {"x": 460.1, "y": 327.8, "dt": 0.0}]
+    out, _ = bs.handle_command(state, {"op": "pointer", "samples": samples, "click": True},
+                               _FakePlaywright(page))
+    assert out["dispatched"] == 2 and out["clicked"] is True
+    assert out["cursor"] == [460.1, 327.8]
+    assert state["cursor"] == [460.1, 327.8]            # next locate sees it
+    kinds = [e[0] for e in page.mouse.events]
+    assert kinds == ["move", "move", "down", "up"]      # button pairing, trusted stream
+
+
+def test_pointer_op_without_click_only_moves() -> None:
+    page = _FakePage()
+    out, _ = bs.handle_command({"browser": None, "page": page, "captured": []},
+                               {"op": "pointer", "samples": [{"x": 5.0, "y": 5.0, "dt": 0.0}],
+                                "click": False}, _FakePlaywright(page))
+    assert out["clicked"] is False
+    assert [e[0] for e in page.mouse.events] == ["move"]
+
+
+def test_screenshot_op_returns_base64_png() -> None:
+    import base64
+
+    page = _FakePage(url="https://shot.test/")
+    page.png = b"\x89PNG\x0d\x0a-bytes"
+    out, _ = bs.handle_command({"browser": None, "page": page, "captured": []},
+                               {"op": "screenshot"}, _FakePlaywright(page))
+    assert base64.b64decode(out["screenshot_b64"]) == page.png
+    assert out["mime"] == "image/png" and out["width"] == 1280 and out["url"] == "https://shot.test/"
+
+
+def test_unknown_op_lists_the_new_ops() -> None:
+    out, _ = bs.handle_command({}, {"op": "frob"}, _FakePlaywright(_FakePage()))
+    assert "axtree" in out["error"] and "pointer" in out["error"]

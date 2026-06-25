@@ -8,13 +8,23 @@ a concrete adapter — which is what makes every adapter replaceable.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Sequence
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from .content import Action, Observation
 from .contracts import Event, Result
+from .surface import SurfaceView
+
+if TYPE_CHECKING:
+    # ``Invariant`` lives in invariants.py, which imports MonitorState/Verdict/
+    # RunContext FROM this module — importing it eagerly here would be a cycle.
+    # The Pattern Protocol only needs it for typing (annotations are strings
+    # under ``from __future__ import annotations``), so it is a type-only import.
+    from .invariants import Invariant
 
 # --- interface versioning (MLR §6) ---------------------------------------
 #
@@ -43,6 +53,14 @@ INTERFACE_VERSION: dict[str, int] = {
     "workload_identity": 1,  # WorkloadIdentity — attestable identity (ZU-NET-4)
     "egress_enforcement": 1,  # EgressEnforcement — pluggable default-deny (ZU-NET-1)
     "replay_arbiters": 1,  # ReplayArbiter — replay-divergence decision (ZU-RAIL-3)
+    "monitors": 1,  # Monitor — stateful history-aware automaton over the log (ZU-RAIL-5)
+    "patterns": 1,  # Pattern — recognize a surface archetype + emit rail invariants (§5)
+    # CredentialBroker — the SCOPED, time-boxed, revocable, harness-held, fully-
+    # audited capability to USE an instrument (a card, a vault, an inbox, an OAuth
+    # grant) WITHOUT the policy ever holding the secret (§8: generalises inference-
+    # credential containment to ALL credentials/instruments). The policy holds an
+    # opaque capability handle; the broker uses the secret harness-side.
+    "credential_brokers": 1,
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -286,6 +304,45 @@ class Validator(Protocol):
     name: str
 
     def check(self, result: Result, ctx: RunContext) -> Verdict | None: ...
+
+
+# --- the stateful, history-aware Monitor (§1.7 deterministic rail) ---------
+#
+# A ``Detector`` judges a SINGLE observation/turn/final (``Scope``). A ``Monitor``
+# is its stateful generalisation: it folds the WHOLE event history via
+# ``ctx.events`` (the read-only ``_EventsView``) and returns the current state of
+# a deterministic automaton over that stream — the temporal-property checker a
+# Detector cannot be. It is PURE: a function of the event history, no model, no
+# I/O (the deterministic machinery DISPOSES). That purity keeps it LTL-compilable
+# later — an LTL→Monitor compiler emits an object satisfying THIS SAME shape with
+# no caller change.
+#
+# The verdict vocabulary is deliberately policy-NEUTRAL (OK/WARN/VIOLATION), kept
+# separate from ``Severity``: the Monitor→Severity bridge lives in the loop, not
+# in the port, so the automaton stays a pure property and the runtime owns the
+# escalation semantics (VIOLATION→TERMINAL, WARN→record-and-continue in v1).
+# ``evaluate`` returns ``None`` when inert (mirrors ``Detector.inspect``).
+
+
+class MonitorState(str, Enum):
+    OK = "ok"
+    WARN = "warn"
+    VIOLATION = "violation"
+
+
+class MonitorVerdict(BaseModel):
+    monitor: str
+    state: MonitorState
+    detail: str | None = None
+    # The ctx.events index the verdict was decided at (the folded step); optional.
+    step: int | None = None
+
+
+@runtime_checkable
+class Monitor(Protocol):
+    name: str
+
+    def evaluate(self, ctx: RunContext) -> MonitorVerdict | None: ...
 
 
 # --- the pre-execution gate (ZU-CORE-2) ----------------------------------
@@ -534,6 +591,181 @@ class Channel(Protocol):
     async def call(self, req: ChannelRequest) -> ChannelResponse: ...
 
 
+# --- the credential broker — scoped, time-boxed, revocable, audited USE of an
+#     instrument WITHOUT the policy ever holding the secret (§8) ---------------
+#
+# THE THESIS. Two things, and conflating them is the trap:
+#   * the INSTRUMENT (a card via an issuer, a vault/KMS, an inbox, an OAuth
+#     grant) — it EXISTS, or a THIRD PARTY issues it; Zu integrates it, never
+#     becomes it;
+#   * the CONTAINMENT problem — how the agent USES the instrument without ever
+#     holding the secret, exceeding scope, overspending, or being hijacked.
+# Zu builds the CONTAINMENT / ACCESS layer, NEVER the instrument. The reference
+# instrument here is FAKE; a real issuer is a FUTURE pluggable adapter behind the
+# ``Instrument`` seam below — never in zu-core (which imports nothing but pydantic).
+#
+# THE ONE PRIMITIVE. A scoped, time-boxed, revocable, harness-held, fully-audited
+# capability to USE an instrument, where the policy only ever gets "a door already
+# locked behind it", NEVER the secret. The policy holds an opaque capability
+# HANDLE (``Grant.id``); the broker holds the secret (behind the ``Instrument``)
+# and uses it harness-side; every use lands on the hash-chained audit log bound to
+# the consent that justified it.
+#
+# This is the SAME ownership ``ModelProvider``/``Channel`` already have for the
+# inference key, generalised to an arbitrary instrument: the harness/operator
+# constructs the broker with (a reference to) an ``Instrument``; the policy emits
+# a typed ``UseRequest`` (a verb + args + a consent_ref) and gets a ``UseOutcome``
+# (an outcome dict — a charge id, never the PAN/token), and can neither read the
+# secret nor exceed scope/limit/TTL/revocation. For the strongest boundary the
+# broker is wrapped as a ``Channel`` (op="use") and run out-of-process via
+# ``zu_core.rpc`` + ``zu_backends.oop_launcher`` — then the secret lives in a
+# separate process/uid (ZU-CORE-3 / ZU-NET-3 / ZU-EXT-4) and a harness compromise
+# yields the socket, not the secret.
+
+
+class Consent(BaseModel):
+    """Who authorized a capability + for what + the proof/authority (audit-bound
+    on EVERY use, so "acted-within-granted-authority" is provable from the log).
+
+    ``authority`` is the proof/justification — an approval_id, a signed-token ref,
+    a parent grant — not the secret. ``Consent`` is a pure authority object: it
+    grants the right to USE an instrument, it is not a balance/ledger/settlement
+    record (containment, never issuance)."""
+
+    model_config = {"frozen": True}
+
+    consent_id: str
+    by: str  # the principal who authorized (a human, a parent grant)
+    authority: str  # the proof/justification (an approval_id, a signed-token ref)
+    purpose: str = ""  # what it was authorized for (audit-readable)
+
+
+class CapScope(BaseModel):
+    """The allowed operations + constraints a capability is bounded to. The policy
+    cannot exceed this — the broker refuses (and logs) any use outside it.
+
+    ``payees`` is an allowlist of permitted recipients (``None`` ⇒ the op-set is
+    the only constraint). ``requires_human_over`` is the per-use amount above which
+    a use is HIGH-CONSEQUENCE and routes to the human-in-the-loop pause BEFORE the
+    instrument operation (the existing ``Verdict(kind="human")`` path), never
+    silently through."""
+
+    model_config = {"frozen": True}
+
+    operations: frozenset[str] = frozenset()  # allowed ops, e.g. {"charge"}
+    payees: frozenset[str] | None = None  # recipient allowlist; None ⇒ op-set only
+    requires_human_over: float | None = None  # per-use amount → HITL above this
+
+
+class Grant(BaseModel):
+    """A SCOPED, time-boxed, revocable capability to USE an instrument — the ONE
+    primitive. ``id`` is the OPAQUE capability handle the policy holds; everything
+    authority-bearing (the ``instrument_ref``, the secret behind it) stays
+    harness-side. The model is frozen: an issued capability is immutable; revoke is
+    state the broker holds, and cumulative spend accrues in a ``GrantStore`` keyed
+    by ``id`` — not by mutating the Grant.
+
+    REUSES ``GrantStore.incr_if_below`` for the cumulative cap (the atomic
+    check-and-increment that closes the TOCTOU race two concurrent uses would
+    otherwise drive through an under-cap check)."""
+
+    model_config = {"frozen": True}
+
+    id: str = Field(default_factory=lambda: uuid4().hex)  # the OPAQUE handle
+    instrument_ref: str  # which Instrument (an opaque label); NEVER the secret
+    scope: CapScope
+    per_use_limit: float | None = None  # max single-use amount
+    cumulative_limit: float | None = None  # max spend over the window (incr_if_below)
+    cumulative_key: str = "spent"  # the GrantStore key the cumulative cap accrues under
+    ttl_s: int | None = None  # seconds from created_at; None ⇒ no expiry
+    consent: Consent  # the authorizing consent (audit-bound on every use)
+    # Whether every USE must NAME a matching consent (the default — consent is
+    # PRESENCE-enforced, not just mismatch-checked: a use with no consent_ref is
+    # refused ``no_consent``). A grant may opt OUT explicitly (a back-office/batch
+    # grant whose single issuing consent covers all uses) by setting this False.
+    requires_consent: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    revoked: bool = False  # revoke() flips this in the broker's grant table
+
+    def expired(self, now: datetime) -> bool:
+        """True once ``now`` is past ``created_at + ttl_s`` (``ttl_s is None`` ⇒
+        never expires). Time is supplied by the caller so the check is pure and
+        testable; the broker passes ``datetime.now(UTC)``."""
+        return self.ttl_s is not None and (now - self.created_at).total_seconds() > self.ttl_s
+
+
+class UseRequest(BaseModel):
+    """The policy's request to USE a capability — PURE DATA, carries NO secret.
+
+    ``capability_id`` is the opaque handle the policy holds; ``operation``/``args``
+    are the verb and its parameters (e.g. ``{"amount": 1200, "payee": "acct_42"}``).
+    ``consent_ref`` names which approval/consent authorizes THIS use (the audit
+    binding). ``idempotency_key`` dedupes a retried side effect (reusing the
+    ZU-CORE-4 key shape). There is no field on this type that could carry a secret
+    — the boundary is mechanical, not asked-nicely."""
+
+    capability_id: str
+    operation: str  # e.g. "charge" | "issue_token" | "send"
+    args: dict = Field(default_factory=dict)
+    consent_ref: str | None = None  # which consent authorizes THIS use (audit binding)
+    idempotency_key: str | None = None  # dedupe a retried side effect
+
+
+class UseOutcome(BaseModel):
+    """The OUTCOME of a use — a charge id, a status, never the PAN/token.
+
+    On allow, ``outcome`` is the instrument's returned outcome dict
+    (``{"charge_id": ..., "status": "captured"}``) — the secret never appears here.
+    On refusal, ``ok`` is False and ``refused`` is the machine code
+    (``scope`` | ``per_use`` | ``cumulative`` | ``expired`` | ``revoked`` |
+    ``no_consent`` | ``requires_human``); the instrument was NOT touched."""
+
+    ok: bool = True
+    outcome: dict = Field(default_factory=dict)  # {"charge_id": ...}; NEVER a secret
+    refused: str | None = None
+    detail: str | None = None
+
+
+@runtime_checkable
+class Instrument(Protocol):
+    """The pluggable issuer/vault seam (a FUTURE real issuer is an adapter here,
+    not this build). The Instrument ALONE holds the secret; the broker calls
+    ``perform``; the secret NEVER crosses back to the broker or the policy.
+
+    ``ref`` is an opaque label for the log (e.g. ``"card:fake-001"``), NEVER the
+    secret. ``perform`` does the real operation USING the secret it alone holds and
+    returns only the OUTCOME (a charge id, a derived token used internally) — the
+    one place a secret is touched, and it stays behind this boundary."""
+
+    ref: str
+
+    async def perform(self, operation: str, args: dict) -> dict: ...
+
+
+@runtime_checkable
+class CredentialBroker(Protocol):
+    """The harness-side broker: holds a reference to the secret (via an
+    ``Instrument``) and exposes ONLY scoped capabilities. The policy NEVER receives
+    a secret — it holds an opaque ``capability_id`` and gets a ``UseOutcome``.
+
+    ``grant`` registers a :class:`Grant` and returns its opaque id (the handle).
+    ``use`` checks the grant (scope, per-use + cumulative limits via
+    ``incr_if_below``, TTL/expiry, NOT revoked, the authorizing consent) and IF
+    allowed performs the instrument operation USING the secret INTERNALLY, records
+    the use as an audit event bound to the grant + consent, and returns only the
+    outcome; it refuses (and logs a defense.blocked-style event) on any scope/limit/
+    TTL/revocation failure. ``revoke`` flips a grant revoked so subsequent use is
+    refused. ``name`` lets it register/version like every other port."""
+
+    name: str
+
+    def grant(self, grant: Grant) -> str: ...
+
+    async def use(self, req: UseRequest) -> UseOutcome: ...
+
+    def revoke(self, grant_id: str) -> None: ...
+
+
 # --- workload identity (ZU-NET-4) ----------------------------------------
 #
 # The harness presents an attestable identity on a channel; the peer verifies it;
@@ -646,3 +878,77 @@ class Trigger(Protocol):
     source: str
 
     def listen(self) -> Iterator[TriggerEvent]: ...
+
+
+# --- the pattern port — the policy-prior / move-ordering layer (§5) --------
+#
+# A UI is a state space; the Action Surface is the move generator (legal moves).
+# A ``Pattern`` is a POLICY PRIOR over that surface — the AlphaZero-shape move
+# ordering, NOT a Deep-Blue brute-force enumerator. It RECOGNIZES a situation
+# (login form, cookie banner, search box, paginated list, …) over a core
+# ``SurfaceView`` and PROPOSES the canonical interaction, with success criteria
+# and known failure modes attached. It is READ-ONLY: it recognizes and emits
+# declarative invariants; it NEVER calls a tool and NEVER decides the task action
+# (that is the policy/search). A recognized pattern is a PRIOR TO BE CONFIRMED BY
+# OBSERVATION, never ground truth — its success criteria compile (via
+# ``zu_core.invariants.compile_spec``) to Monitors the rail VERIFIES, and a
+# behaviour mismatch fires a detector (ZU-RAIL-9), it is not trusted blindly.
+#
+# The contract takes the CORE ``SurfaceView`` (zu_core.surface), never zu-tools'
+# ``Surface`` — zu-core cannot import zu-tools. zu-tools projects its ``Surface``
+# onto ``SurfaceView`` through a thin one-way adapter; a pattern speaks only the
+# core type, so zu-patterns depends only on zu-core.
+
+
+class PatternStep(BaseModel):
+    """One canonical interaction step the prior PROPOSES — as HANDLES/role
+    predicates, never selectors and never a site-specific magic constant.
+
+    ``op`` is a generic verb (``fill`` | ``click`` | ``select`` | ``submit`` |
+    ``expect``). ``role``/``label_hint`` are predicates the recognizer DERIVED
+    from the surface (a substring/normalized match it bound), used to re-select
+    the affordance at run time. The step is a proposal; the policy or guided
+    search decides whether to follow it. A pattern never executes it.
+    """
+
+    model_config = {"frozen": True}
+
+    op: str
+    role: str | None = None
+    label_hint: str | None = None
+    note: str = ""
+
+
+class RecognitionResult(BaseModel):
+    """What a pattern's ``recognize`` returns when it fires — archetype, a
+    confidence in ``[0, 1]``, the affordance handles it bound, and the proposed
+    interaction script. ``None`` from ``recognize`` means no match (fall through
+    to the model + safe search)."""
+
+    model_config = {"frozen": True}
+
+    archetype: str
+    confidence: float
+    matched_handles: tuple[str, ...] = ()
+    script: tuple[PatternStep, ...] = ()
+    detail: str | None = None
+
+
+@runtime_checkable
+class Pattern(Protocol):
+    name: str
+    archetype: str
+
+    # Cheap/deterministic classification over the CORE SurfaceView. Returns a
+    # RecognitionResult (archetype + confidence + script + matched handles) or
+    # None (no match). It ENUMERATES/CLASSIFIES; it MUST NOT decide the task
+    # action (that is the policy's job).
+    def recognize(self, surface: SurfaceView) -> RecognitionResult | None: ...
+
+    # Success criteria as declarative Invariants the rail VERIFIES (§1 reuse):
+    # the predicted "done" state. Pure data — compiled by zu_core.invariants.
+    def success_invariants(self, result: RecognitionResult) -> list[Invariant]: ...
+
+    # Known failure modes as declarative Invariants whose breach is a detector
+    # firing (the pattern was a wrong prior — caught, never silently obeyed).
+    def failure_invariants(self, result: RecognitionResult) -> list[Invariant]: ...
