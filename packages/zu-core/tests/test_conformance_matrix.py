@@ -40,6 +40,10 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-EXT-2": ("docs/TCB.md", None),
     "ZU-EXT-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
     "ZU-EXT-4": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),
+    # A human-rescue-derived demonstration is review-gated, never auto-promoted —
+    # the apprenticeship loop reuses Shadow's promotion gate. Proof in zu-cli/tests
+    # (repo-relative path resolves from _ROOT).
+    "ZU-EXT-5": ("packages/zu-cli/tests/test_apprentice.py", "test_unverified_rescue_agent_is_blocked_from_promotion"),
     # ZU-RAIL — the rail mechanisms a delegated-action consumer needs.
     "ZU-RAIL-1": ("packages/zu-core/tests/test_rail.py", "test_unapproved_rail_is_refused_before_any_step"),
     "ZU-RAIL-2": ("packages/zu-core/tests/test_rail.py", "test_explore_mode_disarms_capability_bearing_call"),

@@ -19,7 +19,7 @@ classifiers = [
 # only needs zu-core (events + surface types + the sink seam). The synthesizer is
 # itself a Zu agent (a ModelProvider), and the verification-replay promotion gate
 # REUSES zu-cli's offline.py/build.py — so zu-cli is a dependency too.
-dependencies = ["zu-core==0.2.10", "zu-cli==0.2.5"]
+dependencies = ["zu-core==0.2.11", "zu-cli==0.2.6"]
 
 [project.optional-dependencies]
 # The LIVE recorder binds a real Chromium over CDP — opt-in, never needed offline.

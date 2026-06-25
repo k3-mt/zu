@@ -1284,6 +1284,32 @@ async def _run_task(
             if halting is not None:
                 if halting.severity == Severity.TERMINAL:
                     return await run.terminal(halting.detector)
+                # A detector/monitor may route to a PERSON, not the tier ladder
+                # (ZU-CD-1): ``kind="human"`` pauses the run for human handoff on
+                # the invocation that produced this observation (the last dispatched
+                # call — e.g. the fetch/render that hit a captcha or a declared
+                # human-only step). Re-uses ``_pause_for_human`` and every resume/
+                # consume-once guarantee unchanged; the idem is minted exactly as
+                # ``_invoke`` minted it for that call, so resume binds to it.
+                if halting.kind == "human":
+                    if resp.tool_calls and dispatched:
+                        paused_call = resp.tool_calls[dispatched - 1]
+                        idem = str(uuid5(
+                            run.trace_id,
+                            f"{run._call_seq}:{paused_call.name}:"
+                            f"{json.dumps(paused_call.args, sort_keys=True, default=str)}",
+                        ))
+                        return await _pause_for_human(
+                            run, ladder, tokens, step,
+                            ToolCall(name=paused_call.name, args=paused_call.args), halting, idem,
+                        )
+                    # A human verdict with no invocation to bind the approval to (a
+                    # per-turn detector or a monitor, where nothing was dispatched this
+                    # turn): a human gate that does not gate is worse than a stop. NEVER
+                    # silently downgrade to a tier climb — halt loudly for human attention.
+                    return await run.terminal(
+                        f"human gate ({halting.detector}) fired with no invocation to bind"
+                    )
                 # ESCALATE: climb a tier (loop continues) or end the run.
                 halt = await _escalate(run, ladder, messages, halting)
                 if halt is not None:

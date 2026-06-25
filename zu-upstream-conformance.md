@@ -193,6 +193,13 @@ A compromised or buggy plugin MUST NOT be able to acquire capabilities beyond th
 - **Conformance test:** A misbehaving plugin cannot read another plugin's secret, invoke an ungranted capability, or write the log directly.
 - **Failure mode:** Plugin compromise spreads → every added integration enlarges the real attack surface → capability and security trade off after all, which is the failure the whole architecture exists to avoid.
 
+### ZU-EXT-5 — A human-rescue-derived demonstration is review-gated, never auto-promoted **(MUST)**
+When a human resolves a handoff escalation (a captcha wall, a declared human-only step), that intervention is recorded as a Shadow demonstration and may *propose* a rescue-derived agent — but it MUST NOT become agent behavior until it earns it by reproducing the recorded outcome through the same offline replay gate every synthesized agent passes.
+- **Why:** The apprenticeship loop turns escalation points (the edge of the agent's competence) into a curriculum — the compounding payoff of the human-in-the-loop path. But a rescue is *one* human's resolution of *one* hard case; promoting it directly into the agent would let an unverified, possibly-overfit demonstration silently become production behavior. The same discipline that protects a captured Shadow session (`replay_gate.verify_and_gate`) protects a rescue-derived one: propose freely, promote only on reproduced outcome, never auto-apply. Mirrors the Shadow "why never auto-promoted" rule.
+- **Mechanism (Zu):** the resolve path records the rescue via `zu_cli.apprentice` (redacted, with the operator's "why" intent) and surfaces it for REVIEW (`promoted: False`); promotion is gated by `zu_shadow.replay_gate.verify_and_gate`, which BLOCKS an agent whose replay does not reproduce the recorded outcome.
+- **Conformance test:** a synthetic resolved escalation becomes a redacted Shadow demonstration, and `verify_and_gate` holds (does not promote) a rescue-derived agent whose replay diverges from the recorded outcome.
+- **Failure mode:** rescues auto-promote → an unverified/overfit human intervention becomes agent behavior with no earn-it gate → the apprenticeship loop teaches the agent the wrong lesson silently.
+
 ---
 
 ## 6b. Rail mechanisms (`ZU-RAIL`) — for delegated-action consumers
@@ -414,6 +421,7 @@ implementations are plugins.
 | ZU-EXT-2 | Trusted/untrusted boundary explicit & documented | MUST | **Satisfied** | [`docs/TCB.md`](docs/TCB.md) |
 | ZU-EXT-3 | Port framework supports narrow typed contracts | SHOULD | **Satisfied** | typed Protocols + narrow broker verbs (mint/introspect); `test_oop_channel.py` |
 | ZU-EXT-4 | Plugin failure contained; no self-privilege-escalation | MUST | **Satisfied** | envelope + OOP memory boundary + gate; `test_oop_channel.py` |
+| ZU-EXT-5 | Human-rescue-derived demonstration is review-gated, never auto-promoted | MUST | **Satisfied** | `zu_cli.apprentice` records the redacted rescue (`promoted: False`); `zu_shadow.replay_gate.verify_and_gate` holds a non-reproducing rescue agent; `test_apprentice.py::test_unverified_rescue_agent_is_blocked_from_promotion` |
 | ZU-RAIL-1 | Captured rail bound to a human approval over its content hash | MUST | **Satisfied** | `Track.content_hash()` + `run_task(approved_rail_hash=…)` verify-before-replay; `test_rail.py` |
 | ZU-RAIL-2 | Run mode; `explore` mechanically disarms capability-bearing calls | MUST | **Satisfied** | `TaskSpec.mode`; `_invoke` stubs a capability-bearing call in explore; `test_rail.py` |
 | ZU-RAIL-3 | Consequence-weighted replay divergence, escalatable to a human | MUST | **Satisfied** | `ReplayArbiter` port + `_replay_track` consult → pause-for-human/stop/handoff; `test_rail.py` |

@@ -2156,7 +2156,7 @@ provides-extras = ["docker", "encryption"]
 
 [[package]]
 name = "zu-checks"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/zu-checks" }
 dependencies = [
     { name = "jsonschema" },
@@ -2171,7 +2171,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-cli"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "packages/zu-cli" }
 dependencies = [
     { name = "pyyaml" },
@@ -2205,7 +2205,7 @@ provides-extras = ["serve", "mcp", "test"]
 
 [[package]]
 name = "zu-core"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "packages/zu-core" }
 dependencies = [
     { name = "pydantic" },

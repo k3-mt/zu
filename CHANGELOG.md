@@ -7,6 +7,69 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — Human handoff + the apprenticeship loop (§3.4) (zu-core 0.2.10 → 0.2.11; zu-checks 0.2.4 → 0.2.5; zu-cli 0.2.5 → 0.2.6)
+When an agent hits friction on a system it is *entitled* to operate — a captcha /
+anti-bot wall, or a declared human-only step (a final "yes, send the wire") — it
+routes to a PERSON instead of failing or guessing. The stance is **route, never
+defeat**: Zu ships no captcha solver; it presents the challenge to an authorized
+human and resumes from exactly where it paused. Each resolved rescue then becomes a
+labelled demonstration — the escalation points are a curriculum at the edge of the
+agent's competence.
+
+- **`captcha` + `human-gate` detectors** (`zu-checks`, registered under
+  `zu.detectors`) emit `Verdict.kind="human"` — the human-routing siblings of the
+  plain tier-climb detectors. `captcha` reuses `bot-wall`'s deterministic signal but
+  routes to a person; `human-gate` is inert until a tool/config arms a declared
+  human-only step (`obs["human_gate"]`/`requires_human"]`, with an optional
+  `human_gate_reason`).
+- **The loop honors a detector/monitor `kind="human"`** (`zu-core` `run_task` halting
+  block): it pauses on the invocation that produced the observation via the EXISTING
+  `_pause_for_human`, reusing every resume/consume-once guarantee unchanged
+  (ZU-CD-1/2/5/6). The idempotency key is minted exactly as `_invoke` minted it for
+  that call, so a resume binds to it. Additive — a non-`human` ESCALATE still climbs
+  the tier ladder.
+- **The handoff API** on the `zu serve` FastAPI app (`zu-cli` `server.py`):
+  `GET /runs/{id}/pending` reads the paused run's `approval.requested`/`run.paused`
+  state FROM THE LOG and returns a REDACTED descriptor (Shadow redaction discipline,
+  so a token in a captcha URL never leaks to the operator); `POST /runs/{id}/resolve`
+  builds the `approval.resolved` event and resumes via `run_task(resume_from=…)` —
+  approve / deny / **defer**. An async **pending-escalation queue** with per-run
+  TIMEOUTS and a DEFER path (`zu_cli.handoff.HandoffQueue`) — never a tight
+  synchronous loop — plus `GET /runs/pending` and a minimal operator console at
+  `GET /handoff`.
+- **The apprenticeship loop** (`zu_cli.apprentice`): a resolved human intervention is
+  folded into a REDACTED `zu-shadow` `RecordedSession` WITH the operator's "why"
+  intent (semantic `{role,name,label}` capture, redacted at capture before append),
+  feeding the same synthesizer/induction. Promotion stays REVIEW-GATED — reused
+  `zu_shadow.replay_gate.verify_and_gate` BLOCKS a rescue-derived agent that does not
+  reproduce the recorded outcome; it is NEVER auto-promoted. `GET /apprenticeship`
+  surfaces the curriculum for review.
+- **Conformance `ZU-EXT-5`** — "a human-rescue-derived demonstration is review-gated,
+  never auto-promoted" — added to the `ZU-EXT` family with full three-way sync (prose
+  + §9 table row in `zu-upstream-conformance.md`, a MATRIX entry in
+  `test_conformance_matrix.py`, and the named proof
+  `test_apprentice.py::test_unverified_rescue_agent_is_blocked_from_promotion`). The
+  resume-exactly-once guarantee is already ZU-CD-2/6; a named test
+  (`test_server_handoff.py::test_double_resolve_does_not_double_execute`) shows the
+  handoff API path honors it.
+- **All offline, $0**: ScriptedProvider + a captcha-serving test tool; the captcha
+  detector fires `kind="human"` on a synthetic wall, `/pending` shows a blocked run
+  redacted, `/resolve` resumes and continues, a double-resolve does NOT double-execute,
+  and a synthetic rescue → Shadow demonstration with the review gate blocking an
+  unverified one.
+
+### Hardened — HITL handoff (review follow-ups)
+- **Concurrent-resolve consume-once**: `POST /runs/{id}/resolve` now serialises the whole
+  resume critical section under a per-run lock (`HandoffQueue.resolve_lock`), with the
+  existence check moved inside it — a *concurrent* double-resolve can no longer race the
+  log query before the first resume's `EXECUTION_CLAIMED` lands (the loser 404s). The
+  sequential consume-once guarantee was already ZU-CD-6.
+- **Human gate never silently downgrades** (`loop.py`): a `kind="human"` verdict that has
+  no invocation to bind the approval to now halts the run loudly rather than falling
+  through to a tier climb — making "a human gate that cannot bind stops, never proceeds"
+  an explicit invariant (defensive; the per-turn checkpoint structure already keeps a
+  dispatched call present on the reachable path).
+
 ### Added — Shadow: author an agent by demonstration (§2.8) — new `zu-shadow` 0.1.0 (zu-core 0.2.9 → 0.2.10; zu-cli 0.2.4 → 0.2.5)
 A Shadow recording IS the event bus run over a HUMAN session — the human is the
 policy for that one run — so recording costs almost nothing architecturally. The

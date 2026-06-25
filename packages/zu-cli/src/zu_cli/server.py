@@ -30,10 +30,17 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from zu_core import events as ev
+from zu_core.contracts import Status
 from zu_core.loop import run_task
 from zu_core.view import scope_event
 
 from .config import ConfigError, assemble, coerce_config, coerce_task
+from .handoff import (
+    HandoffQueue,
+    build_resolution_event,
+    paused_from_result,
+    run_id_for,
+)
 from .observe import defense_record
 
 
@@ -46,6 +53,21 @@ class RunRequest(BaseModel):
         None, description="Optional per-request config override; omit to use the server default."
     )
     include_events: bool = Field(True, description="Return the run's event log alongside the result.")
+
+
+class ResolveRequest(BaseModel):
+    """The POST /runs/{id}/resolve body — a human's decision on a paused run.
+
+    ``decision`` is ``approve`` | ``deny`` | ``defer``. ``approve`` resumes the
+    EXACT paused invocation (consume-once, key-bound); ``deny`` resolves without
+    authorizing it (the run continues, the action never runs); ``defer`` pushes the
+    deadline out without deciding. ``why`` is the operator's intent narration — the
+    apprenticeship signal, redacted before it is recorded as a demonstration."""
+
+    decision: str = Field("approve", description="approve | deny | defer")
+    by: str = Field("operator", description="who resolved it (for the audit record).")
+    why: str | None = Field(None, description="the operator's 'why' — fed to apprenticeship.")
+    defer_seconds: float = Field(900.0, description="for decision='defer': how long to extend.")
 
 
 class _Hub:
@@ -127,6 +149,14 @@ def create_app(
     scope_full = (view_scope or default_cfg.observability.scope) == "full"
     hub = _Hub()
     review: list[dict] = []  # in-memory view of the review queue (recent first)
+    # The human-handoff queue: paused runs (a captcha wall, a declared human-only
+    # step) wait here for an operator. Async, with per-run deadlines + a defer path
+    # — never a synchronous blocking loop (§3.4).
+    handoff = HandoffQueue()
+    # The apprenticeship feed: each RESOLVED rescue, turned into a redacted Shadow
+    # demonstration WITH the operator's "why" — a curriculum at the edge of the
+    # agent's competence. Review-gated downstream; NEVER auto-promoted.
+    apprenticeship: list[dict] = []
 
     def _append_review(record: dict) -> None:
         review.insert(0, record)
@@ -179,23 +209,43 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         bus.subscribe(_tee)  # feed the dashboard + review queue
 
+        run_kwargs: dict[str, Any] = {
+            "providers": providers,
+            "containment": default_cfg.containment,
+            "max_observation_chars": default_cfg.max_observation_chars,
+            "observation_strategy": default_cfg.observation_strategy,
+            "max_context_chars": default_cfg.max_context_chars,
+        }
+        keep_bus = False
         try:
-            result = await run_task(spec, provider, registry, bus, providers=providers,
-                                    containment=default_cfg.containment,
-                                    max_observation_chars=default_cfg.max_observation_chars,
-                                    observation_strategy=default_cfg.observation_strategy,
-                                    max_context_chars=default_cfg.max_context_chars)
+            result = await run_task(spec, provider, registry, bus, **run_kwargs)
+            events = await bus.query()
             body: dict = {"result": result.model_dump(mode="json")}
             if req.include_events:
-                events = await bus.query()
                 body["events"] = [e.model_dump(mode="json") for e in events]
+            # A human-in-the-loop pause is NOT a failure: register the paused run on
+            # the handoff queue (keeping its live context) so an operator can work it
+            # via /runs/{id}/pending + /resolve and the run resumes from exactly here.
+            if result.status is Status.PAUSED:
+                paused = paused_from_result(
+                    run_id_for(spec), result, spec=spec, provider=provider,
+                    registry=registry, bus=bus, providers=providers,
+                    run_kwargs=run_kwargs, events=list(events),
+                )
+                if paused is not None:
+                    await handoff.enqueue(paused)
+                    keep_bus = True  # the queue owns the bus now; resume needs it
+                    body["handoff"] = {"run_id": paused.run_id, "approval_id": paused.approval_id,
+                                       "status": "paused"}
             return body
         except Exception as exc:  # noqa: BLE001 - a model/infra failure is a 502, not a crash
             raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
         finally:
             # Release the per-request bus's sink (e.g. a sqlite connection) so a
-            # long-lived server doesn't leak one connection per request.
-            await bus.aclose()
+            # long-lived server doesn't leak one connection per request — UNLESS the
+            # run paused and the handoff queue now owns it for a later resume.
+            if not keep_bus:
+                await bus.aclose()
 
     @app.post("/run/stream", dependencies=auth)
     async def run_stream(req: RunRequest) -> Any:
@@ -296,11 +346,183 @@ def create_app(
         triage (most recent first), from the in-memory view of this process."""
         return {"pending": len(review), "items": review}
 
+    # --- human handoff (§3.4): paused runs an operator works through ----------
+
+    @app.get("/runs/pending", dependencies=auth)
+    async def handoff_queue() -> dict:
+        """The pending-escalation queue: every paused run awaiting a human, oldest
+        first (the order to work them). Each entry is REDACTED (Shadow discipline).
+        This is the async board an operator polls — never a blocking wait."""
+        items = await handoff.list_pending()
+        return {"pending": sum(1 for i in items if i["status"] == "pending"), "items": items}
+
+    @app.get("/runs/{run_id}/pending", dependencies=auth)
+    async def run_pending(run_id: str) -> dict:
+        """What this run is blocked on — read from its ``approval.requested`` /
+        ``run.paused`` log state, REDACTED. Enough to present the challenge (the
+        captcha url, the human-only step) without leaking a secret, and the
+        idempotency key the resolution must bind to."""
+        run = await handoff.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="no paused run with that id")
+        return run.public_view()
+
+    @app.post("/runs/{run_id}/resolve", dependencies=auth)
+    async def run_resolve(run_id: str, req: ResolveRequest) -> dict:
+        """A human submits the resolution. ``approve`` resumes the EXACT paused
+        invocation via ``run_task(resume_from=...)`` (key-bound + consume-once — a
+        double-resolve cannot double-execute); ``deny`` resolves without authorizing
+        it; ``defer`` extends the deadline without deciding. On approve/deny the
+        resolved rescue becomes a REDACTED Shadow demonstration (apprenticeship),
+        review-gated — never auto-promoted."""
+        # ``defer`` does not resume — handle it without the resume lock.
+        if req.decision == "defer":
+            if await handoff.get(run_id) is None:
+                raise HTTPException(status_code=404, detail="no paused run with that id")
+            await handoff.defer(run_id, extra_s=req.defer_seconds)
+            return {"run_id": run_id, "status": "deferred",
+                    "view": (await handoff.get(run_id)).public_view()}  # type: ignore[union-attr]
+
+        if req.decision not in ("approve", "deny"):
+            raise HTTPException(status_code=422, detail="decision must be approve | deny | defer")
+
+        # Serialise the WHOLE resume critical section per run: a concurrent
+        # double-resolve cannot both query the log before the first's
+        # EXECUTION_CLAIMED lands, so consume-once (ZU-CD-6) cannot be raced. The
+        # existence check is INSIDE the lock, so the loser sees an already-popped run
+        # and 404s rather than re-resuming.
+        async with handoff.resolve_lock(run_id):
+            run = await handoff.get(run_id)
+            if run is None:
+                raise HTTPException(status_code=404,
+                                    detail="no paused run with that id (already resolved?)")
+
+            # Record the human decision on the run's own log, bound to the exact
+            # invocation (ZU-CD-2), then resume from that log. The loop re-seats the
+            # run and executes ONLY the approved invocation (or, on deny / a key
+            # mismatch, nothing) — exactly once (ZU-CD-6).
+            resolution = build_resolution_event(run, req.decision, req.by)
+            await run.bus.publish(resolution)
+            resume_log = await run.bus.query()
+            try:
+                result = await run_task(
+                    run.spec, run.provider, run.registry, run.bus,
+                    resume_from=resume_log, **run.run_kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001 - a resume failure is a 502, not a crash
+                raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
+
+            run.status = "resolved"
+            run.resolution = {"decision": req.decision, "by": req.by}
+            final_events = await run.bus.query()
+
+            # Apprenticeship: turn the resolved human intervention into a Shadow
+            # demonstration WITH the operator's "why". Redacted, review-gated; this
+            # only RECORDS the demonstration — promotion is gated downstream by
+            # verify_and_gate and never auto-applied. Best-effort: an apprenticeship
+            # hiccup must not break the resume the human just authorized.
+            if req.decision == "approve":
+                try:
+                    from .apprentice import demonstration_from_rescue
+
+                    demo = demonstration_from_rescue(run, why=req.why, by=req.by)
+                    apprenticeship.insert(0, demo)
+                    del apprenticeship[200:]
+                except Exception:  # noqa: BLE001 - apprenticeship is additive, never load-bearing
+                    pass
+
+            # The run is done (or paused again on a further gate); drop it from the
+            # queue unless it paused once more (then re-register the new pending call).
+            await handoff.pop(run_id)
+            body: dict = {"run_id": run_id, "decision": req.decision,
+                          "result": result.model_dump(mode="json")}
+            if result.status is Status.PAUSED:
+                again = paused_from_result(
+                    run_id, result, spec=run.spec, provider=run.provider,
+                    registry=run.registry, bus=run.bus, providers=run.providers,
+                    run_kwargs=run.run_kwargs, events=list(final_events),
+                )
+                if again is not None:
+                    await handoff.enqueue(again)
+                    body["handoff"] = {"run_id": run_id, "status": "paused"}
+            else:
+                await run.bus.aclose()  # terminal — release the bus's sink
+            return body
+
+    @app.get("/handoff", response_class=HTMLResponse, dependencies=auth)
+    async def handoff_console() -> Any:
+        """A minimal operator console: view the pending-escalation board and resolve
+        an escalation. Vanilla JS, no build step; polls /runs/pending."""
+        return _HANDOFF_HTML
+
+    @app.get("/apprenticeship", dependencies=auth)
+    async def apprenticeship_feed() -> dict:
+        """The curriculum: resolved rescues recorded as Shadow demonstrations (with
+        the operator's redacted 'why'), awaiting REVIEW before any promotion. Never
+        auto-applied — promotion is gated by verify_and_gate."""
+        return {"count": len(apprenticeship), "items": apprenticeship}
+
     @app.get("/", response_class=HTMLResponse, dependencies=auth)
     async def dashboard() -> Any:
         return _DASHBOARD_HTML
 
     return app
+
+
+# The operator console for human handoff (vanilla JS, no build step): it polls the
+# /runs/pending board and lets an operator approve / deny / defer a paused run. Every
+# field it shows is already redacted server-side (Shadow discipline). Route, not
+# defeat: for a captcha it tells the operator to complete the challenge themselves.
+_HANDOFF_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Zu · handoff</title>
+<style>
+ :root{--bg:#0b0e14;--fg:#cdd6f4;--dim:#6c7086;--ok:#a6e3a1;--warn:#f9e2af;--bad:#f38ba8;--esc:#89b4fa}
+ body{background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,Menlo,monospace;margin:0;padding:1rem}
+ h1{font-size:15px} .dim{color:var(--dim)}
+ .card{border:1px solid #1e2230;border-left:3px solid var(--esc);border-radius:4px;padding:.6rem .8rem;margin:.6rem 0}
+ .card.expired{border-left-color:var(--bad)} .card .k{color:var(--esc);font-weight:600}
+ .needs{color:var(--warn);margin:.3rem 0} .args{color:var(--dim);white-space:pre-wrap;word-break:break-all}
+ button{font:inherit;background:#1e2230;color:var(--fg);border:1px solid #313244;border-radius:4px;
+   padding:.25rem .7rem;margin:.3rem .3rem 0 0;cursor:pointer} button:hover{border-color:var(--esc)}
+ .empty{color:var(--dim);font-style:italic}
+</style></head><body>
+<h1>Zu · human handoff <span class="dim" id="count"></span></h1>
+<p class="dim">Paused runs waiting for a person. Route, never defeat: for a captcha, complete the
+challenge yourself on the target system, then approve. Zu ships no solver.</p>
+<div id="board"><div class="empty">loading…</div></div>
+<script>
+ const token=new URLSearchParams(location.search).get('token');
+ const H=token?{'Authorization':'Bearer '+token,'Content-Type':'application/json'}:{'Content-Type':'application/json'};
+ const q=token?('?token='+encodeURIComponent(token)):'';
+ function esc(s){return (s||'').toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+ async function resolve(id,decision){
+   const why=decision==='approve'?prompt('Why? (your intent — recorded as a demonstration)')||'':'';
+   await fetch('/runs/'+encodeURIComponent(id)+'/resolve'+q,{method:'POST',headers:H,
+     body:JSON.stringify({decision,by:'operator',why})});
+   load();}
+ async function load(){
+   const r=await fetch('/runs/pending'+q,{headers:H}); const d=await r.json();
+   document.getElementById('count').textContent='· '+d.pending+' pending';
+   const b=document.getElementById('board');
+   if(!d.items.length){b.innerHTML='<div class="empty">none pending</div>';return;}
+   b.innerHTML='';
+   for(const it of d.items){
+     const c=document.createElement('div');c.className='card'+(it.status==='expired'?' expired':'');
+     c.innerHTML='<div><span class="k">'+esc(it.reason)+'</span> · '+esc(it.tool)+
+       ' <span class="dim">('+esc(it.status)+', '+esc(it.seconds_remaining)+'s left)</span></div>'+
+       '<div class="needs">'+esc(it.needs)+'</div>'+
+       '<div class="args">args: '+esc(JSON.stringify(it.args))+'</div>';
+     if(it.status==='pending'){
+       const mk=(label,dec)=>{const x=document.createElement('button');x.textContent=label;
+         x.onclick=()=>resolve(it.run_id,dec);return x;};
+       c.appendChild(mk('Approve & continue','approve'));
+       c.appendChild(mk('Deny','deny'));
+       c.appendChild(mk('Defer','defer'));}
+     b.appendChild(c);}
+ }
+ load(); setInterval(load,4000);
+</script></body></html>
+"""
 
 
 # A single self-contained page (vanilla JS, no build step): it opens the /events
