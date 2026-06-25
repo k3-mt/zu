@@ -7,6 +7,58 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — §6.4 HuggingFace task breadth + VLM-as-tool + proven policy path (zu-huggingface 0.2.4 → 0.2.5)
+Broadened the HuggingFace task surface from 8 tools to 18, added a vision-language
+model exposed **as a tool** (not the policy), and proved the chat policy path against
+the HuggingFace serving surfaces by shape (offline, no live call).
+
+- **Ten new task tools** (`zu_huggingface.tools`), each typed `zu_core.content` I/O,
+  each working hosted (InferenceClient task method) **and** local (transformers
+  pipeline) behind the one `HfClient` contract, each deriving its capability envelope
+  from the backend (hosted ⇒ `CAP_NET` + `router.huggingface.co`; local ⇒ nothing):
+  `SegmentImage` (`hf_segment`, image → labelled masks; masks base64-PNG, never raw
+  bytes), `EstimateDepth` (`hf_depth`, image → base64-PNG depth map), `AskDocument`
+  (`hf_doc_qa`, document image + question → answer), `AskImage` (`hf_vqa`, VQA),
+  `Speak` (`hf_speak`, text → `Audio` base64 WAV — the only non-text Content output),
+  `ClassifyAudio` (`hf_classify_audio`, audio → labels, the **same `[{label,score}]`
+  shape** as the text classifier so it is interchangeable with
+  `HfClassifierDetector`/`Validator`), `AskTable` (`hf_table_qa`), `ClassifyTable`
+  (`hf_tabular_classify`) and `PredictTable` (`hf_tabular_regress`).
+- **VLM-as-tool** — `VlmDescribe` (`hf_vlm`, **image + text prompt → text**): a
+  vision-language model's vision exposed as a *verb* so a TEXT policy can reason over a
+  picture. Hosted: a multimodal `chat_completion` (text part + `image_url` data-URL).
+  Local: an `image-text-to-text` pipeline. The policy stays text; only the tool sees
+  pixels.
+- **HfClient additions** (Protocol + both backends): `image_segmentation`,
+  `depth_estimation`, `document_question_answering`, `visual_question_answering`,
+  `text_to_speech`, `audio_classification`, `image_text_to_text`,
+  `table_question_answering`, `tabular_classification`, `tabular_regression`. New pure
+  helpers `_segments`/`_depth_to_b64`/`_qa_top` (shape normalisers) and `_wav_bytes`
+  (stdlib `wave` encoder for the local-TTS ndarray→bytes path, no new dependency).
+- **Tabular is hosted-only**: transformers has no first-class local tabular pipeline,
+  so `PipelineBackend.tabular_*` raise a clear hosted-only `RuntimeError` — they fetch
+  no model, so they cannot bypass the supply-chain guard.
+- **Supply-chain re-proof** (`test_supply_chain.py`): every new local task tool builds
+  its pipeline through `safe_pipeline_kwargs` (parametrised assertion that
+  `trust_remote_code=False`, the model id is carried, and an unpinned revision is
+  refused before any pipeline is built) — no new task can bypass §8.3.
+- **`pillow` added to the `[hosted]` extra**: depth/segmentation hosted responses are
+  PIL images the backend encodes to base64 PNG.
+- **Proven policy path** (`zu-providers/tests/test_hf_router_policy.py`, no live call):
+  an `httpx.MockTransport` serving the OpenAI `/v1/chat/completions` shape proves the
+  existing `openai-compatible` adapter against the HF chat surfaces — the request path
+  (`<base_url>/chat/completions`), the `Bearer` derived from `HF_TOKEN`, the body, and
+  identical response parsing. **The HF router `/v1`, a dedicated Inference Endpoint
+  `/v1`, and a local vLLM `/v1` are the same adapter + config** (only `base_url`
+  differs; `api_key_env=HF_TOKEN`) — asserted parametrically over all three base URLs.
+  A **VLM policy** (image in the chat request, a multimodal `content` list with an
+  `image_url` data-URL) is shown to ride the same adapter, the image part intact on the
+  wire. No new provider code — config only.
+- **Conformance**: none. This is tool breadth over the fixed family set; the one
+  guarantee worth checking ("no HF tool can fetch a local model bypassing
+  supply-chain") is already covered by §8.3 and re-proved for the new tasks above. No
+  new `ZU-*` requirement.
+
 ### Fixed — §4/§5 cross-tool session sharing + the opaque-handle invariant (adversarial-review follow-up)
 An adversarial review found that the §4/§5 cross-tool wiring was non-functional in
 production and the §11.3 confused-deputy invariant was inverted — both masked by test

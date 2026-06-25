@@ -2214,7 +2214,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2" }]
 
 [[package]]
 name = "zu-huggingface"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/zu-huggingface" }
 dependencies = [
     { name = "zu-core" },
@@ -2223,6 +2223,7 @@ dependencies = [
 [package.optional-dependencies]
 hosted = [
     { name = "huggingface-hub" },
+    { name = "pillow" },
 ]
 local = [
     { name = "pillow" },
@@ -2232,6 +2233,7 @@ local = [
 [package.metadata]
 requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'hosted'", specifier = ">=0.24" },
+    { name = "pillow", marker = "extra == 'hosted'" },
     { name = "pillow", marker = "extra == 'local'" },
     { name = "transformers", marker = "extra == 'local'", specifier = ">=4.40" },
     { name = "zu-core", editable = "packages/zu-core" },

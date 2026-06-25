@@ -233,7 +233,70 @@ This is the first instance of a general pattern, not a browser trick: **heavy ob
 
 ---
 
-## 5. Pointer Control — Faithful Cursor Movement
+## 5. Pattern Recognition & Guided Search — the AlphaZero-shaped navigation stack
+
+**Status: new design. The pattern library is the highest-leverage new asset; build it before (or alongside) any live search.**
+
+This is the navigation and planning layer on top of the Action Surface (§4) and the track/rail (§1). It takes inspiration from chess engines — but the right template is **AlphaZero** (guided search with a learned policy prior and a learned forward/value model), **not Deep Blue** (brute-force enumeration), because UIs lack the properties that made brute force work.
+
+### 5.1 Why "explore all states" (Deep Blue) does not transfer
+
+A UI is a state space with transitions, and the Action Surface is literally the **move generator** (the affordances are the "legal moves from this position"), so the tree-search *structure* maps over. But Deep Blue worked on three properties UIs do not have:
+
+- **No free forward model.** Chess rules tell you exactly the board after a move, for free. In a UI, the only way to know what state a click produces is to *actually click it* — the transition function is hidden behind a side-effecting, often irreversible, network-bound action. **You cannot tree-search a space where visiting a node might charge a card or send an email.** This is the killer difference.
+- **No cheap evaluation.** "How good is this state for the task?" has no fast heuristic — judging it is the expensive model call you are trying to economize.
+- **Not closed or stationary.** UIs are non-stationary and adversarial.
+
+So a literal "explore all states" search is intractable *and unsafe*: the branching factor times the cost-and-irreversibility of expanding a node explodes.
+
+### 5.2 The three tractable recoveries
+
+The chess intuition is recoverable, three ways, all of which fit Zu:
+
+- **Search only the safe, reversible sub-graph (live).** Some actions *do* have cheap, reversible forward models: read-only navigation (links, menus, expanding sections), forms before submission, anything idempotent. Explore those freely; stop at the boundary of side-effecting actions, which require commitment or human escalation. **That reversible-vs-committing boundary is itself a rail concept (§1)** and is worth detecting explicitly.
+- **Search the learned state graph (offline, free).** You cannot cheaply simulate a *live* UI — but **the event log and Shadow recordings ARE a forward model**: every run recorded "from state X, action A led to state Y." Accumulated, that is an *empirical transition model* — the induced state machine of §1, which the apprenticeship loop grows. Run Deep-Blue-style search over the *remembered* graph, for free, because you are searching the model of the world you built from experience, not the live world.
+- **Plan, do not exhaustively execute (model-predictive control).** The model proposes a few candidate next actions (not all — the policy prunes the branching factor the way a grandmaster does not consider every legal move); look ahead a shallow depth using the *learned* transition model to estimate where each leads; pick the best; execute one step; re-plan from the real resulting state. Shallow guided lookahead with a learned model and a policy-pruned branching factor — the AlphaZero shape — and it is exactly *model proposes, harness disposes*.
+
+### 5.3 Pattern recognition — the pathfinder (the stronger idea)
+
+Humans do not reason about UIs pixel by pixel; they **recognize patterns and bring priors.** You see a search box and know it takes a query and returns results; you see a cart icon and know the whole checkout flow before clicking. This collapses search: you do not explore to discover what the magnifying glass does — you recognize it and skip to the expected interaction.
+
+Formally, this is a **library of UI design patterns** (the affordance vocabulary the web converged on) paired with **expected interaction scripts.** A login form, search box, paginated list, date picker, multi-step wizard, cookie banner, sortable table, autocomplete, modal, cart, infinite-scroll feed — a *finite, surprisingly small* set, and the web is overwhelmingly built from them. Each archetype carries strong priors: what it is for, the inputs it expects, the state it produces, the canonical sequence to operate it, what "done" looks like, and its common failure modes.
+
+Why it is powerful and tractable:
+
+- **Recognition, not search.** Classifying "this cluster is a login form" is a cheap, deterministic (or small-model) match over the Action Surface — far cheaper than search or a frontier call. The accessibility tree already supplies most of the signal.
+- **It prunes the search space massively.** Recognizing "checkout flow" gives a *prior over the whole sub-tree* — the likely path without exploring it. In search terms, **the pattern library is the learned heuristic that orders moves — AlphaZero's policy network.** The pattern is the hint; search only handles the residual.
+- **It carries success/failure criteria for free.** Each archetype knows what "done" looks like and its failure modes — feeding detectors and rail invariants (§1) directly.
+- **It generalizes across sites.** Sites differ in specifics but are built from the same archetypes; a login form is a login form on a thousand sites. So pattern recognition is precisely the layer that makes **cross-site generalization** tractable — the weakest point of Shadow-at-scale (§2.6). You do not learn each site; you recognize the universal patterns each is assembled from.
+
+**Honest caveats.** The long tail is real (novel/custom/deliberately-weird UIs will be missed → fall back to the model and to whatever safe search the surface allows, escalate if blind). Recognition can be wrong — the pattern is a **prior to be confirmed by observation, never ground truth**; the rail verifies the actual behavior matches the expected script, and a mismatch is a detector firing, not a crash. And the library is a curated, versioned, **community-contributable** asset (the registry shape — a moat, not just a feature).
+
+### 5.4 The synthesis — the stack maps onto what you already have
+
+These are not two features; they are a policy-and-search stack mirroring modern game engines, and every layer is an existing Zu component:
+
+- **Pattern library = the policy / heuristic network** — recognizes the situation, proposes the promising path, collapses the branching factor (the hint).
+- **Guided shallow search = the planner** — explores only what the pattern does not resolve, over the safe/reversible sub-graph (live) or the learned graph (offline).
+- **Event log + Shadow recordings = the forward model** — what makes any lookahead free.
+- **The rail (§1) = the evaluation-and-safety function** — scores states (co-reachable to the goal?), marks the irreversible commit boundary search must not cross, and verifies the pattern's predicted behavior actually happened.
+- **The model = the fallback** for the residual — the frontier of genuine novelty where §1.5 says it is irreducible.
+
+This is the AlphaZero shape, not Deep Blue: guided search with a learned policy prior and a learned value/forward model. The pattern library is the one genuinely new asset, and the highest-leverage one, because it is the heuristic that makes search tractable and cross-site generalization possible.
+
+### 5.5 What to build
+
+- **A `Pattern` plugin type (a contributable registry).** Each pattern = a recognizer (matches a cluster of the Action Surface to an archetype) + an interaction script (the canonical sequence) + success criteria + known failure modes. Versioned, community-contributable, gated by the `RED_TEAM.md` test contract.
+- **A recognizer pass** over the Action Surface output: cheap/deterministic or small-model classification → archetype + confidence. Low confidence → no hint, fall through to the model.
+- **Patterns emit rail invariants & detectors:** the expected "done" state and failure modes become §1 monitors that *verify the pattern's prediction*; a behavior mismatch fires a detector.
+- **A reversible-vs-committing classifier** for actions (read-only/idempotent vs side-effecting) — marks the live-search boundary and a rail commit-boundary.
+- **An empirical transition model** built from the event log + Shadow recordings (the induced FSM of §1), and an **offline search** (best-first / MCTS-style) over it for planning, with the pattern library as the move-ordering prior.
+- **A guided MPC loop (optional, later):** model proposes K candidate actions → shallow lookahead over the learned model → pick → execute one → re-plan. Keep K small (policy-pruned branching).
+- **Fallback discipline:** recognized → fast confident path; unrecognized → model + safe search; blind → escalate. The pattern is a verified prior, never ground truth.
+
+---
+
+## 6. Pointer Control — Faithful Cursor Movement
 
 **Status: designed (see Engineering Design §12). Build into the browser tool (tier 2 / tier 4).**
 
@@ -285,7 +348,7 @@ def pointer_path(start, target, seed) -> list[MoveSample]:
 
 ---
 
-## 6. Models Everywhere — OpenRouter & HuggingFace
+## 7. Models Everywhere — OpenRouter & HuggingFace
 
 **Status: designed (see Engineering Design §8). The policy path is mostly done; build the `zu-huggingface` task-tool adapter.**
 
@@ -346,7 +409,7 @@ The **port is the role**, assigned per agent — HuggingFace only supplies the m
 
 ---
 
-## 7. Agent Infrastructure — the Capability Frontier ("Category 1")
+## 8. Agent Infrastructure — the Capability Frontier ("Category 1")
 
 **Status: design frontier — being designed in a dedicated effort. Captured here for completeness; do not over-build yet.**
 
@@ -388,7 +451,57 @@ Once an agent has a card + credentials, it is a **financial target**. Every page
 
 ---
 
-## 8. How it all connects
+## 9. Defence in Depth — a Worked Threat Model
+
+**Status: not a build target — a worked example of the security model in action, and a regression test for the containment layers.** Zu assumes things will pop; the design is *containment*, not prevention of every primitive. This traces a real-world attack vector stage by stage to show the layers doing their job individually — and is honest about what Zu does and does not stop. The red-team agent (`RED_TEAM.md`) should verify the runtime produces this outcome.
+
+**The attack.** A malicious PDF runs embedded JavaScript that (1) **fingerprints** the OS/version, (2) **phones home** to a command-and-control server to exfiltrate the fingerprint and pull a second-stage payload, then (3) the second stage attempts a **sandbox/container escape**.
+
+**The meta-point first, honestly.** Zu is *not* a PDF sandbox or a JavaScript-engine hardener. If the agent opens a malicious PDF in a renderer with a JS-engine vulnerability, Zu does not patch that renderer — that is the renderer's job and your supply-chain/patching job. What Zu changes is **what the exploit can reach, learn, and do once it fires.** Defence in depth assumes the primitive will fire; the design contains the blast radius.
+
+### 9.1 Stage 1 — fingerprinting (partially contained)
+
+The agent runs inside the capability envelope — a minimal, **ephemeral** container. So the fingerprinting JS learns the *sandbox's* OS, not your host or a real user's machine. There is no juicy desktop to profile; it sees a stripped, disposable box, ideally a known-minimal image. Zu does not stop the fingerprinting from running, but it **starves it of useful information** — the version it reports back is the throwaway box's.
+
+### 9.2 Stage 2 — the phone-home callback (severed — the crux)
+
+This is the stage Zu is *most* designed to break. **Network egress is an allowlist, not the open internet, enforced mechanically beneath the agent.** The C2 server is not on the allowlist, so:
+
+- The fingerprint exfiltration **fails at the network layer** — the connection to an un-allowlisted host returns nothing.
+- The **second-stage payload cannot be fetched** — and this chain *depends* on the callback to deliver the actual escape JS. No callback, no second stage.
+
+The inference channel the agent uses is a separate, harness-owned, privileged path that **excludes arbitrary egress**, so the exploit cannot tunnel out "through the LLM API" either. A two-stage, network-dependent chain (fingerprint → C2 → escape payload) is precisely what the egress allowlist is built to defeat: the exploit fires locally but is cut off from its own next stage.
+
+### 9.3 Stage 3 — sandbox escape (moot here; bounded even if self-contained)
+
+If stage 2 is severed, stage 3 never receives its payload, so in this chain it is moot. But suppose a *self-contained* escape exists — Zu's posture is defence in depth, not a guarantee of unescapability:
+
+- Enforcement is mechanical (namespaces, syscall filters, mounts, an egress proxy the agent cannot reach) on a minimal, ephemeral container. Escaping a stripped container with a tight syscall surface is materially harder than escaping a fat one.
+- Backend isolation is a swappable port: for genuinely hostile workloads, **escalate to a microVM** (Firecracker-class), where "container escape" stops being a kernel-syscall problem and becomes a hypervisor-boundary problem — a far higher bar.
+- Even a successful escape lands in an **ephemeral box with no standing credentials and no open egress** — the blast radius is one disposable unit, and the attacker still cannot get the loot *out* (back to the allowlist).
+
+### 9.4 What Zu does NOT stop (the honest part)
+
+- **It does not prevent the exploit from firing.** Patch renderers; treat the PDF library as a supply-chain surface. Better still: prefer a **non-executing PDF path** (extract text/structure without running embedded JS) — *do not give the attacker the primitive in the first place*. Prevention above containment, always.
+- **The allowlist is only as good as its configuration.** A sloppy or over-broad allowlist reopens the callback path. The guarantee is mechanical *enforcement of a policy a human sets* — a sloppy policy is a sloppy defence. And if the C2 is hosted on a domain already on your allowlist (a compromised legitimate service you talk to), egress filtering alone will not catch it; you are relying on the next layers.
+- **Container escapes are real.** "Harder" is not "impossible." MicroVM isolation is the answer when the workload warrants it, and choosing it is a deliberate escalation, not the default.
+- **A self-contained, zero-callback exploit changes the stage-2 calculus** — though it still has to beat the isolation in stage 3 and still cannot exfiltrate what it learns past the egress boundary.
+
+### 9.5 Hardening checklist (untrusted-document workloads)
+
+- Prefer a **non-executing** document path (extract, do not render-with-JS).
+- Keep the **egress allowlist tight**; exclude anything the task does not strictly need.
+- Run untrusted-document handling at the **microVM isolation tier**, not shared-kernel.
+- **Minimal, ephemeral** container image; **no standing credentials**.
+- Put everything on the **event log**, so a severed callback attempt is a *visible detector signal* (a denied egress to an unknown host), not a silent near-miss.
+
+### 9.6 The clean statement
+
+> Zu does not stop the PDF from being malicious; it makes the malice land in a disposable box that **can't phone home, can't fetch its second stage, and can't carry anything back out.** For a two-stage phone-home chain, severing the callback is usually fatal to the attack — which is the whole point of *the safe default is the contained one.*
+
+---
+
+## 10. How it all connects
 
 These are not separate features; they reinforce each other around a small set of shared mechanisms.
 
@@ -396,22 +509,24 @@ These are not separate features; they reinforce each other around a small set of
 - **Handles are the shared currency of perception and action.** Shadow records *by* semantic target (role + name); the Action Surface presents *by* semantic target; pointer control moves to the *resolved* target. The same coin runs recording, perception, and faithful action.
 - **The track/rail is the deterministic backbone.** The Action Surface bounds the action space so synthesis is tractable; Shadow's "why" annotations become rail invariants; the synthesizer emits the induced FSM; detectors/validators/monitors *are* the rail; reachability + rollback + escalation handle failure. **Model proposes, harness disposes** is the theory's own conclusion (§1.5).
 - **The apprenticeship loop grows the deterministic portion.** Every human rescue is a new trace; more of the track becomes an induced, checkable rail; the model is pushed to the shrinking frontier of novelty.
+- **Pattern recognition and guided search are the navigation stack (§5).** The pattern library is the policy/heuristic that orders moves; the rail is the evaluator and the commit boundary; the event log plus Shadow recordings are the forward model; the model is the fallback. It is the AlphaZero shape — guided search over a learned model, not brute-force enumeration — and it is what makes tractable planning and cross-site generalization possible on top of the Action Surface.
 - **HuggingFace supplies the models** for every role — the multimodal brain, or the sensing/checking/searching tools — all behind the typed ports and the envelope.
-- **Agent infrastructure (§7) is the next frontier**: the same capability-envelope primitive applied to real-world instruments, making the agent a legitimate economic actor — *contained*, not *issued*.
+- **Agent infrastructure (§8) is the next frontier**: the same capability-envelope primitive applied to real-world instruments, making the agent a legitimate economic actor — *contained*, not *issued*.
 
 ---
 
-## 9. Suggested build sequence
+## 11. Suggested build sequence
 
 Ordered to keep something runnable and to harden the foundation before the flashy parts:
 
 1. **Rail components (§1.7)** — `Monitor` abstraction, invariant/spec layer, reachability checker, event-log rollback. These harden everything else and are pure, testable code.
 2. **Action Surface (§4.5)** — the deterministic perception tool + handle registry + escalate-when-blind. Unlocks cheap perception and bounds the synthesis space.
-3. **Pointer Control (§5.4)** — the seeded path generator + CDP dispatch. Small, self-contained, completes the browser action side.
-4. **HuggingFace task tools (§6.4)** — `zu-huggingface` adapter + taxonomy→port mapping. Verify the policy path against the HF router first (likely config-only).
-5. **Shadow (§2.8)** — recorder + "why" + synthesizer + verification + `--scale`. Depends on the Action Surface (handles) and emits FSM + invariants into the rail.
-6. **Human-in-the-loop & apprenticeship loop (§3.4)** — the `human-in-the-loop` target + handoff API + queue, then wire rescues back into Shadow. Depends on §2.
-7. **Agent infrastructure (§7.5)** — only after its dedicated design pass settles the contracts; build the `CredentialBroker` port and grant model behind the envelope, integrating issuers, never becoming one.
+3. **Pattern recognition library (§5.5)** — the `Pattern` plugin type (recognizer + interaction script + success/failure criteria) and the recognizer pass over the Action Surface. The highest-leverage navigation asset: it prunes search, supplies success criteria, and is what makes cross-site generalization tractable. Live/offline guided search is a later addition on top of it.
+4. **Pointer Control (§6.4)** — the seeded path generator + CDP dispatch. Small, self-contained, completes the browser action side.
+5. **HuggingFace task tools (§7.4)** — `zu-huggingface` adapter + taxonomy→port mapping. Verify the policy path against the HF router first (likely config-only).
+6. **Shadow (§2.8)** — recorder + "why" + synthesizer + verification + `--scale`. Depends on the Action Surface (handles) and emits FSM + invariants into the rail.
+7. **Human-in-the-loop & apprenticeship loop (§3.4)** — the `human-in-the-loop` target + handoff API + queue, then wire rescues back into Shadow. Depends on §2.
+8. **Agent infrastructure (§8.5)** — only after its dedicated design pass settles the contracts; build the `CredentialBroker` port and grant model behind the envelope, integrating issuers, never becoming one.
 
 Throughout: every plugin passes the test contract in `RED_TEAM.md`; every capability is recorded on the event log; the safe path stays cheap, or people route around it.
 

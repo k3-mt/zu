@@ -34,13 +34,23 @@ from .supply_chain import (
     verify_model_source,
 )
 from .tools import (
+    AskDocument,
+    AskImage,
+    AskTable,
     Classify,
+    ClassifyAudio,
+    ClassifyTable,
     DetectObjects,
     Embed,
+    EstimateDepth,
     ImageToText,
+    PredictTable,
+    SegmentImage,
+    Speak,
     Summarize,
     Transcribe,
     Translate,
+    VlmDescribe,
     ZeroShotClassify,
 )
 
@@ -59,6 +69,17 @@ __all__ = [
     "ZeroShotClassify",
     "Summarize",
     "Translate",
+    # §6.4 breadth
+    "SegmentImage",
+    "EstimateDepth",
+    "AskDocument",
+    "AskImage",
+    "Speak",
+    "ClassifyAudio",
+    "VlmDescribe",
+    "AskTable",
+    "ClassifyTable",
+    "PredictTable",
     # role wrappers
     "HfClassifierDetector",
     "HfClassifierValidator",

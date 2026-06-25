@@ -49,6 +49,53 @@ class FakeHfClient:
         self.calls.append(("translate", text, model))
         return "bonjour le monde"
 
+    # --- §6.4 breadth: the wider task surface (canned, already-normalised) ------
+
+    def image_segmentation(self, image: bytes, model: str) -> list[dict]:
+        self.calls.append(("image_segmentation", image, model))
+        return [
+            {"label": "cat", "score": 0.98, "mask_b64": "bWFzazE="},
+            {"label": "background", "score": 0.5, "mask_b64": "bWFzazI="},
+        ]
+
+    def depth_estimation(self, image: bytes, model: str) -> dict:
+        self.calls.append(("depth_estimation", image, model))
+        return {"depth_png_b64": "ZGVwdGg="}
+
+    def document_question_answering(self, image: bytes, question: str, model: str) -> dict:
+        self.calls.append(("document_question_answering", image, question, model))
+        return {"answer": "42.00", "score": 0.91}
+
+    def visual_question_answering(self, image: bytes, question: str, model: str) -> dict:
+        self.calls.append(("visual_question_answering", image, question, model))
+        return {"answer": "a cat", "score": 0.88}
+
+    def text_to_speech(self, text: str, model: str) -> bytes:
+        self.calls.append(("text_to_speech", text, model))
+        return b"RIFF....WAVEfmt "
+
+    def audio_classification(self, audio: bytes, model: str) -> list[dict]:
+        self.calls.append(("audio_classification", audio, model))
+        return [{"label": "speech", "score": 0.95}, {"label": "music", "score": 0.05}]
+
+    def image_text_to_text(self, image: bytes, prompt: str, model: str) -> str:
+        self.calls.append(("image_text_to_text", image, prompt, model))
+        return "a photo of a cat sitting on a mat"
+
+    def table_question_answering(
+        self, table: dict[str, list[str]], question: str, model: str
+    ) -> dict:
+        self.calls.append(("table_question_answering", table, question, model))
+        return {"answer": "120", "cells": ["120"], "aggregator": "SUM"}
+
+    def tabular_classification(self, table: dict[str, list[str]], model: str) -> list[str]:
+        self.calls.append(("tabular_classification", table, model))
+        return ["yes", "no"]
+
+    def tabular_regression(self, table: dict[str, list[str]], model: str) -> list[float]:
+        self.calls.append(("tabular_regression", table, model))
+        return [3.14, 2.72]
+
 
 @pytest.fixture
 def fake_client() -> FakeHfClient:

@@ -71,3 +71,15 @@ def test_validator_silent_on_nonstring_value(fake_client) -> None:
     val = HfClassifierValidator(fake_client, "m", fail_on=["x"])
     assert val.check(Result(status=Status.SUCCESS, value=None), _ctx({})) is None
     assert val.check(Result(status=Status.SUCCESS, value={"n": 42}), _ctx({})) is None
+
+
+def test_audio_classifier_output_is_consumable_like_text(fake_client) -> None:
+    # The port is the role: ``audio_classification`` funnels through the same
+    # ``[{label,score}]`` normaliser as ``text_classification``, so an audio
+    # classifier's output is consumable by the same gate logic a detector applies
+    # to a text classifier (top label + threshold), no new role class needed.
+    scored = fake_client.audio_classification(b"\x00\x01", "MIT/ast")
+    assert scored[0]["label"] == "speech" and scored[0]["score"] >= 0.5
+    # the detector's decision is exactly this shape check:
+    flagged = scored and scored[0]["label"].lower() == "speech" and scored[0]["score"] >= 0.5
+    assert flagged

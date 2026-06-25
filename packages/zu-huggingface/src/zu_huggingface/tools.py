@@ -229,3 +229,278 @@ class Translate(_HfTool):
     async def __call__(self, ctx: Any, text: str) -> dict:
         out = self._c().translate(text, self.model)
         return {"text": out, "model": self.model}
+
+
+# --- §6.4 breadth: the wider task surface -------------------------------------
+
+_IMAGE_PARAMS = {
+    "type": "object",
+    "properties": {
+        "data_b64": {"type": "string", "description": "base64-encoded image"},
+        "path": {"type": "string", "description": "local image file path"},
+    },
+}
+
+
+def _image_question_params(media: str) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "data_b64": {"type": "string", "description": f"base64-encoded {media}"},
+            "path": {"type": "string", "description": f"local {media} file path"},
+            "question": {"type": "string"},
+        },
+        "required": ["question"],
+    }
+
+
+class SegmentImage(_HfTool):
+    """Image segmentation — image → labelled masks. Role: Tool (§8.5 CV)."""
+
+    name = "hf_segment"
+    prompt_fragment = "hf_segment(data_b64|path): segment an image into labelled regions (masks)."
+    schema = {
+        "name": "hf_segment",
+        "description": "Segment an image into labelled regions via a HuggingFace model.",
+        "parameters": _IMAGE_PARAMS,
+    }
+
+    async def __call__(self, ctx: Any, data_b64: str | None = None, path: str | None = None) -> dict:
+        image = _decode_media(data_b64, path)
+        _ = Image(data=image)  # typed currency in
+        segments = self._c().image_segmentation(image, self.model)
+        return {"segments": segments, "count": len(segments), "model": self.model}
+
+
+class EstimateDepth(_HfTool):
+    """Depth estimation — image → depth map (base64 PNG). Role: Tool (§8.5 CV)."""
+
+    name = "hf_depth"
+    prompt_fragment = "hf_depth(data_b64|path): estimate per-pixel depth of an image (PNG depth map)."
+    schema = {
+        "name": "hf_depth",
+        "description": "Estimate the depth map of an image via a HuggingFace model.",
+        "parameters": _IMAGE_PARAMS,
+    }
+
+    async def __call__(self, ctx: Any, data_b64: str | None = None, path: str | None = None) -> dict:
+        image = _decode_media(data_b64, path)
+        _ = Image(data=image)
+        out = self._c().depth_estimation(image, self.model)
+        return {"depth_png_b64": out["depth_png_b64"], "model": self.model}
+
+
+class AskDocument(_HfTool):
+    """Document QA — (document image + question) → answer. Role: Tool (§8.5)."""
+
+    name = "hf_doc_qa"
+    prompt_fragment = "hf_doc_qa(data_b64|path, question): answer a question about a document image."
+    schema = {
+        "name": "hf_doc_qa",
+        "description": "Answer a question about a document image via a HuggingFace model.",
+        "parameters": _image_question_params("document image"),
+    }
+
+    async def __call__(
+        self, ctx: Any, question: str, data_b64: str | None = None, path: str | None = None
+    ) -> dict:
+        image = _decode_media(data_b64, path)
+        _ = Image(data=image)
+        _ = Text(text=question)
+        out = self._c().document_question_answering(image, question, self.model)
+        return {**out, "model": self.model}
+
+
+class AskImage(_HfTool):
+    """Visual QA — (image + question) → answer. Role: Tool (§8.5 Multimodal)."""
+
+    name = "hf_vqa"
+    prompt_fragment = "hf_vqa(data_b64|path, question): answer a question about an image."
+    schema = {
+        "name": "hf_vqa",
+        "description": "Answer a question about an image via a HuggingFace VQA model.",
+        "parameters": _image_question_params("image"),
+    }
+
+    async def __call__(
+        self, ctx: Any, question: str, data_b64: str | None = None, path: str | None = None
+    ) -> dict:
+        image = _decode_media(data_b64, path)
+        _ = Image(data=image)
+        _ = Text(text=question)
+        out = self._c().visual_question_answering(image, question, self.model)
+        return {**out, "model": self.model}
+
+
+class Speak(_HfTool):
+    """Text-to-speech — text → audio (the inverse of Transcribe). Role: Tool.
+
+    The only tool whose typed Content output is non-text: the synthesised bytes
+    are wrapped :class:`Audio` (currency out) then base64-encoded into the dict.
+    """
+
+    name = "hf_speak"
+    prompt_fragment = "hf_speak(text): synthesise speech audio from text (returns base64 WAV)."
+    schema = {
+        "name": "hf_speak",
+        "description": "Synthesise speech audio from text via a HuggingFace TTS model.",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    }
+
+    async def __call__(self, ctx: Any, text: str) -> dict:
+        audio = self._c().text_to_speech(text, self.model)
+        clip = Audio(data=audio, mime="audio/wav")  # typed currency OUT
+        return {
+            "audio_b64": base64.b64encode(clip.data).decode(),
+            "mime": clip.mime,
+            "model": self.model,
+        }
+
+
+class ClassifyAudio(_HfTool):
+    """Audio classification — audio → labels. Role: Tool (or detector/validator).
+
+    Funnels through the same ``[{label,score}]`` shape as the text classifier, so
+    it is interchangeable with :class:`HfClassifierDetector`/``Validator``."""
+
+    name = "hf_classify_audio"
+    prompt_fragment = "hf_classify_audio(data_b64|path): classify/score an audio clip into labels."
+    schema = {
+        "name": "hf_classify_audio",
+        "description": "Classify an audio clip via a HuggingFace audio-classification model.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "data_b64": {"type": "string", "description": "base64-encoded audio"},
+                "path": {"type": "string", "description": "local audio file path"},
+            },
+        },
+    }
+
+    async def __call__(self, ctx: Any, data_b64: str | None = None, path: str | None = None) -> dict:
+        audio = _decode_media(data_b64, path)
+        _ = Audio(data=audio)
+        labels = self._c().audio_classification(audio, self.model)
+        return {"labels": labels, "top": labels[0]["label"] if labels else None, "model": self.model}
+
+
+class VlmDescribe(_HfTool):
+    """VLM-as-tool — (image + text prompt) → text. Role: Tool (§8.5 Multimodal).
+
+    A multimodal model exposed as a *verb*, not the policy: it lets a TEXT policy
+    reason over a picture by asking the VLM to describe/answer about it. Typed:
+    Image + Text in, Text out. The vision rides the client's image-text-to-text
+    path (a multimodal chat call hosted; an image-text-to-text pipeline local).
+    """
+
+    name = "hf_vlm"
+    prompt_fragment = "hf_vlm(data_b64|path, prompt): ask a vision-language model about an image."
+    schema = {
+        "name": "hf_vlm",
+        "description": "Describe or answer about an image via a HuggingFace vision-language model.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "data_b64": {"type": "string", "description": "base64-encoded image"},
+                "path": {"type": "string", "description": "local image file path"},
+                "prompt": {"type": "string"},
+            },
+            "required": ["prompt"],
+        },
+    }
+
+    async def __call__(
+        self, ctx: Any, prompt: str, data_b64: str | None = None, path: str | None = None
+    ) -> dict:
+        image = _decode_media(data_b64, path)
+        _ = Image(data=image)
+        _ = Text(text=prompt)
+        out = self._c().image_text_to_text(image, prompt, self.model)
+        _ = Text(text=out)  # typed currency OUT
+        return {"text": out, "model": self.model}
+
+
+class AskTable(_HfTool):
+    """Table QA — (table + question) → answer. Role: Tool (§8.5). Pure-structured."""
+
+    name = "hf_table_qa"
+    prompt_fragment = "hf_table_qa(table, question): answer a question over a table (column→cells)."
+    schema = {
+        "name": "hf_table_qa",
+        "description": "Answer a question over a table via a HuggingFace TableQA model.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {
+                    "type": "object",
+                    "description": "column name → list of cell strings",
+                    "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                },
+                "question": {"type": "string"},
+            },
+            "required": ["table", "question"],
+        },
+    }
+
+    async def __call__(self, ctx: Any, table: dict[str, list[str]], question: str) -> dict:
+        _ = Text(text=question)
+        out = self._c().table_question_answering(table, question, self.model)
+        return {**out, "model": self.model}
+
+
+class ClassifyTable(_HfTool):
+    """Tabular classification — rows → one label per row. Role: Tool (hosted-only).
+
+    Tabular models are sklearn/tabular-backed on the Hub and served only via the
+    Inference API; the local pipeline raises a clear hosted-only error (it never
+    fetches a model, so it cannot bypass the supply-chain guard)."""
+
+    name = "hf_tabular_classify"
+    prompt_fragment = "hf_tabular_classify(table): predict a class label per row of a table."
+    schema = {
+        "name": "hf_tabular_classify",
+        "description": "Predict a class label per row via a HuggingFace tabular model (hosted).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {
+                    "type": "object",
+                    "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                }
+            },
+            "required": ["table"],
+        },
+    }
+
+    async def __call__(self, ctx: Any, table: dict[str, list[str]]) -> dict:
+        labels = self._c().tabular_classification(table, self.model)
+        return {"labels": labels, "model": self.model}
+
+
+class PredictTable(_HfTool):
+    """Tabular regression — rows → one number per row. Role: Tool (hosted-only)."""
+
+    name = "hf_tabular_regress"
+    prompt_fragment = "hf_tabular_regress(table): predict a numeric value per row of a table."
+    schema = {
+        "name": "hf_tabular_regress",
+        "description": "Predict a numeric value per row via a HuggingFace tabular model (hosted).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {
+                    "type": "object",
+                    "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                }
+            },
+            "required": ["table"],
+        },
+    }
+
+    async def __call__(self, ctx: Any, table: dict[str, list[str]]) -> dict:
+        values = self._c().tabular_regression(table, self.model)
+        return {"values": values, "model": self.model}
