@@ -7,6 +7,40 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — §9.5 non-executing PDF extract: read the doc, never run its JS (zu-tools 0.2.8 → 0.2.9)
+§9.5 (the worked threat model) prefers a NON-EXECUTING document path: "extract
+text/structure WITHOUT running embedded JS … do not give the attacker the primitive
+in the first place. Prevention above containment." Phase 7 deferred this for lack of
+a PDF library; pypdf is now available, so the tool exists.
+
+- **`pdf_extract` (tier 1, no egress) — a PURE PARSER, not a renderer.** It reads a
+  PDF's content streams + object graph with pypdf, which has NO JavaScript engine, so
+  a malicious doc's embedded JS is data we read, never code we run. Input is the PDF
+  as base64 (`pdf_b64`) or a local `path` — NO url fetch, so the tool does not egress
+  (`capabilities`/`egress` are both empty `frozenset()`). If a URL is needed, the agent
+  composes `http_fetch` (SSRF-guarded + egress-allowlisted) and passes the bytes here;
+  keeping `pdf_extract` egress-free is the least-privilege point.
+- **Output is typed `zu_core.content`** — the extracted `Text` plus structure: page
+  count, per-page text, document metadata (title/author), and the outline if present.
+- **The §9.5 safety signal, made testable.** The tool DETECTS and REPORTS active
+  content it deliberately did NOT execute — embedded JavaScript (`/JS`/`/JavaScript`,
+  the `/Names/JavaScript` tree, an `/OpenAction`/`/AA` that would run JS), and
+  launch/URI actions — surfacing `{"active_content": {"javascript": true,
+  "open_action": …, "launch": …, "uri": …, "names": [...], "executed": false}}`. The
+  agent and the audit log thus SEE that the doc carried active content AND that it was
+  not run. pypdf cannot run it; the tool only reports its presence.
+- **Wiring.** pypdf is an OPTIONAL extra (`zu-tools[pdf]`, `pypdf>=6`), lazy-imported
+  inside the call with a clear hint (`pdf_extract needs pypdf: pip install
+  'zu-tools[pdf]'`) so a base install still imports/discovers the tool. Registered as
+  `pdf_extract = "zu_tools.pdf:PdfExtract"`. pypdf is in the workspace dev group so the
+  offline suite installs and tests it.
+- **Tests (`test_pdf.py`, all offline/$0).** Fixture PDFs are built IN-TEST with
+  pypdf's writer — a 1-page doc with known text + an embedded JS action, and a benign
+  one. Asserts: text + page count extracted; `active_content.javascript == true` AND
+  `executed == false` (the JS was SEEN but NOT run); a benign PDF reports
+  `javascript == false`; the tool declares no `CAP_NET`/egress AND a full parse
+  succeeds with `socket.socket` poisoned to raise (nothing network touched).
+
 ### Fixed — blind-surface escalation message at the last tier (zu-checks 0.2.5 → 0.2.6)
 `ActionSurfaceBlindDetector` only read `action_surface` for the blind reason, so a
 blind VISION surface (which emits `vision_surface`) fell back to a misleading

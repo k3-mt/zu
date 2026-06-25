@@ -1,7 +1,7 @@
 [project]
 name = "zu-tools"
-version = "0.2.8"
-description = "Zu built-in tools: web_search, http_fetch, html_parse, render_dom, browser"
+version = "0.2.9"
+description = "Zu built-in tools: web_search, http_fetch, html_parse, pdf_extract, render_dom, browser"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -20,6 +20,13 @@ classifiers = [
 # tier-2 render works out of the box once installed.
 dependencies = ["zu-core==0.2.1", "httpx", "selectolax", "zu-backends==0.2.1"]
 
+[project.optional-dependencies]
+# pdf_extract reads PDF content streams with pypdf — a PURE PARSER with no JS
+# engine, so a malicious doc's embedded JavaScript is never run (§9.5: prevention
+# above containment). Optional + lazy-imported so a base install still discovers
+# the tool; the tool raises a clear install hint if the extra is absent.
+pdf = ["pypdf>=6"]
+
 [project.entry-points."zu.tools"]      # <- how a tool is registered
 web_search = "zu_tools.search:WebSearch"
 http_fetch = "zu_tools.fetch:HttpFetch"
@@ -31,6 +38,7 @@ action_surface = "zu_tools.action_surface:ActionSurface"
 pointer = "zu_tools.pointer:PointerControl"
 vision = "zu_tools.vision:VisionCapture"
 simulate = "zu_tools.simulate:Simulate"
+pdf_extract = "zu_tools.pdf:PdfExtract"
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
