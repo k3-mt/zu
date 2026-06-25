@@ -133,6 +133,58 @@ def shadow_capture(
         raise typer.Exit(code=2) from None
 
 
+@shadow_app.command("run")
+def shadow_run(
+    recording: str = typer.Argument(..., help="A recording.json from `zu shadow record`/`capture`."),
+    url: str = typer.Option(..., "--url", help="The page to start the run from."),
+    set_: str = typer.Option("", "--set",
+                             help="Comma-separated NAME=VALUE overrides for typed values, "
+                                  "e.g. --set search=collars,size=Large."),
+    model_base_url: str = typer.Option(None, "--model-base-url",
+                                       help="An OpenAI-compatible /v1 base URL to enable "
+                                            "GENERALISATION (the model picks a control the demo "
+                                            "no longer matches). Omit for exact+override replay."),
+    model_name: str = typer.Option("gpt-4o-mini", "--model-name", help="Model id for generalisation."),
+    headless: bool = typer.Option(False, "--headless", help="Run without a visible window."),
+    seconds: float = typer.Option(None, "--seconds", help="Optional cap."),
+) -> None:
+    """LIVE: drive a recorded path on --url in a real Chrome — re-resolving each control,
+    applying --set overrides (muzzles→collars), asking the model for a control the demo no
+    longer matches, and STOPPING at the commit boundary (payment is brokered, not auto-run).
+    Needs the live extra: pip install 'zu-shadow[live]'.
+    """
+    _require_shadow()
+    try:
+        from zu_shadow.live_executor import run_live
+    except ModuleNotFoundError:  # pragma: no cover - live-only path
+        typer.echo("zu shadow run needs the live extra: pip install 'zu-shadow[live]'", err=True)
+        raise typer.Exit(code=2) from None
+    overrides: dict[str, str] = {}
+    for kv in set_.split(","):
+        kv = kv.strip()
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            overrides[k.strip()] = v
+    model = None
+    if model_base_url:  # pragma: no cover - live-only path
+        from zu_providers.openai_compatible import OpenAICompatibleProvider
+        model = OpenAICompatibleProvider(model=model_name, base_url=model_base_url)
+    try:
+        outs = run_live(recording, url, overrides=overrides, model=model,
+                        headed=not headless, max_seconds=seconds)
+    except (RuntimeError, ValueError) as exc:  # pragma: no cover - live-only path
+        typer.echo(f"run error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    done = sum(1 for o in outs if o.ok and o.handle)
+    if any(o.via == "escalated" for o in outs):
+        tail = "stopped at the commit boundary (payment is brokered / routed to a human)"
+    elif outs and outs[-1].ok:
+        tail = "completed the demonstrated path"
+    else:
+        tail = "stopped early (a step could not be resolved — escalate)"
+    typer.echo(f"shadow run: {done} step(s) executed; {tail}.")
+
+
 @shadow_app.command("synthesize")
 def shadow_synthesize(
     recording: str = typer.Argument(..., help="A recording.json from `zu shadow record`."),

@@ -7,6 +7,16 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the live executor + `zu shadow run`: the agent runs a recording itself and generalises (zu-shadow 0.1.10 → 0.1.11, zu-cli 0.2.7 → 0.2.8)
+`zu shadow run <recording> --url <url> [--set search=collars] [--model-base-url ...]` drives the
+recorded path on a real site in a Chrome you watch: it PERCEIVES the live affordances in-page
+(role+name, opaque data-zu-handle), re-resolves each demonstrated control, applies --set value
+overrides, asks the model (if configured) for a control the demo no longer matches, and STOPS
+at the commit boundary (payment is a §8 brokered capability, not auto-run). Validated headless
+end-to-end incl. generalisation: a muzzle recording re-run for collars searched "collars" and
+the model picked a collar product. Live drive behind zu-shadow[live]; the resolution logic is
+the unit-tested executor.
+
 ### Added — the live executor: the agent uses a recording and GENERALISES it (zu-shadow 0.1.9 → 0.1.10)
 zu_shadow.executor.execute() drives the demonstrated path on a live BrowserSession, resolving
 each step three ways: EXACT (re-resolve a fixed-flow control like "Add to cart" by role+name),
