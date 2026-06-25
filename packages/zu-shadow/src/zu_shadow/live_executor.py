@@ -23,9 +23,9 @@ from zu_core.surface import SurfaceAffordance, SurfaceView
 from .executor import (
     Step,
     StepOutcome,
-    _first_field,
-    _match,
+    _interstitial,
     _norm,
+    _resolve_exact,
     steps_from_recording,
 )
 from .live_capture import _launch_chrome, _require_playwright
@@ -187,11 +187,18 @@ def run_live(recording: str, url: str, *, overrides: dict[str, str] | None = Non
                     print(f"  [{i}] STOP at commit boundary: {step.name!r} (payment is brokered, not auto-run)")
                     break
                 surface = session.perceive()
-                value = ov.get(_norm(step.name), step.value) if step.kind == "type" else None
-                handle, via = _match(surface, step.role, step.name), "exact"
-                if handle is None and step.kind == "type":
-                    handle, via = _first_field(surface), "param"
-                if handle is None and step.kind == "click":
+                handle, via, value = _resolve_exact(step, surface, ov)
+                tries = 0
+                while handle is None and tries < 2:
+                    inter = _interstitial(surface)
+                    if inter is not None:
+                        session.act(inter, "click", None)  # dismiss a cookie/consent/popup
+                        print(f"  [{i}] dismissed an interstitial ({inter})")
+                    page.wait_for_timeout(700)             # let it settle / content load
+                    surface = session.perceive()
+                    handle, via, value = _resolve_exact(step, surface, ov)
+                    tries += 1
+                if handle is None and step.kind == "click":  # generalise only after retries
                     handle, via = _choose_sync(step, surface, model), "model"
                 if handle is None:
                     outcomes.append(StepOutcome(step, "unresolved", ok=False, detail="no target"))

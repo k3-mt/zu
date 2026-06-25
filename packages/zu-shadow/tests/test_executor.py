@@ -14,18 +14,27 @@ from zu_shadow.recorder import RawInput, Recorder
 
 
 class FakeSession:
-    """Scripts one SurfaceView per perceive() and records each act — the live browser
-    stand-in. The executor never sees a selector; it acts by opaque handle."""
+    """The live browser stand-in. Holds a list of page surfaces; ``perceive`` returns the
+    CURRENT one and ``act`` records and advances to the next page (a click navigates). With
+    ``advance_on_perceive=True`` the page instead settles between perceives (models lazy
+    content loading). The executor never sees a selector; it acts by opaque handle."""
 
-    def __init__(self, surfaces: list[SurfaceView]) -> None:
-        self._surfaces = list(surfaces)
+    def __init__(self, surfaces: list[SurfaceView], *, advance_on_perceive: bool = False) -> None:
+        self._s = list(surfaces)
+        self._i = 0
+        self._pa = advance_on_perceive
         self.acts: list[tuple[str, str, str | None]] = []
 
     def perceive(self) -> SurfaceView:
-        return self._surfaces.pop(0) if self._surfaces else SurfaceView()
+        s = self._s[min(self._i, len(self._s) - 1)] if self._s else SurfaceView()
+        if self._pa:
+            self._i += 1
+        return s
 
     def act(self, handle: str, kind: str, value: str | None = None) -> None:
         self.acts.append((handle, kind, value))
+        if not self._pa:
+            self._i += 1
 
     def current_url(self) -> str:
         return ""
@@ -78,6 +87,33 @@ async def test_generalises_to_a_new_query_and_a_new_product() -> None:
     # generalised the CHOICE: the model picked a collar product (a2), not the demonstrated muzzle
     assert session.acts[1] == ("a2", "click", None)
     assert session.acts[2] == ("a1", "click", None)
+
+
+async def test_dismisses_a_cookie_banner_and_continues() -> None:
+    # A consent banner that wasn't in the recording blocks the step → the executor dismisses
+    # it and re-perceives instead of giving up.
+    steps = [Step(kind="click", role="button", name="Add to cart")]
+    session = FakeSession([
+        _surface(("a1", "button", "Accept all cookies")),  # the banner is all that's actionable
+        _surface(("a1", "button", "Add to cart")),          # ...the page, once it's dismissed
+    ])
+    report = await execute(steps, session, ScriptedProvider.from_moves([]))
+    assert report.completed
+    assert session.acts == [("a1", "click", None), ("a1", "click", None)]  # dismiss, then add to cart
+    assert any(o.via == "interstitial" for o in report.outcomes)
+
+
+async def test_retries_perceive_for_lazy_loaded_content() -> None:
+    # The target isn't rendered on the first perceive (no banner, just loading) → retry, and
+    # find it WITHOUT falling back to a (possibly wrong) model choice.
+    steps = [Step(kind="click", role="button", name="Add to cart")]
+    session = FakeSession([
+        _surface(("a1", "link", "Home")),                   # still loading — no Add to cart yet
+        _surface(("a1", "button", "Add to cart")),          # ...appears on the next perceive
+    ], advance_on_perceive=True)
+    report = await execute(steps, session, ScriptedProvider.from_moves([]))
+    assert report.completed and [o.via for o in report.outcomes] == ["exact"]
+    assert session.acts == [("a1", "click", None)]          # the model was never asked
 
 
 async def test_stops_at_the_commit_boundary() -> None:

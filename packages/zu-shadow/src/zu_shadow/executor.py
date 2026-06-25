@@ -160,6 +160,40 @@ def _first_field(surface: SurfaceView) -> str | None:
     return None
 
 
+# A control that dismisses a blocking overlay (cookie/consent banner, popup) that the
+# demonstration didn't include — generic verbs only, anchored so it matches a dismiss button,
+# not "Accept terms" text. Accepting/closing a banner is reversible; it just unblocks the step.
+_DISMISS = re.compile(r"(?i)^(accept( all)?( cookies)?|agree|i agree|allow( all)?|got it|"
+                      r"ok(ay)?|continue|close|dismiss|no thanks|reject( all)?|"
+                      r"accept all cookies)$")
+
+
+def _interstitial(surface: SurfaceView) -> str | None:
+    """A dismiss control for a cookie/consent/popup overlay blocking the step — so the run
+    isn't derailed by an interstitial that wasn't in the recording."""
+    for a in surface.affordances:
+        if a.role in ("button", "link") and _DISMISS.match(_norm(a.label)):
+            return a.handle
+    return None
+
+
+def _resolve_exact(step: Step, surface: SurfaceView,
+                   ov: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Resolve a step WITHOUT the model: EXACT re-resolve (the demonstrated target by
+    role+name) or PARAM (type an override into a field). The model-choice generalisation is
+    the LAST resort, tried only after exact retries fail — so a lazy-loading or banner-blocked
+    page is retried for the real control instead of the model grabbing a wrong one."""
+    value = ov.get(_norm(step.name), step.value) if step.kind == "type" else None
+    handle = _match(surface, step.role, step.name)
+    if handle is not None:
+        return handle, "exact", value
+    if step.kind == "type":
+        f = _first_field(surface)
+        if f is not None:
+            return f, "param", value
+    return None, "", value
+
+
 async def _model_choose(step: Step, surface: SurfaceView, model: ModelProvider) -> str | None:
     """GENERALISE: the demonstrated control is gone, so the model picks the handle that best
     continues the task — bounded to the CURRENT affordances (it emits a handle, never a
@@ -190,10 +224,13 @@ async def execute(
     *,
     overrides: dict[str, str] | None = None,
     on_commit: str = "escalate",
+    max_retries: int = 2,
 ) -> RunReport:
     """Drive the demonstrated path on the live ``session``, generalising via ``overrides``
     (a typed value keyed by the step's name, e.g. {"search": "collars"}) and the model for
-    unmatched controls. Stops and escalates at the first commit-boundary step."""
+    unmatched controls. When a target isn't found, dismiss a blocking interstitial (cookie /
+    consent / popup) and RE-PERCEIVE before escalating — so a banner that wasn't in the
+    recording, or content still loading, doesn't derail the run. Stops at the commit boundary."""
     ov = {_norm(k): v for k, v in (overrides or {}).items()}
     report = RunReport()
     for i, step in enumerate(steps):
@@ -207,14 +244,21 @@ async def execute(
             return report
 
         surface = session.perceive()
-        value = ov.get(_norm(step.name), step.value) if step.kind == "type" else None
+        handle, via, value = _resolve_exact(step, surface, ov)
+        tries = 0
+        while handle is None and tries < max_retries:
+            inter = _interstitial(surface)
+            if inter is not None:  # dismiss a cookie/consent/popup that wasn't demonstrated
+                session.act(inter, "click", None)
+                report.outcomes.append(StepOutcome(
+                    Step(kind="click", role="button", name="(dismiss interstitial)"),
+                    "interstitial", handle=inter))
+            surface = session.perceive()  # re-perceive: the banner is gone / content settled
+            handle, via, value = _resolve_exact(step, surface, ov)
+            tries += 1
 
-        handle = _match(surface, step.role, step.name)          # EXACT: the demonstrated target
-        via = "exact"
-        if handle is None and step.kind == "type":
-            handle, via = _first_field(surface), "param"        # PARAM: type the override into a field
-        if handle is None and step.kind == "click":
-            handle, via = await _model_choose(step, surface, model), "model"  # MODEL: generalise
+        if handle is None and step.kind == "click":  # GENERALISE only after exact retries fail
+            handle, via = await _model_choose(step, surface, model), "model"
 
         if handle is None:
             report.outcomes.append(StepOutcome(step, "unresolved", ok=False,
