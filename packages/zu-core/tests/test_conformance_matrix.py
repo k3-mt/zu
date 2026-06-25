@@ -46,6 +46,9 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-RAIL-6": ("packages/zu-core/tests/test_invariants.py", "test_compiled_invariant_escalates_in_loop"),
     "ZU-RAIL-7": ("packages/zu-core/tests/test_reachability.py", "test_trap_state_detected"),
     "ZU-RAIL-8": ("packages/zu-core/tests/test_rollback.py", "test_rollback_restores_state_and_replans"),
+    # The proof lives in zu-patterns/tests; the matrix uses repo-relative paths
+    # from _ROOT (parents[3] == repo root), so it resolves.
+    "ZU-RAIL-9": ("packages/zu-patterns/tests/test_pattern_rail.py", "test_pattern_mismatch_fires_detector"),
 }
 
 

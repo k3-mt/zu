@@ -46,6 +46,9 @@ GROUPS = {
     "egress_enforcement": "zu.egress_enforcement",
     "replay_arbiters": "zu.replay_arbiters",
     "monitors": "zu.monitors",
+    # The pattern port (§5): a recognizer over the Action Surface + the rail
+    # invariants it emits. Read-only plugins, discovered like any other kind.
+    "patterns": "zu.patterns",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind
@@ -269,3 +272,4 @@ gate = kind_decorator("gates")
 channel = kind_decorator("channels")
 arbiter = kind_decorator("replay_arbiters")
 monitor = kind_decorator("monitors")
+pattern = kind_decorator("patterns")

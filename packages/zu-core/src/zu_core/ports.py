@@ -9,12 +9,20 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Sequence
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from .content import Action, Observation
 from .contracts import Event, Result
+from .surface import SurfaceView
+
+if TYPE_CHECKING:
+    # ``Invariant`` lives in invariants.py, which imports MonitorState/Verdict/
+    # RunContext FROM this module — importing it eagerly here would be a cycle.
+    # The Pattern Protocol only needs it for typing (annotations are strings
+    # under ``from __future__ import annotations``), so it is a type-only import.
+    from .invariants import Invariant
 
 # --- interface versioning (MLR §6) ---------------------------------------
 #
@@ -44,6 +52,7 @@ INTERFACE_VERSION: dict[str, int] = {
     "egress_enforcement": 1,  # EgressEnforcement — pluggable default-deny (ZU-NET-1)
     "replay_arbiters": 1,  # ReplayArbiter — replay-divergence decision (ZU-RAIL-3)
     "monitors": 1,  # Monitor — stateful history-aware automaton over the log (ZU-RAIL-5)
+    "patterns": 1,  # Pattern — recognize a surface archetype + emit rail invariants (§5)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -686,3 +695,77 @@ class Trigger(Protocol):
     source: str
 
     def listen(self) -> Iterator[TriggerEvent]: ...
+
+
+# --- the pattern port — the policy-prior / move-ordering layer (§5) --------
+#
+# A UI is a state space; the Action Surface is the move generator (legal moves).
+# A ``Pattern`` is a POLICY PRIOR over that surface — the AlphaZero-shape move
+# ordering, NOT a Deep-Blue brute-force enumerator. It RECOGNIZES a situation
+# (login form, cookie banner, search box, paginated list, …) over a core
+# ``SurfaceView`` and PROPOSES the canonical interaction, with success criteria
+# and known failure modes attached. It is READ-ONLY: it recognizes and emits
+# declarative invariants; it NEVER calls a tool and NEVER decides the task action
+# (that is the policy/search). A recognized pattern is a PRIOR TO BE CONFIRMED BY
+# OBSERVATION, never ground truth — its success criteria compile (via
+# ``zu_core.invariants.compile_spec``) to Monitors the rail VERIFIES, and a
+# behaviour mismatch fires a detector (ZU-RAIL-9), it is not trusted blindly.
+#
+# The contract takes the CORE ``SurfaceView`` (zu_core.surface), never zu-tools'
+# ``Surface`` — zu-core cannot import zu-tools. zu-tools projects its ``Surface``
+# onto ``SurfaceView`` through a thin one-way adapter; a pattern speaks only the
+# core type, so zu-patterns depends only on zu-core.
+
+
+class PatternStep(BaseModel):
+    """One canonical interaction step the prior PROPOSES — as HANDLES/role
+    predicates, never selectors and never a site-specific magic constant.
+
+    ``op`` is a generic verb (``fill`` | ``click`` | ``select`` | ``submit`` |
+    ``expect``). ``role``/``label_hint`` are predicates the recognizer DERIVED
+    from the surface (a substring/normalized match it bound), used to re-select
+    the affordance at run time. The step is a proposal; the policy or guided
+    search decides whether to follow it. A pattern never executes it.
+    """
+
+    model_config = {"frozen": True}
+
+    op: str
+    role: str | None = None
+    label_hint: str | None = None
+    note: str = ""
+
+
+class RecognitionResult(BaseModel):
+    """What a pattern's ``recognize`` returns when it fires — archetype, a
+    confidence in ``[0, 1]``, the affordance handles it bound, and the proposed
+    interaction script. ``None`` from ``recognize`` means no match (fall through
+    to the model + safe search)."""
+
+    model_config = {"frozen": True}
+
+    archetype: str
+    confidence: float
+    matched_handles: tuple[str, ...] = ()
+    script: tuple[PatternStep, ...] = ()
+    detail: str | None = None
+
+
+@runtime_checkable
+class Pattern(Protocol):
+    name: str
+    archetype: str
+
+    # Cheap/deterministic classification over the CORE SurfaceView. Returns a
+    # RecognitionResult (archetype + confidence + script + matched handles) or
+    # None (no match). It ENUMERATES/CLASSIFIES; it MUST NOT decide the task
+    # action (that is the policy's job).
+    def recognize(self, surface: SurfaceView) -> RecognitionResult | None: ...
+
+    # Success criteria as declarative Invariants the rail VERIFIES (§1 reuse):
+    # the predicted "done" state. Pure data — compiled by zu_core.invariants.
+    def success_invariants(self, result: RecognitionResult) -> list[Invariant]: ...
+
+    # Known failure modes as declarative Invariants whose breach is a detector
+    # firing (the pattern was a wrong prior — caught, never silently obeyed).
+    def failure_invariants(self, result: RecognitionResult) -> list[Invariant]: ...

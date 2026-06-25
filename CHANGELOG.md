@@ -7,6 +7,91 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — ZU-RAIL-9 success-criterion semantics now liveness-by-deadline (zu-core 0.2.8 → 0.2.9; zu-patterns 0.2.0 → 0.2.1)
+An adversarial review found ZU-RAIL-9 was hollow: a pattern's SUCCESS criterion
+compiled to `InvariantKind.THROUGHOUT`, which means "the success element must be
+present at EVERY surface." But a success element is, by definition, ABSENT until
+*after* the interaction completes, so the compiled Monitor returned `VIOLATION` on
+the very first pre-interaction `data.surface.captured` event in EVERY run — success
+and failure alike. The named proof only happened to test the mismatch direction.
+
+- **New additive `InvariantKind.EVENTUALLY`** in `zu_core.invariants` — a
+  liveness-by-DEADLINE property (LTL "eventually p, bounded by a deadline"): the
+  predicate need NOT hold on early/in-progress steps; the Monitor is INERT until
+  the predicate first holds (then satisfied forever) OR a deadline event arrives
+  without it (then, and only then, `VIOLATION`). The deadline is the
+  `Invariant.applies_to` event TYPE; `None` ⇒ any terminal event
+  (`TASK_TERMINAL`/`TASK_COMPLETED`) marking the interaction/run complete. Generic,
+  LTL-forward-compatible, no pattern-specific special-casing in core. Also a
+  `require_present` option on `SURFACE_CONTAINS` so a non-negated liveness token
+  must genuinely appear by the deadline (absence-of-evidence is unsatisfied, not
+  vacuously true).
+- **`rail.surface_shows` gained `liveness=`/`deadline=`.** Every pattern's
+  `success_invariants` now compile to `EVENTUALLY` (so pre-interaction surfaces do
+  NOT fire), and every `failure_invariants` now compile to the correct SAFETY
+  shape `THROUGHOUT NOT contains(failure-context)` (fire-on-appearance of a known
+  failure context such as an error alert), replacing the prior
+  positive-must-contain-THROUGHOUT mis-modelling. All 8 patterns updated.
+- **Two-sided ZU-RAIL-9 proof.** `test_pattern_mismatch_fires_detector`
+  strengthened (the success surface never appears AND the deadline arrives →
+  `VIOLATION`; inert before the deadline) and a NEW `test_pattern_match_does_not_fire`
+  (a SUCCEEDING run: pre-interaction surface lacking the affordance, then the
+  post-interaction surface showing it, then the deadline → NO `VIOLATION` at ANY
+  prefix). The match test fails against the old THROUGHOUT compilation and passes
+  only under EVENTUALLY — confirmed empirically.
+- **Commit-boundary discipline (LOW).** Documented `search._default_classifier`'s
+  `REVERSIBLE` default as OFFLINE-EXPLORATION-ONLY (it only lets the planner look
+  past an unknown edge during $0 offline search; it never gates a live
+  side-effecting action — the commit boundary is FLAGGED on each `PlanStep`, and
+  the live seam re-classifies with `reversibility.classify_action`, which
+  DEFAULTS TO COMMITTING). Added `test_live_classifier_defaults_to_committing`
+  (named in the comment as the proof) and
+  `test_offline_default_classifier_is_reversible_exploration_only`.
+
+### Added — §5 Pattern recognition & guided search (new zu-patterns 0.2.0; zu-core 0.2.7 → 0.2.8)
+The policy-prior / move-ordering layer over the Action Surface — the *AlphaZero*
+shape (recognize → propose → the rail verifies), not brute-force enumeration.
+
+- **New `Pattern` port** (`zu_core.ports.Pattern`, group `zu.patterns`, registry
+  decorator `@zu.pattern`, `INTERFACE_VERSION["patterns"]=1`). A pattern is
+  READ-ONLY: it `recognize`s a situation over a core `SurfaceView` and emits
+  `success_invariants`/`failure_invariants`; it never calls a tool and never
+  decides the task action. With it: `PatternStep`/`RecognitionResult` value
+  objects.
+- **New core `SurfaceView`** (`zu_core/surface.py`) — a pure-pydantic,
+  modality-agnostic surface view (`SurfaceAffordance`/`SurfaceView`). The crux of
+  the design: `recognize` takes this CORE type, never zu-tools' `Surface`
+  (zu-core stays pydantic-only). zu-tools projects its `Surface` onto it one-way
+  (`zu_tools.surface_adapter.to_surface_view`, dropping `handle_map`), so
+  zu-patterns depends only on zu-core.
+- **New `data.pattern.recognized` event** — the auditable record of what the
+  agent inferred (archetype, confidence, matched_handles, blind); a low-confidence
+  recognition emits NOTHING (no hint as ground truth).
+- **Additive `PredicateKind.SURFACE_CONTAINS`** in `zu_core.invariants` (one enum
+  value + one evaluator; `compile_invariant`/`compile_spec` unchanged) — folds
+  `data.surface.captured` / `data.pattern.recognized` events to verify an expected
+  post-state appeared (or, negated, is gone).
+- **New `zu-patterns` package** (0.2.0): the recognizer pass (`recognize`,
+  confidence-gated, low-confidence ⇒ fall-through), a principled reversible-vs-
+  committing classifier (`reversibility.py` — HTTP-method/idempotency, affordance
+  semantics, extensible priors, **default-to-committing**, no site constants), the
+  pattern→rail helpers (`rail.py`), an offline best-first planner over the Phase-1
+  `zu_core.reachability.Fsm` with the recognizer as the move-ordering prior plus an
+  event-log → FSM transition builder (`search.py`), and **8 starter patterns**:
+  `cookie_banner`, `login_form`, `search_box`, `modal_dialog`, `paginated_list`,
+  `sortable_table`, `autocomplete`, `cart_checkout` (the canonical irreversible-
+  boundary pattern — its place-order/pay step is classified COMMITTING and the
+  script stops before it).
+- **ZU-RAIL-9** — a recognized pattern's predicted outcome is VERIFIED by a rail
+  Monitor; a behaviour mismatch fires a detector (the pattern is a prior, never
+  ground truth). Full sync: prose + §9 table + matrix entry + the named proof
+  `test_pattern_mismatch_fires_detector`.
+- **Plugin-gate `patterns` case** (`zu_redteam.contract`, zu-redteam 0.2.4 →
+  0.2.5) — the cheap Gate-2 shape check for the read-only pattern kind.
+- **DEFERRED (documented seams, not built):** the live guided-MPC loop
+  (`search.live_mpc_step` is a stub) and the Shadow-sourced transition model
+  (Shadow is the next phase; `fsm_from_events` is the event-log source now).
+
 ### Added — §6.4 HuggingFace task breadth + VLM-as-tool + proven policy path (zu-huggingface 0.2.4 → 0.2.5)
 Broadened the HuggingFace task surface from 8 tools to 18, added a vision-language
 model exposed **as a tool** (not the policy), and proved the chat policy path against

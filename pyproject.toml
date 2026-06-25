@@ -19,6 +19,7 @@ dependencies = [
     "zu-cli",
     "zu-huggingface",
     "zu-runtime",
+    "zu-patterns",
 ]
 
 [tool.uv]
@@ -37,6 +38,7 @@ zu-redteam    = { workspace = true }
 zu-cli        = { workspace = true }
 zu-huggingface = { workspace = true }
 zu-runtime    = { workspace = true }
+zu-patterns   = { workspace = true }
 zu-testing    = { workspace = true }
 
 # Dev tooling installed by `uv sync` (PEP 735 dependency group).
@@ -113,7 +115,7 @@ warn_return_any = true
 [tool.coverage.run]
 branch = true
 source = ["zu_core", "zu_providers", "zu_tools", "zu_checks",
-          "zu_backends", "zu_redteam", "zu_cli", "zu"]
+          "zu_backends", "zu_redteam", "zu_cli", "zu_patterns", "zu"]
 
 [tool.coverage.report]
 show_missing = true

@@ -152,6 +152,15 @@ SURFACE_CAPTURED = "data.surface.captured"
 #  float, "dest": {"x": float, "y": float}, "seed": str}. Emitted by PointerControl
 # after a successful dispatch.
 POINTER_DISPATCHED = "data.pointer.dispatched"
+# A pattern recognizer matched an archetype over one step's action surface
+# (Engineering Design §5). data.* because it is perception the agent
+# INFERRED — the auditable record of "what did the agent recognize here" — NOT
+# an instruction it obeyed: a recognized pattern is a PRIOR, verified by a rail
+# Monitor (ZU-RAIL-9), never ground truth. A low-confidence recognition emits
+# NO event (no hint masquerading as fact). Payload:
+# {"archetype": str, "confidence": float, "matched_handles": list[str],
+#  "blind": bool}. Parented to the turn.
+PATTERN_RECOGNIZED = "data.pattern.recognized"
 
 HARNESS_TYPES: frozenset[str] = frozenset(
     {
@@ -191,6 +200,6 @@ HARNESS_TYPES: frozenset[str] = frozenset(
     }
 )
 DATA_TYPES: frozenset[str] = frozenset(
-    {SOURCE_FETCHED, RECORD_EXTRACTED, SURFACE_CAPTURED, POINTER_DISPATCHED}
+    {SOURCE_FETCHED, RECORD_EXTRACTED, SURFACE_CAPTURED, POINTER_DISPATCHED, PATTERN_RECOGNIZED}
 )
 ALL_TYPES: frozenset[str] = HARNESS_TYPES | DATA_TYPES

@@ -62,6 +62,22 @@ def check_plugin(kind: str, name: str, obj: Any) -> list[ContractFinding]:
     elif kind == "sinks":
         for m in ("append", "query", "stream", "count"):
             need(callable(getattr(obj, m, None)), f"missing a `{m}` method")
+    elif kind == "patterns":
+        # A pattern is READ-ONLY (it recognizes + emits invariants; it never
+        # acts), so this is the cheap Gate-2 shape check — no capability envelope
+        # to vet. A future small-model recognizer that needs egress would add a
+        # capability declaration here (a documented follow-up).
+        need(_is_str(getattr(obj, "name", None)), "missing a non-empty str `name`")
+        need(_is_str(getattr(obj, "archetype", None)), "missing a non-empty str `archetype`")
+        need(callable(getattr(obj, "recognize", None)), "missing a `recognize` method")
+        need(
+            callable(getattr(obj, "success_invariants", None)),
+            "missing a `success_invariants` method",
+        )
+        need(
+            callable(getattr(obj, "failure_invariants", None)),
+            "missing a `failure_invariants` method",
+        )
     else:
         out.append(ContractFinding(where, f"unknown plugin kind {kind!r}"))
 

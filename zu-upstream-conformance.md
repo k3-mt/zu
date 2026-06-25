@@ -309,6 +309,42 @@ default escalates a broken path to the *model*).
   emits `harness.run.rolled_back` with the dropped count, and the new (different)
   tool call from the re-plan executes; consume-once is preserved across the fold.
 
+### ZU-RAIL-9 — A recognized pattern's predicted outcome is verified by a rail Monitor; a behaviour mismatch fires a detector **(MUST)**
+- **Mechanism (Zu):** the `Pattern` port (`zu_core.ports.Pattern`, group
+  `zu.patterns`) recognizes a situation over a core `SurfaceView`
+  (`zu_core.surface`) and emits its success criteria as declarable
+  `zu_core.invariants.Invariant`s. Those compile — via the EXISTING
+  `compile_spec` — to Monitors registered for the run; the loop's ZU-RAIL-5
+  checkpoint folds the event log, and a breach yields
+  `MonitorVerdict(VIOLATION)` → the existing escalation path. The additive
+  `PredicateKind.SURFACE_CONTAINS` predicate lets "after submit, the account
+  affordance appears" be a first-class verified invariant. Crucially, a SUCCESS
+  criterion compiles to the additive `InvariantKind.EVENTUALLY` — a
+  liveness-by-DEADLINE property: the predicted success state is, by definition,
+  ABSENT until the interaction completes, so the Monitor is INERT on early /
+  pre-interaction surfaces and VIOLATES only at the deadline (a terminal event —
+  `TASK_TERMINAL`/`TASK_COMPLETED` — or a declared deadline event type) if the
+  success state never appeared. A FAILURE criterion compiles to the SAFETY shape
+  `THROUGHOUT NOT contains(failure-context)`, firing the instant a known failure
+  context (e.g. an error alert) appears and satisfied by the pre-interaction
+  state. A pattern is READ-ONLY (it recognizes + emits invariants; it never calls
+  a tool), and a recognized pattern is a PRIOR TO BE CONFIRMED BY OBSERVATION,
+  never ground truth — a wrong prior is caught as a detector firing, not a silent
+  wrong action. **Policy (consumer):** which archetypes/criteria a site trusts is
+  its own pattern set (the `zu.patterns` plugins it installs), never a core
+  constant.
+- **Conformance test (two-sided):** recognize a login form, compile its success
+  Invariant to a Monitor, and prove BOTH directions.
+  `test_pattern_mismatch_fires_detector`: an event log where the predicted
+  post-surface (an account/logout affordance) NEVER appears and the interaction
+  reaches its deadline → VIOLATION (the prior was wrong → detector fires), and the
+  same un-satisfied stream BEFORE the deadline stays inert.
+  `test_pattern_match_does_not_fire`: a SUCCEEDING run — the pre-interaction
+  surface (which lacks the affordance) followed by the post-interaction surface
+  that shows it → NO VIOLATION at ANY prefix, pre-interaction surfaces included
+  (the prior was confirmed). This second test fails against a naive THROUGHOUT
+  compilation and passes only under EVENTUALLY-by-deadline.
+
 ---
 
 ## 7. Explicit non-requirements (`ZU-NOT`)
@@ -379,6 +415,7 @@ implementations are plugins.
 | ZU-RAIL-6 | Invariants declared as DATA compile down to a Monitor | MUST | **Satisfied** | `zu_core.invariants` `Invariant`/`Predicate` + `compile_invariant`; `test_invariants.py::test_compiled_invariant_escalates_in_loop` |
 | ZU-RAIL-7 | Pure reachability over an induced FSM flags trap states | MUST | **Satisfied** | `zu_core.reachability` `Fsm` + `co_reachable`/`trap_states`/`check_reachability`; `test_reachability.py::test_trap_state_detected` |
 | ZU-RAIL-8 | Restore-to-last-known-good rollback folds only the good prefix | MUST | **Satisfied** | `last_known_good` + `_rebuild_to` + `rollback_and_replan` + `harness.run.rolled_back`; `test_rollback.py::test_rollback_restores_state_and_replans` |
+| ZU-RAIL-9 | A recognized pattern's predicted outcome is verified by a rail Monitor; a behaviour mismatch fires a detector | MUST | **Satisfied** | `Pattern` port + `zu.patterns` kind; `Pattern.success_invariants` → `compile_spec` → Monitor (`SURFACE_CONTAINS` predicate, `InvariantKind.EVENTUALLY` liveness-by-deadline for success / `THROUGHOUT`-negated safety for failure); loop ZU-RAIL-5 checkpoint; two-sided proof `test_pattern_rail.py::test_pattern_mismatch_fires_detector` + `::test_pattern_match_does_not_fire` |
 
 ---
 
