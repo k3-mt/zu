@@ -157,6 +157,12 @@ Zu's event schema MUST accept consumer-defined fields (`grant_id`, `consent_ref`
 - **Conformance test:** Emit an event carrying Category 1 fields; replay and recover them.
 - **Failure mode:** Fixed schema → two systems of record → attribution fractures.
 
+### ZU-AUDIT-4 — Secrets are redacted at capture, before any event reaches the log **(MUST)**
+When a capture path folds a *human* session onto the log (Shadow, §2.8 — a recording IS the event bus run over a human session), the human's secrets — typed passwords, `Authorization`/`Cookie`/`Set-Cookie` headers, token/API-key shapes, configured PII — MUST be redacted by a default-ON stage that runs BEFORE `EventSink.append`, including the free-text "why" intent narration. The secret is gone before the event is hashed into the chain, never scrubbed afterward.
+- **Why:** The log is append-only and tamper-evident (ZU-AUDIT-1) — which means a secret that reaches it cannot be deleted later. A capture that recorded the human's password verbatim would make the immutable system of record itself the leak. Redaction must therefore be a *pre-append* property, not a post-hoc filter.
+- **Conformance test:** Drive the recorder with a synthetic stream carrying secrets through every channel (a credential field, a token in a URL, a header, a "why" note); read the sink and show no secret is present.
+- **Failure mode:** Post-hoc redaction → the secret was on the append-only chain first → it is unforgeably, permanently recorded.
+
 ---
 
 ## 6. The extensibility contract (`ZU-EXT`)
@@ -403,6 +409,7 @@ implementations are plugins.
 | ZU-AUDIT-1 | Log append-only & tamper-evident | MUST | **Satisfied** | `chain.py` per-trace hash chain + `verify_chain`; `test_chain.py` |
 | ZU-AUDIT-2 | Log records decision, rule, escalation binding | MUST | **Satisfied** | `gate.decided`/`approval.*` events, parented to `tool.invoked`; `test_invocation_gate.py` |
 | ZU-AUDIT-3 | Log accepts consumer-defined fields | MUST | **Satisfied** | `payload["ctx"]` + `register_event_filter` + SQLite index; `test_chain.py`, `test_sqlite_sink.py` |
+| ZU-AUDIT-4 | Secrets redacted at capture, before any event reaches the log | MUST | **Satisfied** | `zu_shadow.redaction` default-ON stage in `Recorder._emit` before `EventBus.publish`; `zu-shadow/tests/test_conformance_audit4.py::test_secrets_are_redacted_before_reaching_the_log` |
 | ZU-EXT-1 | New port types without forking the core | MUST | **Satisfied** | `Registry.register_kind` + `zu.kinds`; `test_registry.py::test_consumer_registers_new_kind_without_core_edit` |
 | ZU-EXT-2 | Trusted/untrusted boundary explicit & documented | MUST | **Satisfied** | [`docs/TCB.md`](docs/TCB.md) |
 | ZU-EXT-3 | Port framework supports narrow typed contracts | SHOULD | **Satisfied** | typed Protocols + narrow broker verbs (mint/introspect); `test_oop_channel.py` |

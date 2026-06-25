@@ -7,6 +7,50 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — Shadow: author an agent by demonstration (§2.8) — new `zu-shadow` 0.1.0 (zu-core 0.2.9 → 0.2.10; zu-cli 0.2.4 → 0.2.5)
+A Shadow recording IS the event bus run over a HUMAN session — the human is the
+policy for that one run — so recording costs almost nothing architecturally. The
+new `zu-shadow` package turns one demonstrated run into a production agent + a rail.
+
+- **`data.shadow.*` event taxonomy** in `zu_core.events` (+ `DATA_TYPES`):
+  `session.start`/`session.end`, `user.click`/`user.type`/`user.navigate`,
+  `page.loaded`, `network.response`. Namespacing is enforced (`data.`-prefixed);
+  user-action events carry an optional reviewed `intent` ("why") field.
+- **Default-ON capture-time redaction** (`zu_shadow.redaction`) that strips
+  passwords, `Authorization`/`Cookie`/`Set-Cookie` headers, token/API-key shapes,
+  and configurable PII — INCLUDING the "why" text — and runs in `Recorder._emit`
+  BEFORE `EventBus.publish` (the only caller of `EventSink.append`). The secret is
+  gone before the event is hashed into the audit chain.
+- **Semantic-target capture** (`zu_shadow.capture`): every action is named by its
+  target's `{role, name, label}` (reusing `zu_core.surface`), never a CSS selector
+  or pixel coordinate — so the synthesized agent re-resolves on a changed page.
+- **The synthesizer is itself a Zu agent** (`zu_shadow.synthesizer`, driven by a
+  `ModelProvider`, offline-tested with `ScriptedProvider`). It PROPOSES an agent
+  spec + an induced `zu_core.reachability.Fsm` + `zu_core.invariants.Invariant`s (NO
+  new FSM/invariant types). The egress allowlist WRITES ITSELF from the recorded
+  `network.response` hosts; the FSM aligns with the §1 rail check and the §5
+  event-log→Fsm builder.
+- **Verification-replay promotion gate** (`zu_shadow.replay_gate`) reusing zu-cli's
+  `offline.py`/`build.py`: a synthesized agent does NOT run on real data until it
+  reproduces the recorded outcome; the "why" resolutions are surfaced for REVIEW,
+  never auto-promoted.
+- **`--scale` runner** (`zu_shadow.scale`): parameterize the identified variable and
+  fan out one GOVERNED run per CSV row (same agent contract for every row).
+- **`zu shadow record / synthesize / scale`** CLI subcommands (lazy-imported in
+  zu-cli so the dependency runs one way only); a live CDP binding behind the
+  `zu-shadow[live]` extra + a manual entrypoint (`zu_shadow.live`).
+- **Conformance `ZU-AUDIT-4`** — "secrets are redacted at capture, before any event
+  reaches the append-only log" — added to the `ZU-AUDIT` family with full three-way
+  sync: prose + §9 table row (Satisfied) in `zu-upstream-conformance.md`, a MATRIX
+  entry in `test_conformance_matrix.py`, and the named proof
+  `zu-shadow/tests/test_conformance_audit4.py::test_secrets_are_redacted_before_reaching_the_log`.
+
+Honest scope: robustness comes from the runtime machinery (semantic re-resolution,
+detectors, replay, the rail), not a single recording; on a structurally different
+site the agent ESCALATES rather than silently erring. The live human recorder is
+demo/manual; the offline core is fully tested against a synthetic input/CDP stream
+at $0.
+
 ### Fixed — ZU-RAIL-9 success-criterion semantics now liveness-by-deadline (zu-core 0.2.8 → 0.2.9; zu-patterns 0.2.0 → 0.2.1)
 An adversarial review found ZU-RAIL-9 was hollow: a pattern's SUCCESS criterion
 compiled to `InvariantKind.THROUGHOUT`, which means "the success element must be

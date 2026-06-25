@@ -33,6 +33,9 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     "ZU-AUDIT-1": ("packages/zu-core/tests/test_chain.py", "test_content_tamper_detected"),
     "ZU-AUDIT-2": ("packages/zu-core/tests/test_invocation_gate.py", "test_gate_deny_blocks_the_call_no_side_effect"),
     "ZU-AUDIT-3": ("packages/zu-core/tests/test_chain.py", "test_consumer_field_is_queryable"),
+    # Capture-time redaction: secrets are stripped BEFORE any event reaches the
+    # append-only log. The proof lives in zu-shadow/tests (repo-relative path resolves).
+    "ZU-AUDIT-4": ("packages/zu-shadow/tests/test_conformance_audit4.py", "test_secrets_are_redacted_before_reaching_the_log"),
     "ZU-EXT-1": ("packages/zu-core/tests/test_registry.py", "test_consumer_registers_new_kind_without_core_edit"),
     "ZU-EXT-2": ("docs/TCB.md", None),
     "ZU-EXT-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),

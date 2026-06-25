@@ -23,6 +23,200 @@ from .config import ConfigError, assemble, load_agent, load_config
 
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
+# `zu shadow` — author an agent by demonstration (§2.8). The implementation lives in
+# the zu-shadow package; this sub-app imports it lazily so zu-cli never hard-depends
+# on zu-shadow (the dependency runs the other way), and a missing install fails with
+# an actionable hint rather than an import error.
+shadow_app = typer.Typer(
+    help="Author an agent by demonstration: record a human session, redact at capture, "
+         "synthesize an agent + rail, replay-gate promotion, scale over a CSV.",
+    no_args_is_help=True,
+)
+app.add_typer(shadow_app, name="shadow")
+
+
+def _require_shadow():
+    """Import the zu-shadow package or exit with an install hint."""
+    try:
+        import zu_shadow  # noqa: F401
+
+        return zu_shadow
+    except ModuleNotFoundError:
+        typer.echo("zu shadow needs the zu-shadow package: pip install zu-shadow", err=True)
+        raise typer.Exit(code=2) from None
+
+
+@shadow_app.command("record")
+def shadow_record(
+    stream: str = typer.Argument(..., help="A JSON file of abstract input/CDP items "
+                                           "(the synthetic or exported live stream)."),
+    site: str = typer.Option(..., "--site", help="The site/locus the session ran against."),
+    out: str = typer.Option("recording.json", "--out", "-o", help="Where to write the recording."),
+    outcome: str = typer.Option(None, "--outcome", help="The human's stated result (redacted)."),
+) -> None:
+    """Fold an abstract input/CDP stream into a REDACTED recording — secrets are
+    stripped at capture, before any event reaches the log. The stream is the same
+    shape the live CDP binding produces, so this records a synthetic OR an exported
+    live session identically.
+    """
+    import asyncio
+    import json
+    from pathlib import Path
+
+    _require_shadow()
+    from zu_core.bus import EventBus
+    from zu_shadow.capture import SemanticTarget
+    from zu_shadow.recorder import RawInput, Recorder
+
+    try:
+        items_raw = json.loads(Path(stream).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"config error: cannot read stream {stream!r}: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    def _to_item(d: dict) -> RawInput:
+        tgt = d.get("target")
+        target = SemanticTarget(**tgt) if isinstance(tgt, dict) else None
+        return RawInput(
+            kind=d.get("kind", ""), target=target, value=d.get("value"),
+            url=d.get("url", ""), title=d.get("title", ""), status=int(d.get("status", 200)),
+            host=d.get("host", ""), intent=d.get("intent"),
+        )
+
+    async def _drive():
+        bus = EventBus()
+        try:
+            rec = Recorder(bus, site=site)
+            return await rec.record_stream([_to_item(d) for d in items_raw], outcome=outcome)
+        finally:
+            await bus.aclose()
+
+    session = asyncio.run(_drive())
+    shadow_events = session.shadow_events()
+    payload = {
+        "site": session.site,
+        "outcome": session.outcome,
+        "events": [{"type": e.type, "payload": e.payload} for e in shadow_events],
+    }
+    Path(out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    typer.echo(f"shadow record: {len(shadow_events)} redacted data.shadow.* events → {out}")
+    typer.echo("note: secrets are redacted at capture, BEFORE any event reaches the log.")
+
+
+@shadow_app.command("synthesize")
+def shadow_synthesize(
+    recording: str = typer.Argument(..., help="A recording.json from `zu shadow record`."),
+    instruction: str = typer.Option(..., "--instruction", "-i",
+                                     help="One sentence: what the agent should do."),
+    out: str = typer.Option("proposal.json", "--out", "-o", help="Where to write the proposal."),
+) -> None:
+    """Synthesize an agent + rail PROPOSAL from a recording — a Zu agent (offline,
+    a ScriptedProvider stands in for the model). The egress allowlist writes itself
+    from the recorded network hosts; the FSM and invariants are induced from the log.
+    The proposal is REVIEWED and replay-gated before it ever runs on real data.
+    """
+    import asyncio
+    import json
+    from pathlib import Path
+
+    _require_shadow()
+    from zu_core.contracts import Event
+    from zu_shadow.recorder import RecordedSession
+    from zu_shadow.synthesizer import Synthesizer
+
+    try:
+        doc = json.loads(Path(recording).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"config error: cannot read recording {recording!r}: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    from uuid import uuid4
+
+    tid, kid = uuid4(), uuid4()
+    events = [Event(trace_id=tid, task_id=kid, type=e["type"], source="zu-shadow",
+                    payload=e.get("payload", {})) for e in doc.get("events", [])]
+    session = RecordedSession(site=doc.get("site", ""), events=events,
+                              outcome=doc.get("outcome"))
+
+    # Offline: a no-op scripted model (the verifiable parts — egress/FSM/invariants —
+    # are derived from the log, not generated, so a scripted brain suffices for review).
+    from zu_providers.scripted import ScriptedProvider
+
+    provider = ScriptedProvider.from_moves([])
+    result = asyncio.run(Synthesizer(provider).synthesize(session, instruction))
+    Path(out).write_text(json.dumps(result.to_yaml_dict(), indent=2), encoding="utf-8")
+    typer.echo(f"shadow synthesize: agent + rail proposal → {out}")
+    typer.echo(f"  egress (self-written): {', '.join(result.egress) or 'none'}")
+    typer.echo(f"  induced FSM: {len(result.fsm.states)} states; "
+               f"{len(result.invariants)} invariant(s)")
+    if result.intents_for_review:
+        typer.echo(f"  {len(result.intents_for_review)} 'why' intent(s) for REVIEW "
+                   "(never auto-promoted)")
+    typer.echo("next: replay-gate promotion (the agent must reproduce the recorded outcome).")
+
+
+@shadow_app.command("scale")
+def shadow_scale(
+    agent: str = typer.Argument("agent.yaml", help="The governed agent to fan out."),
+    rows: str = typer.Option(..., "--rows", help="A CSV; one governed run per row."),
+    var: str = typer.Option(..., "--var", help="The column to parameterize into the task."),
+    offline: bool = typer.Option(True, "--offline/--live",
+                                 help="Replay each row against fixtures (default) or run live."),
+) -> None:
+    """Fan out one GOVERNED run per CSV row — the same agent contract (tier ladder,
+    detectors/validators, rail, egress) for every row, only the parameterized variable
+    differs. Offline by default (replays the captured fixtures per row, at ~$0).
+    """
+    import asyncio
+
+    _require_shadow()
+    from zu_shadow.scale import read_rows, run_scale
+
+    try:
+        spec, cfg = load_agent(agent)
+    except ConfigError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    try:
+        data = read_rows(rows)
+    except OSError as exc:
+        typer.echo(f"config error: cannot read rows {rows!r}: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    from pathlib import Path
+
+    p = Path(agent)
+    agent_dir = p if p.is_dir() else p.parent
+
+    async def _run_one(query: str, row: dict):
+        if offline:
+            from .offline import Bundle, OfflineError, bundle_path, replay_offline
+
+            try:
+                bundle = Bundle.load(bundle_path(agent_dir))
+            except OfflineError as exc:
+                raise ConfigError(str(exc)) from None
+            row_spec = spec.model_copy(update={"query": query})
+            result, _ = await replay_offline(row_spec, cfg, bundle)
+            return result
+        raise NotImplementedError(
+            "live --scale runs each row through the live loop — the live lane; use --offline "
+            "to fan out against the captured fixtures at ~$0."
+        )
+
+    try:
+        report = asyncio.run(run_scale(spec.query, var, data, _run_one))
+    except (ConfigError, NotImplementedError) as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    typer.echo(f"shadow scale: {report.count} governed run(s) over '{var}'")
+    for r in report.rows:
+        status = getattr(r.result, "status", None)
+        sval = getattr(status, "value", status)
+        typer.echo(f"  row {r.index}: {var}={r.values.get(var)!r} → {sval}")
+
 
 def _installed_version(dist: str) -> str | None:
     """The installed version of ``dist`` (e.g. ``zu-runtime``), or None if it

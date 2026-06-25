@@ -22,6 +22,7 @@ members = [
     "zu-providers",
     "zu-redteam",
     "zu-runtime",
+    "zu-shadow",
     "zu-testing",
     "zu-tools",
     "zu-workspace",
@@ -2170,7 +2171,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-cli"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/zu-cli" }
 dependencies = [
     { name = "pyyaml" },
@@ -2204,7 +2205,7 @@ provides-extras = ["serve", "mcp", "test"]
 
 [[package]]
 name = "zu-core"
-version = "0.2.9"
+version = "0.2.10"
 source = { editable = "packages/zu-core" }
 dependencies = [
     { name = "pydantic" },
@@ -2367,6 +2368,28 @@ requires-dist = [
 provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "mcp", "test", "huggingface", "all"]
 
 [[package]]
+name = "zu-shadow"
+version = "0.1.0"
+source = { editable = "packages/zu-shadow" }
+dependencies = [
+    { name = "zu-cli" },
+    { name = "zu-core" },
+]
+
+[package.optional-dependencies]
+live = [
+    { name = "zu-tools" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "zu-cli", editable = "packages/zu-cli" },
+    { name = "zu-core", editable = "packages/zu-core" },
+    { name = "zu-tools", marker = "extra == 'live'", editable = "packages/zu-tools" },
+]
+provides-extras = ["live"]
+
+[[package]]
 name = "zu-testing"
 version = "0.2.4"
 source = { editable = "packages/zu-testing" }
@@ -2416,6 +2439,7 @@ dependencies = [
     { name = "zu-providers" },
     { name = "zu-redteam" },
     { name = "zu-runtime" },
+    { name = "zu-shadow" },
     { name = "zu-tools" },
 ]
 
@@ -2447,6 +2471,7 @@ requires-dist = [
     { name = "zu-providers", editable = "packages/zu-providers" },
     { name = "zu-redteam", editable = "packages/zu-redteam" },
     { name = "zu-runtime", editable = "packages/zu" },
+    { name = "zu-shadow", editable = "packages/zu-shadow" },
     { name = "zu-tools", editable = "packages/zu-tools" },
 ]
 

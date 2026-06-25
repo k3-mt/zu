@@ -162,6 +162,38 @@ POINTER_DISPATCHED = "data.pointer.dispatched"
 #  "blind": bool}. Parented to the turn.
 PATTERN_RECOGNIZED = "data.pattern.recognized"
 
+# --- data.shadow.* — author-by-demonstration capture (§2.8) ------------------
+# A Shadow recording IS the event bus run over a HUMAN session — the human is the
+# policy for that one run, so these are ``data.*`` (perception/action the session
+# produced), recorded by zu-shadow's recorder over an abstract input/CDP stream.
+# REDACTION runs BEFORE any of these reach EventSink.append (ZU-AUDIT-4): secrets
+# never touch the log. CAPTURE IS SEMANTIC — a user action is named by its target's
+# {role, name, label} (reusing zu_core.surface), NEVER a CSS selector or pixel
+# coordinate (the shared currency with §4 handles / §5 SurfaceView).
+#
+#   session.start    -> {"site": str, "started_by": "human"}. The recording's root.
+#   session.end      -> {"outcome": str|None, "steps": int (count)}. The terminal.
+#   user.click       -> {"target": {"role", "name", "label"}, "intent": str|None}.
+#                       ``intent`` is the OPTIONAL reviewed "why" affordance — the
+#                       human's narration of the step, REDACTED like everything else,
+#                       NEVER auto-promoted into the synthesized agent.
+#   user.type        -> {"target": {"role","name","label"}, "value": str (REDACTED —
+#                        a password/token never reaches here), "intent": str|None}.
+#   user.navigate    -> {"url": str (REDACTED of credentials/tokens), "intent": str|None}.
+#   page.loaded      -> {"url": str, "title": str}. A page settled — the locus a
+#                       subsequent action's semantic target resolves against.
+#   network.response -> {"url": str, "status": int, "host": str}. The metadata a
+#                       response carried — bodies/headers are NOT recorded (and any
+#                       auth header is redacted at source). The synthesized agent's
+#                       EGRESS ALLOWLIST WRITES ITSELF from the ``host`` values here.
+SHADOW_SESSION_START = "data.shadow.session.start"
+SHADOW_SESSION_END = "data.shadow.session.end"
+SHADOW_USER_CLICK = "data.shadow.user.click"
+SHADOW_USER_TYPE = "data.shadow.user.type"
+SHADOW_USER_NAVIGATE = "data.shadow.user.navigate"
+SHADOW_PAGE_LOADED = "data.shadow.page.loaded"
+SHADOW_NETWORK_RESPONSE = "data.shadow.network.response"
+
 HARNESS_TYPES: frozenset[str] = frozenset(
     {
         TASK_STARTED,
@@ -200,6 +232,19 @@ HARNESS_TYPES: frozenset[str] = frozenset(
     }
 )
 DATA_TYPES: frozenset[str] = frozenset(
-    {SOURCE_FETCHED, RECORD_EXTRACTED, SURFACE_CAPTURED, POINTER_DISPATCHED, PATTERN_RECOGNIZED}
+    {
+        SOURCE_FETCHED,
+        RECORD_EXTRACTED,
+        SURFACE_CAPTURED,
+        POINTER_DISPATCHED,
+        PATTERN_RECOGNIZED,
+        SHADOW_SESSION_START,
+        SHADOW_SESSION_END,
+        SHADOW_USER_CLICK,
+        SHADOW_USER_TYPE,
+        SHADOW_USER_NAVIGATE,
+        SHADOW_PAGE_LOADED,
+        SHADOW_NETWORK_RESPONSE,
+    }
 )
 ALL_TYPES: frozenset[str] = HARNESS_TYPES | DATA_TYPES
