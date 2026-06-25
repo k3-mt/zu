@@ -6,8 +6,8 @@
 #
 # ONE-TIME SETUP (on PyPI, per distribution — these are all available as of setup):
 #   For each of: zu-core, zu-providers, zu-tools, zu-checks, zu-backends,
-#   zu-redteam, zu-cli, zu-huggingface, zu-runtime — add a "pending" Trusted
-#   Publisher at https://pypi.org/manage/account/publishing/ with:
+#   zu-redteam, zu-cli, zu-huggingface, zu-runtime, zu-patterns, zu-shadow — add
+#   a "pending" Trusted Publisher at https://pypi.org/manage/account/publishing/ with:
 #     Owner: k3-mt   Repo: zu   Workflow: publish.yml   Environment: pypi
 #   (Pending publishers create the project on first publish — no token needed.)
 #   zu-testing is dev-only: it is removed from dist/ before upload, never published.

@@ -7,6 +7,15 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-25
+
+First coordinated release of the capabilities build-out (§1–§9). Every distribution is
+locked to **0.3.0** — both the package versions and the inter-package `==` pins — and the
+set is published to PyPI together, now including the two **new** distributions
+**`zu-patterns`** (the §5 pathfinder) and **`zu-shadow`** (the record → synthesize → run
+authoring loop, with the live executor below). All prior `## [Unreleased]` entries down to
+`[0.2.4]` ship in this release.
+
 ### Added — the live executor + `zu shadow run`: the agent runs a recording itself and generalises (zu-shadow 0.1.10 → 0.1.11, zu-cli 0.2.7 → 0.2.8)
 `zu shadow run <recording> --url <url> [--set search=collars] [--model-base-url ...]` drives the
 recorded path on a real site in a Chrome you watch: it PERCEIVES the live affordances in-page
