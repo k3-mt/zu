@@ -60,6 +60,7 @@ dev = [
     "docker>=7",          # exercises the local-docker backend (real tier-2 render)
     "mcp>=1.2",           # exercises `zu mcp` (the MCP server) in tests
     "pypdf>=6",           # exercises zu-tools[pdf] (pdf_extract) in tests
+    "playwright>=1.60.0",
 ]
 
 [tool.pytest.ini_options]

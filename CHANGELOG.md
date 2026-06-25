@@ -7,6 +7,18 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — `zu shadow capture`: author by clicking on a real webpage (zu-shadow 0.1.1 → 0.1.2)
+The live headed half of Shadow — the "do the job once" entrypoint. `zu shadow capture
+--url <page> --site <site>` launches a dedicated Chrome (its own profile; your normal
+Chrome is untouched), instruments it over CDP via Playwright (connected to your Chrome —
+no extra browser download, behind the `zu-shadow[live]` extra), and turns each of your
+clicks / typing / navigations into the SAME redacted `data.shadow.*` stream the offline
+recorder consumes. Capture is SEMANTIC — accessibility role + accessible name, never a
+selector or pixel coordinate — and a password field's value is dropped at source on top
+of the recorder's credential-field blanking. Stop with Ctrl-C (or `--seconds N`); it
+writes `recording.json`, ready for `zu shadow synthesize`. The pure translation
+(`_payload_to_raw`) is unit-tested offline; the headed drive is the manual entrypoint.
+
 ### Tested — Shadow live-recorder CDP→RawInput translation (zu-shadow 0.1.0 → 0.1.1)
 The live recorder's pure translation (`ax_node_to_target` / `_cdp_to_raw`) — the contract
 that the live CDP binding produces the SAME abstract `RawInput` stream the offline recorder

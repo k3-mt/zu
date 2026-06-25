@@ -1,6 +1,6 @@
 [project]
 name = "zu-shadow"
-version = "0.1.1"
+version = "0.1.2"
 description = "Zu Shadow: author a production agent by demonstration — record a human session, redact at capture, synthesize an agent + rail (§2.8)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,8 +22,9 @@ classifiers = [
 dependencies = ["zu-core==0.2.11", "zu-cli==0.2.6"]
 
 [project.optional-dependencies]
-# The LIVE recorder binds a real Chromium over CDP — opt-in, never needed offline.
-live = ["zu-tools==0.2.7"]
+# The LIVE recorder/capture binds a real Chrome over CDP (Playwright connects to it;
+# no extra browser download) — opt-in, never needed for the offline core.
+live = ["zu-tools==0.2.7", "playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

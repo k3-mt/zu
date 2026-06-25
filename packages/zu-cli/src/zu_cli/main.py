@@ -103,6 +103,36 @@ def shadow_record(
     typer.echo("note: secrets are redacted at capture, BEFORE any event reaches the log.")
 
 
+@shadow_app.command("capture")
+def shadow_capture(
+    url: str = typer.Option(..., "--url", help="The page to open and start capturing from."),
+    site: str = typer.Option(..., "--site", help="The site/locus the session runs against."),
+    out: str = typer.Option("recording.json", "--out", "-o", help="Where to write the recording."),
+    port: int = typer.Option(9222, "--port", help="Chrome remote-debugging port."),
+    profile: str = typer.Option("/tmp/zu-shadow-profile", "--profile",
+                                help="A dedicated Chrome profile dir — won't disturb your normal Chrome."),
+    seconds: float = typer.Option(None, "--seconds",
+                                  help="Auto-stop after N seconds (otherwise stop with Ctrl-C)."),
+) -> None:
+    """LIVE: launch a dedicated Chrome at --url and record YOUR clicks / typing /
+    navigations as semantic, redacted data.shadow.* events until you press Ctrl-C, then
+    write the recording — ready for `zu shadow synthesize`. Capture is by accessibility
+    role + name (never a selector/coordinate) and redacted before anything is written.
+    Needs the live extra: pip install 'zu-shadow[live]'.
+    """
+    _require_shadow()
+    try:
+        from zu_shadow.live_capture import capture
+    except ModuleNotFoundError:  # pragma: no cover - live-only path
+        typer.echo("zu shadow capture needs the live extra: pip install 'zu-shadow[live]'", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        capture(url, site=site, out=out, port=port, profile=profile, max_seconds=seconds)
+    except RuntimeError as exc:  # pragma: no cover - live-only path
+        typer.echo(f"capture error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+
 @shadow_app.command("synthesize")
 def shadow_synthesize(
     recording: str = typer.Argument(..., help="A recording.json from `zu shadow record`."),
