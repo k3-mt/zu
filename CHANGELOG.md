@@ -7,6 +7,17 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the live executor: the agent uses a recording and GENERALISES it (zu-shadow 0.1.9 → 0.1.10)
+zu_shadow.executor.execute() drives the demonstrated path on a live BrowserSession, resolving
+each step three ways: EXACT (re-resolve a fixed-flow control like "Add to cart" by role+name),
+PARAM (type an override — "muzzles" → "collars", or the customer's own details), or MODEL (the
+demonstrated specific control is gone, so the model picks the best handle from the CURRENT
+affordances — generalising the choice; it emits a handle, never a selector). The commit
+boundary (a payment / place-order step) is never auto-crossed: it escalates (a real payment is
+a §8 brokered capability). The browser is injected (a fake at $0 in tests; live Playwright
+next). Proven: record a muzzle purchase, re-run for collars — the search value is overridden
+AND the model picks a collar product, while Add to cart / Check out re-resolve exactly.
+
 ### Improved — synthesizer cleans the induced path; it slots into the §5 pathfinder (zu-shadow 0.1.8 → 0.1.9)
 The induced FSM now reads as clean GENERALISED steps: a focus-click immediately followed by a
 type on the same target collapses to the type, consecutive duplicate steps (a widget firing
