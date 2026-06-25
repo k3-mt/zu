@@ -1,6 +1,6 @@
 [project]
 name = "zu-tools"
-version = "0.2.7"
+version = "0.2.8"
 description = "Zu built-in tools: web_search, http_fetch, html_parse, render_dom, browser"
 readme = "README.md"
 requires-python = ">=3.11"

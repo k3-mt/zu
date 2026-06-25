@@ -22,12 +22,22 @@ class ActionSurfaceBlindDetector:
         obs = getattr(ctx, "observation", None)
         if not isinstance(obs, dict):
             return None
-        if obs.get("surface_blind") is True:
-            surface = obs.get("action_surface")
-            reason = surface.get("blind_reason") if isinstance(surface, dict) else None
-            return Verdict(
-                severity=Severity.ESCALATE,
-                detector=self.name,
-                detail=reason or "action surface too thin to trust; escalate to vision",
-            )
-        return None
+        if obs.get("surface_blind") is not True:
+            return None
+        # The blind signal comes from either tier: the a11y Action Surface (climb to
+        # the vision tier) or, at the last tier, the vision surface itself (no tier-5
+        # — escalate to a human, §4.3/§4.4). Read whichever produced it and word the
+        # operator-facing reason to match, so the message is never misleading.
+        is_vision = "vision_surface" in obs
+        surface = obs.get("vision_surface") if is_vision else obs.get("action_surface")
+        reason = surface.get("blind_reason") if isinstance(surface, dict) else None
+        fallback = (
+            "vision surface blind at the last perception tier; escalate to a human"
+            if is_vision
+            else "action surface too thin to trust; escalate to vision"
+        )
+        return Verdict(
+            severity=Severity.ESCALATE,
+            detector=self.name,
+            detail=reason or fallback,
+        )

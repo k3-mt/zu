@@ -230,6 +230,23 @@ def test_blind_detector_escalates_on_blind_surface() -> None:
     assert "thin" in (verdict.detail or "")
 
 
+def test_blind_detector_reads_vision_surface_and_words_for_the_last_tier() -> None:
+    # When the VISION surface (the last perception tier) is blind it emits
+    # `vision_surface`, not `action_surface`. The detector must read that key for the
+    # reason and word the escalation as "to a human" — there is no tier-5.
+    det = ActionSurfaceBlindDetector()
+    obs = {"surface_blind": True,
+           "vision_surface": {"blind_reason": "no detector cleared the perceptibility floor"}}
+    verdict = det.inspect(RunContext(spec=None, observation=obs))
+    assert verdict is not None and verdict.severity is Severity.ESCALATE
+    assert "perceptibility floor" in (verdict.detail or "")
+    # A vision-blind with no explicit reason still escalates to a human, not "to vision".
+    bare = det.inspect(RunContext(spec=None, observation={"surface_blind": True,
+                                                          "vision_surface": {}}))
+    assert bare is not None and "human" in (bare.detail or "")
+    assert "to vision" not in (bare.detail or "")
+
+
 def test_blind_detector_silent_on_good_surface() -> None:
     det = ActionSurfaceBlindDetector()
     assert det.inspect(RunContext(spec=None, observation={"surface_blind": False})) is None

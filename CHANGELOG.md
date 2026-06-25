@@ -7,6 +7,52 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — blind-surface escalation message at the last tier (zu-checks 0.2.5 → 0.2.6)
+`ActionSurfaceBlindDetector` only read `action_surface` for the blind reason, so a
+blind VISION surface (which emits `vision_surface`) fell back to a misleading
+"escalate to vision" message at the last perception tier. It now reads whichever
+tier produced the signal and words the reason "escalate to a human" when the vision
+surface itself is blind (no tier-5, §4.3). Test:
+`test_blind_detector_reads_vision_surface_and_words_for_the_last_tier`.
+
+### Added — §4.4 vision reducer: 4K screenshot → the SAME action surface (zu-tools 0.2.7 → 0.2.8)
+The §4.4 pattern ("heavy observation in → DETERMINISTIC reduction to the action
+surface → the policy decides on the small thing") applied to the PIXEL modality,
+so a screenshot reducer is a future adapter of the SAME modality-agnostic
+interface (§4.5) the a11y Action Surface already implements — all offline ($0).
+
+- **`vision_surface.reduce_vision_surface` — MODEL PROPOSES, deterministic reducer
+  DISPOSES.** Finding a control in raw pixels genuinely needs a model (the one
+  irreducible step), so an INJECTED `VisionDetector` (Image → `DetectedElement`s:
+  role/label/bbox/confidence) PROPOSES the raw detections — adaptable from HF
+  `hf_detect`/`hf_vlm` or any cloud vision API, behind a Protocol so zu-tools does
+  NOT hard-depend on a model package. The deterministic reducer then runs the SAME
+  six steps as `action_surface.reduce_surface` (filter interactive+meaningful →
+  prune the unusable → resolve a label → assign an opaque handle → emit) and emits
+  the SAME `Surface`/core `SurfaceView`. It NEVER ranks/prunes by guessed
+  task-relevance (enumerate the possible, never choose the reasonable, §4.2); it
+  filters ONLY on PERCEPTIBILITY — a generic confidence floor and minimum area
+  (parameters, sane defaults), off-screen, and occlusion.
+- **The vision handle registry.** The model emits a HANDLE, never a pixel
+  coordinate: the handle → click-point map (`{"point": [x,y], "bbox": [...]}`, the
+  bbox centre) is stored harness-side in the run registry, so the POINTER (a
+  different tool instance) re-resolves the same handle the model emitted. A stale
+  handle is an ESCALATION, not a crash — the same indirection currency as a11y.
+- **Escalate-when-blind (last tier).** If the reduction yields no actionable
+  affordances despite content (all below the floor, all occluded, only context, or
+  too many unlabeled controls) the surface is `blind`. Vision is the LAST tier;
+  blind here ⇒ escalate to a human (no tier-5).
+- **Tier-3 → tier-4 wiring lands on a REAL vision SURFACE.** `VisionCapture` keeps
+  its thin `op=capture` (raw pixels) and gains `op=surface` (capture → injected
+  detector → `reduce_vision_surface` → a `SurfaceView` the policy acts on with
+  handles) and `op=resolve`. The a11y `action-surface-blind` ESCALATE now climbs to
+  a vision surface, not just a screenshot.
+- **Modality-agnostic proof.** A test shows `zu_patterns.recognize` matches the
+  `login_form` archetype over a VISION-produced `SurfaceView` identically to an
+  a11y one (zu-tools production code never imports zu-patterns; only the test
+  imports both leaves — a clean direction, no production cycle), plus a
+  shape-identity test that the two producers are interchangeable.
+
 ### Added — §5.2 live guided-MPC loop + Shadow-sourced transition model (zu-patterns 0.2.1 → 0.2.2)
 The two deferred pieces of the §5 pattern/search stack, both pure/offline ($0):
 
