@@ -110,6 +110,8 @@ async def test_steps_from_recording_cleans_and_marks_commit() -> None:
         RawInput(kind="click", target=SemanticTarget(role="searchbox", name="Search", label="Search")),
         RawInput(kind="type", target=SemanticTarget(role="searchbox", name="Search", label="Search"),
                  value="muzzle"),  # focus-click + type on the same target -> collapses to the type
+        RawInput(kind="type", target=SemanticTarget(role="textbox", name="Card number", label="Card number"),
+                 value="4242424242424242"),  # blanked by redaction -> the agent never holds the card
         RawInput(kind="click", target=SemanticTarget(role="button", name="Place order", label="Place order")),
     ]
     session = await rec.record_stream(stream)
@@ -117,5 +119,7 @@ async def test_steps_from_recording_cleans_and_marks_commit() -> None:
     kinds = [(s.kind, s.name) for s in steps]
     assert ("click", "Search") not in kinds and ("type", "Search") in kinds  # focus-click dropped
     place = next(s for s in steps if s.name == "Place order")
-    assert place.committing  # the irreversible step is flagged as the commit boundary
+    assert place.committing  # the irreversible order click is a commit boundary
+    card = next(s for s in steps if s.name == "Card number")
+    assert card.committing and card.value == "[REDACTED]"  # a payment field is brokered, never typed
     await bus.aclose()

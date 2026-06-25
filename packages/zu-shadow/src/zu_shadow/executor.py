@@ -32,12 +32,19 @@ from zu_core import events as ev
 from zu_core.ports import ModelProvider, ModelRequest
 from zu_core.surface import SurfaceView
 
+from .redaction import REDACTED
+
 _CLICKABLE = frozenset({"button", "link", "checkbox", "radio", "switch", "tab",
                         "menuitem", "option", "row", "gridcell"})
 _FIELDS = frozenset({"textbox", "searchbox", "combobox"})
 # Steps whose name names an irreversible money/commit action — never auto-crossed.
 _COMMIT = re.compile(r"(?i)\b(place order|pay now|pay$|buy now|complete (order|purchase|"
                      r"payment)|confirm (and )?pay|submit order|checkout & pay)\b")
+# A payment-card field — the agent must NEVER type a card; a real payment is a §8 brokered
+# capability. A redacted secret value means the same: the agent doesn't hold the secret.
+_PAYMENT_FIELD = re.compile(r"(?i)\b(card number|cardnumber|card no|credit card|debit card|"
+                            r"expiration|expiry|cvv|cvc|security code|iban|sort code|"
+                            r"account number)\b")
 
 
 @dataclass(frozen=True)
@@ -104,9 +111,16 @@ def steps_from_recording(events: list[Any]) -> list[Step]:
         tgt = p.get("target", {}) or {}
         kind = "click" if t == ev.SHADOW_USER_CLICK else "type"
         name = tgt.get("name") or tgt.get("label") or ""
+        value = p.get("value")
+        if value is None:
+            value = p.get("password")  # a credential field's (redacted) value lives under this key
+        committing = (
+            (kind == "click" and bool(_COMMIT.search(name)))  # an irreversible order/pay click
+            or value == REDACTED                              # a step needing a secret the agent lacks
+            or bool(_PAYMENT_FIELD.search(name))              # a payment-card field — brokered (§8)
+        )
         raw.append(Step(kind=kind, role=tgt.get("role", ""), name=name,
-                        value=p.get("value"), intent=p.get("intent"),
-                        committing=bool(kind == "click" and _COMMIT.search(name))))
+                        value=value, intent=p.get("intent"), committing=committing))
     # R2: drop a focus-click immediately followed by a type on the same target. R1: collapse
     # a consecutive duplicate. (The whys live on the events and are reviewed separately.)
     out: list[Step] = []
