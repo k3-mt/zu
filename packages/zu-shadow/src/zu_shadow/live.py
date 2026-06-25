@@ -77,7 +77,7 @@ async def record_live(  # pragma: no cover - live-only, manual entrypoint
     return RecordedSession(site=site, events=list(events))
 
 
-def _cdp_to_raw(cdp: dict) -> RawInput | None:  # pragma: no cover - live-only
+def _cdp_to_raw(cdp: dict) -> RawInput | None:
     """Map one CDP event to a ``RawInput`` (or None to skip). Mirrors the abstract
     kinds the offline stream uses; the live CDP method names are translated here so
     the rest of Shadow never sees CDP."""

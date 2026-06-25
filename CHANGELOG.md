@@ -7,6 +7,14 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Tested — Shadow live-recorder CDP→RawInput translation (zu-shadow 0.1.0 → 0.1.1)
+The live recorder's pure translation (`ax_node_to_target` / `_cdp_to_raw`) — the contract
+that the live CDP binding produces the SAME abstract `RawInput` stream the offline recorder
+consumes, captured semantically ({role,name,label}, selectors/coordinates dropped) — was
+behind a `pragma: no cover` although it is pure dict→value logic. The stale pragma is
+removed and `test_live.py` pins the contract offline ($0); only `record_live` (real Chromium
++ a human) remains manual.
+
 ### Fixed — §8 credential broker spend-accounting: the cap reflects only ACTUAL captures (zu-core 0.2.13 → 0.2.14)
 An adversarial review of the shipped broker found SPEND-ACCOUNTING bugs in
 `InMemoryCredentialBroker.use`. None weaken containment (secret/scope/TTL/revocation/
