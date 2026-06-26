@@ -242,6 +242,11 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
       to the policy (counts + handle list + blind flag), so a reviewer can
       reconstruct what the agent could perceive/do here. The role+name locators stay
       harness-side (never on the log); the handle list is the auditable record.
+    * a ``content_view`` key → ``data.content.captured``: the reading projection's
+      FINGERPRINT — url + per-region counts + the whole-view hash + per-unit hashes,
+      NEVER body text (Issue #41 §2.3, §4). A content read is untrusted and a new
+      secret surface, so only the hash + provenance lands on the log; the caller
+      also raises run-level taint when this key is present.
     * a ``pointer`` key → ``data.pointer.dispatched``: the trajectory summary (the
       full per-sample path rides in the tool observation for replay).
     """
@@ -258,6 +263,25 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
             "context": len(surface.get("context") or []),
             "blind": bool(obs.get("surface_blind", surface.get("blind", False))),
             "blind_reason": surface.get("blind_reason"),
+        }))
+    content = obs.get("content_view")
+    if isinstance(content, dict):
+        # The reading projection's FINGERPRINT only — never body text. Counts per
+        # region + the whole-view hash + per-unit hashes are the auditable signal
+        # (and the resumability replay-correctness check); the body is not on the
+        # log (Issue #41 §4). The producer fills ``view_hash``/``unit_hashes`` from
+        # ContentView.hash()/content_hash; a region's count is its tuple length.
+        regions = content.get("counts")
+        unit_hashes = content.get("unit_hashes")
+        out.append((ev.CONTENT_CAPTURED, {
+            "url": content.get("url", ""),
+            "want": [str(w) for w in content.get("want", [])]
+            if isinstance(content.get("want"), list) else [],
+            "counts": {str(k): int(v) for k, v in regions.items()}
+            if isinstance(regions, dict) else {},
+            "view_hash": str(content.get("view_hash", "")),
+            "unit_hashes": [str(h) for h in unit_hashes]
+            if isinstance(unit_hashes, list) else [],
         }))
     pointer = obs.get("pointer")
     if isinstance(pointer, dict):
@@ -1566,6 +1590,17 @@ async def _invoke(
     # observation's SHAPE (an ``action_surface``/``pointer`` key), so the loop stays
     # tool-agnostic — exactly like data.source.fetched above.
     if isinstance(obs, dict):
+        # A content read is the taint trigger (Issue #41 §4 layer 3): reading
+        # untrusted page prose into the loop SETS run-level taint, so downstream
+        # gates see "this run touched untrusted content". Raise it BEFORE the
+        # events so the CONTENT_CAPTURED record rides a tainted run.
+        if isinstance(obs.get("content_view"), dict) and run.raise_taint(name):
+            await run.emit(
+                ev.TAINT_RAISED,
+                {"source": name, "detail": "agent read untrusted page content"},
+                parent=turn,
+                source=name,
+            )
         for etype, payload in _perception_action_events(obs):
             await run.emit(etype, payload, parent=turn, source=name)
     await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": returned}, parent=turn, source=name)

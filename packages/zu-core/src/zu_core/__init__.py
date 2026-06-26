@@ -19,8 +19,26 @@ from .capabilities import (
 from .chain import chain_head, event_digest, link, verify_against_anchor, verify_chain
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .content import Action, Audio, Content, ContentPart, Image, Observation, Text
+from .content_view import (
+    WANT_DIAGNOSTIC,
+    WANT_FULL,
+    ContentUnit,
+    ContentView,
+    FieldState,
+    Provenance,
+    TrustedFrame,
+    Want,
+    project,
+)
 from .contracts import Budget, Event, Result, Status, TaskSpec
-from .events import CHECKPOINT_MARKED, RUN_ROLLED_BACK
+from .escalation import ProblemContext, Repair
+from .events import (
+    CHECKPOINT_MARKED,
+    CONTENT_CAPTURED,
+    RUN_ROLLED_BACK,
+    STEP_ESCALATED,
+    STEP_REPAIRED,
+)
 from .eventstore import (
     ALLOWED_EVENT_FILTERS,
     allowed_filters,
@@ -125,6 +143,19 @@ __all__ = [
     "Audio",
     "Observation",
     "Action",
+    # content_view — the reading projection (Issue #41): types, trust boundary,
+    # want= scoping, the only door to a model (TrustedFrame), shared escalation types
+    "Provenance",
+    "ContentUnit",
+    "FieldState",
+    "ContentView",
+    "Want",
+    "WANT_DIAGNOSTIC",
+    "WANT_FULL",
+    "project",
+    "TrustedFrame",
+    "Repair",
+    "ProblemContext",
     # event bus + taxonomy + projections + sinks + codec
     "EventBus",
     "SubscriberFailure",
@@ -157,6 +188,10 @@ __all__ = [
     "rollback_and_replan",
     "CHECKPOINT_MARKED",
     "RUN_ROLLED_BACK",
+    # content_view + escalation event taxonomy (Issue #41)
+    "CONTENT_CAPTURED",
+    "STEP_ESCALATED",
+    "STEP_REPAIRED",
     # ports
     "CAP_NET",
     "CAP_SANDBOX",

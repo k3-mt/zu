@@ -7,6 +7,38 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-26
+
+Issue #41 — a **content/reading projection** beside the content-free action view, plus an
+**escalate→diagnose→repair→de-escalate** control flow and **resumability**. Built and
+adversarially reviewed via multi-agent workflows; the review found 21 real defects (incl. a
+HIGH prompt-injection path) that were all fixed with revert-proven tests.
+
+### Added — `content_view`: the reading projection (#41)
+A second projection on the same surface read. `zu_core.content_view` (pydantic + `hashlib`
+only) ships `ContentUnit`/`ContentView`/`FieldState`/`Provenance`: readability-extracted
+`main_text`, tables/lists/kv, and a **diagnostic** slice (`errors` + per-field
+`{label, value, required, invalid, error_text}`), scoped by a `Want` enum
+(`WANT_DIAGNOSTIC = {errors, field_states}`). Every unit is provenance-tagged + content-hashed.
+The HTML extractor (`reduce_content`/`to_content_view`) lives in `zu-tools` (selectolax) — the
+core stays parser-free. The action view (`SurfaceView`/`recognize`/`surface_state_id`) is
+**unchanged and content-free**; content never feeds the FSM key.
+
+### Added — the untrusted-content trust boundary (`TrustedFrame`)
+Every `ContentUnit` is born **untrusted** (constructing one `untrusted=False` hard-raises, even
+via `model_construct`). `TrustedFrame.as_observation()` is the **only** bridge from content into
+a model prompt — fenced as DATA with per-unit region+hash attribution, never as instructions;
+an AST conformance guard enforces that no other path concatenates content into a message. The
+event log carries hash+provenance, never body; content reads taint the run.
+
+### Added — escalate→repair→de-escalate + resumability (#41)
+The deterministic executor (`zu-shadow`) runs content-free; on a **no-op** or unresolved step it
+reads *only* the diagnostic slice through `TrustedFrame`, a `Repairer` fills the missing required
+field or routes to a human (never auto-crossing a payment/committing boundary, with a Luhn-PAN
+value guard), then retries on the content-free path — bounded by `escalation_budget`. Mirrored in
+the `zu-patterns` MPC loop. Resumability: replay-to-`escalated_at` or navigate-to-last-URL /
+`rollback_and_replan` to `last_known_good`, mutually exclusive and checkpoint-mapped.
+
 ## [0.4.0] — 2026-06-26
 
 Works through three GitHub issues (#33/#34/#35), all additive (no breaking changes).

@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from zu_core.content_view import ContentView, Want, project
 from zu_core.ports import ModelProvider, ModelRequest
 from zu_core.surface import SurfaceAffordance, SurfaceView
 
@@ -79,6 +80,61 @@ _ENUMERATE_JS = r"""
 })()
 """
 
+# In-page: pull the readable SUBSTANCE of the page — its full HTML (for the
+# selectolax readability/table/list/kv/toast-modal pass in zu-tools) plus the form
+# fields expressed as accessibility-shaped nodes (role + accessible name + current
+# value + the required/invalid AX states + the field's described-by error text). The
+# parsing/diagnostic reduction itself lives in zu-tools' ``reduce_content`` — this JS
+# only GATHERS, it never decides (Issue #41 §1, §2.4). It mirrors ``_ENUMERATE_JS``'s
+# label resolution so the action and reading views agree on what a field is called.
+_CONTENT_JS = r"""
+(() => {
+  function clean(s){ return (s||'').replace(/\s+/g,' ').trim(); }
+  function role(el){
+    const r = el.getAttribute && el.getAttribute('role'); if(r && r.trim()) return r.trim();
+    const t=(el.tagName||'').toLowerCase();
+    if(t==='input'){const ty=(el.type||'text').toLowerCase();
+      if(ty==='checkbox')return'checkbox'; if(ty==='radio')return'radio';
+      if(ty==='search')return'searchbox'; if(ty==='date')return'datepicker'; return'textbox';}
+    if(t==='textarea')return'textbox'; if(t==='select')return'combobox'; return t||'generic';
+  }
+  function label(el){
+    try{
+      const al=el.getAttribute('aria-label'); if(al&&al.trim()) return clean(al);
+      if(el.id){const lab=document.querySelector('label[for="'+CSS.escape(el.id)+'"]');
+        const v=lab&&clean(lab.innerText); if(v) return v;}
+      const cl=el.closest&&el.closest('label'); {const v=cl&&clean(cl.innerText); if(v) return v;}
+      const ph=el.getAttribute&&el.getAttribute('placeholder'); if(ph&&ph.trim()) return clean(ph);
+      const nm=el.getAttribute&&el.getAttribute('name'); if(nm&&nm.trim()) return clean(nm);
+    }catch(e){}
+    return '';
+  }
+  function describedBy(el){
+    // the aria-describedby association — the standard way a field points at its error.
+    try{
+      const ids=(el.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean);
+      const parts=[];
+      for(const id of ids){const n=document.getElementById(id); const v=n&&clean(n.innerText); if(v) parts.push(v);}
+      return parts.join(' ');
+    }catch(e){ return ''; }
+  }
+  const nodes=[];
+  document.querySelectorAll('input, select, textarea, [role=textbox], [role=combobox], '+
+    '[role=checkbox], [role=radio], [role=switch], [role=spinbutton]').forEach(el=>{
+    const ty=(el.type||'').toLowerCase();
+    if(el.tagName==='INPUT' && (ty==='submit'||ty==='button'||ty==='image'||ty==='hidden')) return;
+    const states=[];
+    if(el.required || el.getAttribute('aria-required')==='true') states.push('required');
+    if(el.getAttribute('aria-invalid')==='true' ||
+       (el.matches && el.willValidate && !el.checkValidity())) states.push('invalid');
+    nodes.push({role:role(el), name:label(el),
+                value:(el.value!==undefined && el.value!==null) ? String(el.value) : '',
+                states:states, description:describedBy(el)});
+  });
+  return {html: document.documentElement.outerHTML, nodes: nodes};
+})()
+"""
+
 
 class LiveSession:
     """A BrowserSession backed by a real Playwright page. ``perceive`` runs the Action
@@ -107,6 +163,29 @@ class LiveSession:
 
     def current_url(self) -> str:
         return str(self._page.url)
+
+    def content_view(self, want: frozenset[Want]) -> ContentView:  # pragma: no cover - live-only
+        """The SECOND projection — read the page's readable substance on escalation
+        (Issue #41 §0, §5). Gather the page HTML + the form fields (as AX-shaped
+        nodes) in-page, then DELEGATE the parsing/diagnostic reduction to zu-tools'
+        ``reduce_content`` (selectolax readability/structural pass + the
+        required/invalid/error_text field states) and ``project`` to the requested
+        ``want`` slice — the ONLY content the model ever sees. zu-shadow holds no
+        parser; all the reduction logic is the offline-tested zu-tools code, exercised
+        at $0 through ``executor.py``'s ``FakeSession``."""
+        from zu_tools.action_surface import AxNode
+        from zu_tools.content_surface import reduce_content
+
+        raw = self._page.evaluate(_CONTENT_JS)
+        nodes = [
+            AxNode(role=n.get("role", "") or "generic", name=n.get("name", "") or "",
+                   value=n.get("value"), states=list(n.get("states", []) or []),
+                   description=n.get("description") or None)
+            for n in raw.get("nodes", [])
+        ]
+        view = reduce_content(nodes, raw.get("html", "") or "",
+                              url=self._page.url, title=self._page.title() or "")
+        return project(view, want)
 
 
 def _load_steps(recording: str) -> list[Step]:

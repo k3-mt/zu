@@ -6,6 +6,7 @@ stands in for the model that fills variable choices.
 from __future__ import annotations
 
 from zu_core.bus import EventBus
+from zu_core.content_view import ContentView, Want
 from zu_core.surface import SurfaceAffordance, SurfaceView
 from zu_providers.scripted import ScriptedProvider
 from zu_shadow.capture import SemanticTarget
@@ -38,6 +39,11 @@ class FakeSession:
 
     def current_url(self) -> str:
         return ""
+
+    def content_view(self, want: frozenset[Want]) -> ContentView:
+        # The content-free path tests never escalate, so the second projection is
+        # never read; satisfy the BrowserSession Protocol with an empty view.
+        return ContentView()
 
 
 def _surface(*affs: tuple[str, str, str]) -> SurfaceView:

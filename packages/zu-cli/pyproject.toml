@@ -1,6 +1,6 @@
 [project]
 name = "zu-cli"
-version = "0.4.0"
+version = "0.5.0"
 description = "The `zu` command — Agent Production Runtime CLI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,7 +20,7 @@ classifiers = [
 # pulled by the `zu-runtime` bundle and its extras. The CLI discovers whatever
 # is installed at runtime, so it never forces a plugin (or its deps) on a user.
 dependencies = [
-    "zu-core==0.4.0",
+    "zu-core==0.5.0",
     "typer",
     "pyyaml",
 ]
@@ -33,7 +33,7 @@ serve = ["fastapi>=0.110", "uvicorn>=0.27"]
 mcp = ["mcp>=1.2"]
 # `zu test-plugin` — the plugin-test gate + adversarial red team. Optional: a
 # contributor/CI tool, not needed to run an agent.
-test = ["zu-redteam==0.4.0"]
+test = ["zu-redteam==0.5.0"]
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
