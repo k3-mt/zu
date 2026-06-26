@@ -2249,7 +2249,7 @@ wheels = [
 
 [[package]]
 name = "zu-backends"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-backends" }
 dependencies = [
     { name = "zu-core" },
@@ -2273,7 +2273,7 @@ provides-extras = ["docker", "encryption"]
 
 [[package]]
 name = "zu-checks"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-checks" }
 dependencies = [
     { name = "jsonschema" },
@@ -2288,7 +2288,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-cli"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-cli" }
 dependencies = [
     { name = "pyyaml" },
@@ -2322,7 +2322,7 @@ provides-extras = ["serve", "mcp", "test"]
 
 [[package]]
 name = "zu-core"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-core" }
 dependencies = [
     { name = "pydantic" },
@@ -2333,7 +2333,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2" }]
 
 [[package]]
 name = "zu-huggingface"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-huggingface" }
 dependencies = [
     { name = "zu-core" },
@@ -2361,7 +2361,7 @@ provides-extras = ["hosted", "local"]
 
 [[package]]
 name = "zu-patterns"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-patterns" }
 dependencies = [
     { name = "zu-core" },
@@ -2372,7 +2372,7 @@ requires-dist = [{ name = "zu-core", editable = "packages/zu-core" }]
 
 [[package]]
 name = "zu-providers"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-providers" }
 dependencies = [
     { name = "zu-core" },
@@ -2396,7 +2396,7 @@ provides-extras = ["anthropic", "openai"]
 
 [[package]]
 name = "zu-redteam"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-redteam" }
 dependencies = [
     { name = "zu-core" },
@@ -2411,7 +2411,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-runtime"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu" }
 dependencies = [
     { name = "zu-backends" },
@@ -2486,7 +2486,7 @@ provides-extras = ["web", "demo", "anthropic", "openai", "serve", "docker", "mcp
 
 [[package]]
 name = "zu-shadow"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-shadow" }
 dependencies = [
     { name = "zu-cli" },
@@ -2510,7 +2510,7 @@ provides-extras = ["live"]
 
 [[package]]
 name = "zu-testing"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-testing" }
 dependencies = [
     { name = "httpx" },
@@ -2527,7 +2527,7 @@ requires-dist = [
 
 [[package]]
 name = "zu-tools"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "packages/zu-tools" }
 dependencies = [
     { name = "httpx" },
