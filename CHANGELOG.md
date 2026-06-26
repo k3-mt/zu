@@ -7,6 +7,13 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-26
+
+Ships the issue #30 capability-surface fix to PyPI: every published wheel now carries
+`py.typed`, so a strict-typed downstream finally sees Zu's types. Also adds
+`zu_core.__version__` / `provenance()`, `zu_core.capabilities()` + the `zu capabilities`
+CLI, and the library-package discoverability map.
+
 ### Added — make the capability surface explicit, type-checkable, and version-stamped (issue #30)
 A downstream integrator reimplemented `zu-shadow`, the recognizers, and providers locally
 because none of it was discoverable, type-checkable, or version-stamped from the outside.

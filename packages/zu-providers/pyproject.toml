@@ -1,6 +1,6 @@
 [project]
 name = "zu-providers"
-version = "0.3.0"
+version = "0.3.1"
 description = "Zu model-provider adapters: scripted, anthropic, openai-compatible"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Typing :: Typed",
 ]
-dependencies = ["zu-core==0.3.0"]
+dependencies = ["zu-core==0.3.1"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
