@@ -29,6 +29,8 @@ paginated_list = "zu_patterns.paginated_list:PaginatedList"
 sortable_table = "zu_patterns.sortable_table:SortableTable"
 autocomplete = "zu_patterns.autocomplete:Autocomplete"
 cart_checkout = "zu_patterns.cart_checkout:CartCheckout"
+contact_form = "zu_patterns.contact_form:ContactForm"
+newsletter_signup = "zu_patterns.newsletter_signup:NewsletterSignup"
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

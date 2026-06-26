@@ -78,3 +78,45 @@ PREV_TOKENS = ("prev", "previous", "back", "<")
 CART_TOKENS = ("add to cart", "add to bag", "add to basket")
 CHECKOUT_TOKENS = ("checkout", "check out")
 PLACE_ORDER_TOKENS = ("place order", "buy now", "pay", "complete purchase", "confirm order")
+# Shipping/contact slot vocabulary — the address-form language of the archetype.
+SHIPPING_TOKENS = (
+    "postcode",
+    "postal code",
+    "zip",
+    "city",
+    "town",
+    "address",
+    "address line",
+    "street",
+    "full name",
+    "first name",
+    "last name",
+    "phone",
+    "telephone",
+    "mobile",
+    "county",
+    "state",
+)
+# One-time-code vocabulary — an OTP/verification field is a committing-form tell.
+OTP_TOKENS = (
+    "otp",
+    "one-time",
+    "one time",
+    "verification code",
+    "security code",
+    "passcode",
+    "2fa",
+    "authentication code",
+)
+# Subscribe/join vocabulary — the newsletter-signup language of the archetype.
+SUBSCRIBE_TOKENS = (
+    "subscribe",
+    "sign up",
+    "sign-up",
+    "signup",
+    "join",
+    "newsletter",
+    "subscribe now",
+    "get updates",
+    "stay updated",
+)
