@@ -118,6 +118,66 @@ def test_plan_no_goal_returns_best_partial() -> None:
     assert p.reached_goal is False
 
 
+# --- #35: the optional per-run dead-edge mask in plan() -------------------
+
+
+def _two_route_fsm() -> Fsm:
+    # two independent routes to goal: s0 --slow--> a --x--> goal
+    #                                 s0 --fast--> b --y--> goal
+    return Fsm(
+        states=frozenset({"s0", "a", "b", "goal"}),
+        initial="s0",
+        accepting=frozenset({"goal"}),
+        edges=(
+            FsmEdge("s0", "a", "slow"),
+            FsmEdge("a", "goal", "x"),
+            FsmEdge("s0", "b", "fast"),
+            FsmEdge("b", "goal", "y"),
+        ),
+    )
+
+
+def test_plan_routes_around_dead_edge() -> None:
+    # mask the s0 --slow--> a edge; plan must still reach goal via the OTHER route and
+    # never propose a step across the masked (state, edge).
+    p = plan(_two_route_fsm(), dead_edges=frozenset({("s0", "slow")}))
+    assert p.reached_goal is True
+    assert "slow" not in [s.label for s in p.steps]
+
+
+def test_plan_dead_edge_default_empty_unchanged() -> None:
+    # default-empty is a no-op / backwards compatible.
+    a = plan(_line_fsm())
+    b = plan(_line_fsm(), dead_edges=frozenset())
+    assert [s.label for s in a.steps] == [s.label for s in b.steps] == ["go", "finish"]
+
+
+def test_plan_dead_edge_forces_alternate_route() -> None:
+    # the prior FAVOURS the 'fast' route; masking its only edge forces the planner to
+    # ROUTE AROUND to the slower route and still reach goal (not just remove the edge).
+    fsm = _two_route_fsm()
+    p = plan(
+        fsm,
+        prior=lambda e: 1.0 if e.label == "fast" else 0.0,
+        dead_edges=frozenset({("s0", "fast")}),
+    )
+    assert p.reached_goal is True
+    labels = [s.label for s in p.steps]
+    assert "fast" not in labels
+    assert labels == ["slow", "x"]
+
+
+def test_plan_dead_edge_does_not_mutate_fsm() -> None:
+    # the mask is read-only: fsm.states / fsm.edges are unchanged after planning, so
+    # nothing is persisted into the learned FSM.
+    fsm = _two_route_fsm()
+    states_before = fsm.states
+    edges_before = fsm.edges
+    plan(fsm, dead_edges=frozenset({("s0", "slow")}))
+    assert fsm.states == states_before
+    assert fsm.edges == edges_before
+
+
 def test_plan_step_is_frozen() -> None:
     step = PlanStep(src="s0", dst="s1", label="go", committing=False)
     with pytest.raises((AttributeError, TypeError)):

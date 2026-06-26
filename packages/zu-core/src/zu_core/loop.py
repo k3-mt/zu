@@ -1890,6 +1890,19 @@ def last_known_good(events: Sequence[Event]) -> UUID | None:
     return last_returned  # the last good return even if a halt followed (the LKG)
 
 
+async def mark_checkpoint(run: Any, label: str = "checkpoint") -> UUID:
+    """Mark a last-known-good (LKG) rollback point on ``run`` (ZU-RAIL-8).
+
+    A thin, public, module-level wrapper over ``_Run.mark_checkpoint`` so a consumer
+    can mark a restore target without reaching into the private run class: it emits
+    ``harness.checkpoint.marked`` {"label", "step"} parented to run.root and returns
+    the marker event's id (the restore target ``last_known_good`` will locate). The
+    companion to ``last_known_good`` / ``rollback_and_replan`` in the public surface.
+    """
+    marker: UUID = await run.mark_checkpoint(label)
+    return marker
+
+
 def _index_of(events: Sequence[Event], event_id: UUID) -> int:
     for i, e in enumerate(events):
         if e.event_id == event_id:

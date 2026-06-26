@@ -19,6 +19,7 @@ from .reversibility import (
 )
 from .search import (
     Candidate,
+    DeadEdge,
     MpcDecision,
     MpcOutcome,
     Plan,
@@ -51,6 +52,7 @@ __all__ = [
     "live_mpc_step",
     "mpc_run",
     "Candidate",
+    "DeadEdge",
     "MpcDecision",
     "MpcOutcome",
     "fsm_from_shadow",

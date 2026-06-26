@@ -151,6 +151,15 @@ class Plan:
 EdgePrior = Callable[[FsmEdge], float]
 # A commitment classifier over an edge: REVERSIBLE | COMMITTING.
 EdgeClassifier = Callable[[FsmEdge], Commitment]
+# A per-run masked edge: a ``(state_id, edge_label)`` pair PROVEN DEAD this run.
+# The mask is read-only over the passed-in ``Fsm`` and is NEVER persisted into the
+# learned FSM — it routes the search around an edge for THIS call/run only (a
+# dynamically-discovered trap). NOTE: the key is ``(state_id, edge_label)`` — the
+# only key usable in BOTH ``plan`` and ``live_mpc_step`` (the latter knows a
+# candidate's ``label`` but not its destination). In the induced FSM an edge label
+# is an action name (tool:handle / verb:target), normally unique per state, but a
+# label collision out of one state would mask all such edges (a known limitation).
+DeadEdge = tuple[str, str]
 
 
 def _default_classifier(edge: FsmEdge) -> Commitment:
@@ -182,6 +191,7 @@ def plan(
     prior: EdgePrior = _default_prior,
     classifier: EdgeClassifier = _default_classifier,
     max_expansions: int = 1000,
+    dead_edges: frozenset[DeadEdge] = frozenset(),
 ) -> Plan:
     """Best-first search from ``fsm.initial`` toward an accepting state (pure).
 
@@ -191,6 +201,12 @@ def plan(
     ``trap_states``). Each chosen edge is classified; a committing edge is FLAGGED
     in the plan (offline we still record the path, but ``crosses_commit`` tells the
     deferred live executor where lookahead must stop).
+
+    ``dead_edges`` is an OPTIONAL per-call/per-run mask of ``(state_id, edge_label)``
+    pairs proven dead THIS run: a masked edge is skipped during expansion exactly
+    like a trap, so the search ROUTES AROUND it. The mask is read-only — it is NEVER
+    persisted into ``fsm`` (the learned FSM is not mutated); it lasts only for this
+    call. Default empty (a no-op, fully backwards-compatible).
     """
     co = co_reachable(fsm)
     traps = trap_states(fsm)
@@ -232,6 +248,10 @@ def plan(
         )
         for e in out:
             if e.dst in traps or e.dst in node.visited:
+                continue
+            # per-run dead-edge mask: a (state, label) proven dead THIS run is
+            # routed around exactly like a trap (no fsm mutation — mask is read-only).
+            if (e.src, e.label) in dead_edges:
                 continue
             committing = classifier(e) is Commitment.COMMITTING
             step = PlanStep(src=e.src, dst=e.dst, label=e.label, committing=committing)
@@ -380,6 +400,8 @@ async def live_mpc_step(
     surface_to_state: SurfaceToState | None = None,
     priors: Sequence[Any] = (),
     min_confidence: float = 0.6,
+    dead_edges: frozenset[DeadEdge] = frozenset(),
+    exclude: frozenset[str] = frozenset(),
 ) -> MpcDecision:
     """One guided-MPC step — MODEL PROPOSES, deterministic lookahead+rail DISPOSES.
 
@@ -401,6 +423,16 @@ async def live_mpc_step(
     ``escalate``. Only a REVERSIBLE/idempotent candidate is returned for execution.
     An UNRECOGNIZED / no-on-rail-candidate surface also escalates (fall through to
     the model / route out). Pure: no I/O beyond the injected ``model.complete``.
+
+    ``dead_edges`` is an OPTIONAL per-call/per-run mask of ``(state_id, edge_label)``
+    pairs proven dead THIS run: a candidate whose ``(here, label)`` is masked is
+    scored OFF-RAIL (the same ``-2.0`` unknown-transition sentinel) so it can never
+    be chosen, and a surface offering only masked moves escalates. The mask is
+    read-only over ``fsm`` — NEVER persisted into the learned FSM; it lasts for this
+    call only. ``exclude`` is the set of candidate labels already TRIED at this
+    surface-state (used by ``mpc_run``'s structural rollback to replan a DIFFERENT
+    on-rail sibling): an excluded label is likewise scored off-rail so the replan
+    picks a genuinely different branch. Both default empty (a no-op).
     """
     to_state = surface_to_state or _surface_state
     here = to_state(surface)
@@ -423,6 +455,13 @@ async def live_mpc_step(
     edges_here = {e.label: e for e in fsm.edges if e.src == here}
     scored: list[tuple[Candidate, float]] = []
     for cand in proposals:
+        # per-run dead-edge mask / already-tried sibling: a masked (here,label) or
+        # an excluded label is treated as OFF-RAIL for THIS call (the -2.0 unknown-
+        # transition sentinel), so the existing best_score<=0.0 gate disposes it —
+        # routed around without mutating the learned fsm.
+        if (here, cand.label) in dead_edges or cand.label in exclude:
+            scored.append((cand, -2.0))
+            continue
         edge = edges_here.get(cand.label)
         if edge is None:
             # the learned model has no memory of this move from here: unknown
@@ -567,13 +606,19 @@ ActionExecutor = Callable[[Candidate, SurfaceView], Awaitable[SurfaceView]]
 
 @dataclass(frozen=True)
 class MpcOutcome:
-    """The result of an ``mpc_run`` driver loop."""
+    """The result of an ``mpc_run`` driver loop.
+
+    ``rollbacks`` counts the MPC-level structural rollbacks performed: on a trap (no
+    on-rail non-committing forward branch) the loop reverts to the last checkpoint
+    surface and replans a DIFFERENT untried on-rail sibling (ZU-RAIL-8, structural —
+    see ``mpc_run``), bounded by ``replan_budget``."""
 
     reached_goal: bool
     escalated: bool
     steps: tuple[Candidate, ...]
     rationale: str
     surface: SurfaceView
+    rollbacks: int = 0
 
 
 async def mpc_run(
@@ -589,6 +634,9 @@ async def mpc_run(
     surface_to_state: SurfaceToState | None = None,
     priors: Sequence[Any] = (),
     min_confidence: float = 0.6,
+    dead_edges: frozenset[DeadEdge] = frozenset(),
+    replan_budget: int = 0,
+    on_rollback: Callable[[str, Candidate], Awaitable[None]] | None = None,
 ) -> MpcOutcome:
     """The driver loop: ``live_mpc_step`` → execute ONE step via the injected
     ``executor`` → re-plan from the REAL resulting state → repeat.
@@ -598,32 +646,85 @@ async def mpc_run(
     boundary — escalate, NEVER auto-cross). Reversible/idempotent steps execute
     freely. ``max_steps`` bounds the loop. The executor is the only I/O; everything
     else is the pure decision above, so the whole loop runs offline with a fake
-    executor."""
+    executor.
+
+    STRUCTURAL ROLLBACK + REPLAN (ZU-RAIL-8, the planner-level hook). When a step
+    TRAPS — ``live_mpc_step`` escalates with NO on-rail candidate (``action is None``)
+    — and ``replan_budget`` remains, the loop ROLLS BACK to the last checkpoint
+    surface (the surface before the trapping move) and re-calls ``live_mpc_step``
+    there with ``exclude={already-tried sibling labels}``, so it replans a DIFFERENT
+    on-rail sibling instead of escalating immediately. This is a STRUCTURAL rollback
+    (revert ``cur`` to the checkpoint surface + exclude the tried label) — NOT the
+    event-sourced ``zu_core.rollback_and_replan`` (which needs a real run + event
+    log; ``mpc_run`` is a pure offline planner over an ``Fsm``). Consume-once is
+    preserved by construction: a COMMITTING decision is the commit boundary and
+    escalates WITHOUT a rollback, so only REVERSIBLE siblings are ever re-tried —
+    there is no committed side effect to re-run. The replan is bounded by
+    ``replan_budget`` (per-run total) AND by the per-surface ``exclude`` set, so a
+    model that keeps proposing the same trap cannot loop forever. Default
+    ``replan_budget=0`` ⇒ opt-in; the legacy escalate-on-trap behavior is unchanged.
+
+    ``dead_edges`` is forwarded into every ``live_mpc_step`` call (the per-run mask
+    of ``(state_id, edge_label)`` pairs proven dead this run — routed around, NEVER
+    persisted into ``fsm``). ``on_rollback`` is an optional async hook fired when a
+    trap triggers a rollback (for audit / checkpoint-event emission)."""
     to_state = surface_to_state or _surface_state
     taken: list[Candidate] = []
     cur = surface
+    rollbacks = 0
+    # The last surface that produced an on-rail step (the checkpoint to roll back
+    # to) and, per surface-state, the sibling labels already TRIED there. On a trap
+    # the loop reverts ``cur`` to the checkpoint surface and excludes the tried
+    # labels so the replan picks a DIFFERENT on-rail sibling.
+    checkpoint = cur
+    tried: dict[str, set[str]] = {}
     for _ in range(max_steps):
         if to_state(cur) in fsm.accepting:
             return MpcOutcome(
                 reached_goal=True, escalated=False, steps=tuple(taken),
-                rationale="reached goal state", surface=cur,
+                rationale="reached goal state", surface=cur, rollbacks=rollbacks,
             )
+        here = to_state(cur)
         decision = await live_mpc_step(
             cur, model, fsm, patterns, k=k, depth=depth,
             surface_to_state=to_state, priors=priors, min_confidence=min_confidence,
+            dead_edges=dead_edges, exclude=frozenset(tried.get(here, set())),
         )
         if decision.escalate or decision.action is None:
+            # A TRAP (no on-rail candidate, ``action is None``) MAY roll back to the
+            # last checkpoint surface and replan a DIFFERENT sibling — but a COMMIT-
+            # BOUNDARY escalation (a candidate WAS chosen but is COMMITTING) NEVER
+            # does: stopping at the commit boundary is the whole point, and a re-try
+            # could re-cross a committed side effect. Only a genuine trap rolls back,
+            # so only REVERSIBLE siblings are ever re-tried — consume-once preserved.
+            if decision.action is None and replan_budget > 0:
+                # structural rollback: exclude the off-rail labels the model just
+                # proposed at ``checkpoint`` (so the replan picks a sibling), revert
+                # ``cur`` to the checkpoint surface, and give the model another turn.
+                cp_state = to_state(checkpoint)
+                proposed = {c.label for c, _ in decision.scored}
+                tried.setdefault(cp_state, set()).update(proposed)
+                if on_rollback is not None and decision.scored:
+                    await on_rollback("trap", decision.scored[0][0])
+                cur = checkpoint
+                replan_budget -= 1
+                rollbacks += 1
+                continue
             return MpcOutcome(
                 reached_goal=False, escalated=True, steps=tuple(taken),
-                rationale=decision.rationale, surface=cur,
+                rationale=decision.rationale, surface=cur, rollbacks=rollbacks,
             )
         # execute exactly ONE reversible step via the injected executor, then
-        # re-plan from the REAL resulting surface.
+        # re-plan from the REAL resulting surface. This surface is now the last
+        # known-good checkpoint, and the chosen label is tried here.
+        tried.setdefault(here, set()).add(decision.action.label)
+        checkpoint = cur
         taken.append(decision.action)
         cur = await executor(decision.action, cur)
     return MpcOutcome(
         reached_goal=to_state(cur) in fsm.accepting, escalated=False,
         steps=tuple(taken), rationale="max_steps reached", surface=cur,
+        rollbacks=rollbacks,
     )
 
 

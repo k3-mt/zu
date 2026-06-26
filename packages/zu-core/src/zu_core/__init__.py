@@ -20,6 +20,7 @@ from .chain import chain_head, event_digest, link, verify_against_anchor, verify
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .content import Action, Audio, Content, ContentPart, Image, Observation, Text
 from .contracts import Budget, Event, Result, Status, TaskSpec
+from .events import CHECKPOINT_MARKED, RUN_ROLLED_BACK
 from .eventstore import (
     ALLOWED_EVENT_FILTERS,
     allowed_filters,
@@ -27,6 +28,7 @@ from .eventstore import (
     register_event_filter,
     validate_filter,
 )
+from .loop import last_known_good, mark_checkpoint, rollback_and_replan
 from .ports import (
     CAP_FS_READ,
     CAP_FS_WRITE,
@@ -149,6 +151,12 @@ __all__ = [
     "scope_event",
     "scope_payload",
     "RENDER_KEYS",
+    # ZU-RAIL-8 — restore-to-last-known-good rollback (public primitive)
+    "mark_checkpoint",
+    "last_known_good",
+    "rollback_and_replan",
+    "CHECKPOINT_MARKED",
+    "RUN_ROLLED_BACK",
     # ports
     "CAP_NET",
     "CAP_SANDBOX",
