@@ -37,6 +37,43 @@ def _started() -> Event:
     return _ev(ev.TASK_STARTED, {"query": "q", "tainted": False})
 
 
+def test_rollback_primitive_importable_from_top_level() -> None:
+    # ZU-RAIL-8 is a PUBLIC primitive: a consumer imports the three functions and
+    # the two event-name constants straight from zu_core's top level — no reaching
+    # into private modules (zu_core.loop / zu_core.events).
+    from zu_core import (
+        CHECKPOINT_MARKED,
+        RUN_ROLLED_BACK,
+        last_known_good,
+        mark_checkpoint,
+        rollback_and_replan,
+    )
+
+    assert CHECKPOINT_MARKED == "harness.checkpoint.marked"
+    assert RUN_ROLLED_BACK == "harness.run.rolled_back"
+    assert callable(rollback_and_replan)
+    assert callable(last_known_good)
+    # mark_checkpoint is the thin module-level wrapper over _Run.mark_checkpoint, so
+    # ``from zu_core import mark_checkpoint`` works literally.
+    assert callable(mark_checkpoint)
+
+
+async def test_mark_checkpoint_wrapper_emits_marker() -> None:
+    # The public wrapper marks a last-known-good point on a live run and the marker
+    # is what last_known_good locates as the restore target.
+    from zu_core import mark_checkpoint
+    from zu_core.loop import _Run
+
+    bus = EventBus()
+    run = _Run(TaskSpec(query="q"), bus, trace_id=_TRACE)
+    run.root = await run.emit(ev.TASK_STARTED, {"query": "q", "tainted": False})
+    marker = await mark_checkpoint(run, "good-point")
+    log = list(await bus.query())
+    assert any(e.event_id == marker and e.type == ev.CHECKPOINT_MARKED for e in log)
+    assert log[-1].payload["label"] == "good-point"
+    assert last_known_good(log) == marker
+
+
 def test_last_known_good_picks_latest_marker() -> None:
     m1 = _ev(ev.CHECKPOINT_MARKED, {"label": "a", "step": 1})
     m2 = _ev(ev.CHECKPOINT_MARKED, {"label": "b", "step": 3})

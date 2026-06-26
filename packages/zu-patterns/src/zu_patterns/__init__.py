@@ -7,6 +7,8 @@ committing classifier, and the offline guided search over the Phase-1 FSM.
 
 from __future__ import annotations
 
+from .contact_form import ContactForm
+from .newsletter_signup import NewsletterSignup
 from .recognizer import Recognition, recognize
 from .reversibility import (
     DEFAULT_PRIORS,
@@ -17,6 +19,7 @@ from .reversibility import (
 )
 from .search import (
     Candidate,
+    DeadEdge,
     MpcDecision,
     MpcOutcome,
     Plan,
@@ -35,6 +38,8 @@ __zu_spec__ = "§5"  # pattern recognition + guided search (issue #30: greppable
 __all__ = [
     "Recognition",
     "recognize",
+    "ContactForm",
+    "NewsletterSignup",
     "Commitment",
     "Signal",
     "ActionPrior",
@@ -47,6 +52,7 @@ __all__ = [
     "live_mpc_step",
     "mpc_run",
     "Candidate",
+    "DeadEdge",
     "MpcDecision",
     "MpcOutcome",
     "fsm_from_shadow",

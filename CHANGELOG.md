@@ -7,6 +7,36 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-26
+
+Works through three GitHub issues (#33/#34/#35), all additive (no breaking changes).
+
+### Added — two form-region patterns: `contact_form` and `newsletter_signup` (#33)
+`zu_patterns` now tells a fillable checkout/contact form apart from a lone marketing
+email box — a security-relevant distinction (typing into a stray newsletter box can spring
+its own anti-bot challenge). `ContactForm` (archetype `contact_form`) fires on shipping/
+contact slots OR an OTP field OR ≥3 distinct fillable fields (submit = COMMITTING);
+`NewsletterSignup` (archetype `newsletter_signup`) fires on a lone email box by a
+subscribe/join button (submit = reversible-leaning). Adds generic `SHIPPING_TOKENS` /
+`OTP_TOKENS` / `SUBSCRIBE_TOKENS` to `_match.py` (no site constants), wires reversibility
+priors via `classify_action`, and defers to `login_form` on a password surface. The existing
+8 archetypes are unaffected.
+
+### Added — ZU-RAIL-8 rollback is public API + in-loop MPC backtracking (#34)
+`rollback_and_replan`, `last_known_good`, `mark_checkpoint` (a new thin module-level
+wrapper) and the event names `CHECKPOINT_MARKED` / `RUN_ROLLED_BACK` are now exported from
+`zu_core` top-level (a stable public surface). The §5 guided-MPC loop (`mpc_run`) gains an
+opt-in **structural rollback**: on a trap (no on-rail, non-committing branch) it reverts to
+the last checkpoint surface and replans a *different* on-rail sibling, bounded by
+`replan_budget` (default 0 = legacy behavior). Consume-once is preserved — a commit boundary
+never rolls back, so only reversible siblings are re-tried.
+
+### Added — per-run dead-edge mask for guided MPC (#35)
+`plan` / `live_mpc_step` / `mpc_run` accept an optional `dead_edges` set of
+`(state_id, edge_label)` pairs proven dead THIS run; a masked edge is routed around (scored
+off-rail) for this call only and is **never** persisted into the learned FSM. Default empty
+(a no-op).
+
 ## [0.3.1] — 2026-06-26
 
 Ships the issue #30 capability-surface fix to PyPI: every published wheel now carries

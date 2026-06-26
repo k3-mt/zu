@@ -221,6 +221,241 @@ async def test_mpc_run_escalates_on_committing_step() -> None:
     assert executed == []  # the committing step never executed
 
 
+# --- #34: structural rollback + replan a DIFFERENT on-rail sibling on a trap
+
+
+def _tc(label: str, handle: str = "a1", **extra: object) -> ToolCall:
+    return ToolCall(name="click", args={"label": label, "handle": handle, **extra},)
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_rolls_back_and_replans_sibling_on_trap() -> None:
+    # here --reach--> good --done--> goal  (on-rail) ; here --wander--> dead (trap).
+    # The model proposes the TRAP ('wander') on the first step; with replan_budget>=1
+    # the loop rolls back to 'here', EXCLUDES 'wander', and (second model turn) picks
+    # the DIFFERENT on-rail sibling 'reach' — driving to goal rather than escalating.
+    model = ScriptedProvider(
+        [
+            ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("done", "a1")], finish=Finish.TOOL_CALLS),
+        ]
+    )
+    good = SurfaceView(
+        title="good", url="https://x/good",
+        affordances=(SurfaceAffordance(handle="a1", role="link", label="done"),),
+    )
+    nexts = {"reach": good, "done": _surface("goal")}
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return nexts[cand.label]
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=1,
+    )
+    assert outcome.reached_goal is True
+    assert outcome.escalated is False
+    assert outcome.rollbacks == 1
+    assert [c.label for c in outcome.steps] == ["reach", "done"]
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_escalates_when_budget_exhausted() -> None:
+    # The model only ever proposes the trap move AND replan_budget=0 (the default):
+    # the loop escalates immediately — the legacy escalate-on-trap behavior, no
+    # rollback performed.
+    model = ScriptedProvider(
+        [ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS)]
+    )
+    executed: list[str] = []
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        executed.append(cand.label)
+        return _surface("goal")
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=0,
+    )
+    assert outcome.escalated is True
+    assert outcome.rollbacks == 0
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_mpc_rollback_never_recrosses_committing_edge() -> None:
+    # After a trap the only untried sibling is a COMMITTING op ('pay'). The loop must
+    # NOT execute it: it STOPS at the commit boundary and escalates, proving
+    # consume-once is preserved (no committed side effect is ever re-run). Even with
+    # budget the rollback can only re-try REVERSIBLE siblings.
+    model = ScriptedProvider(
+        [
+            ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS),
+            ModelResponse(
+                tool_calls=[ToolCall(name="pay", args={"label": "reach", "op": "pay"})],
+                finish=Finish.TOOL_CALLS,
+            ),
+        ]
+    )
+    executed: list[str] = []
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        executed.append(cand.label)
+        return _surface("goal")
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=2,
+    )
+    assert outcome.escalated is True
+    assert executed == []  # the committing sibling never executed — consume-once kept
+    assert outcome.rollbacks == 1  # rolled back once (the trap), then hit the commit
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_excludes_already_tried_sibling() -> None:
+    # After rolling back, the replan must NOT re-pick the tried trap label even if the
+    # model re-emits it: 'wander' stays excluded, so a model that keeps proposing it
+    # cannot loop forever — the budget bounds it and it escalates (no progress).
+    model = ScriptedProvider(
+        [
+            ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS),
+        ]
+    )
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return _surface("goal")
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=1,
+    )
+    # one rollback, then the re-proposed 'wander' is excluded ⇒ no on-rail move ⇒
+    # escalate (terminates; never an infinite loop).
+    assert outcome.escalated is True
+    assert outcome.rollbacks == 1
+    assert [c.label for c in outcome.steps] == []
+
+
+# --- #35: optional per-run dead-edge mask in the live seam -----------------
+
+
+def _branch_fsm_two_routes() -> Fsm:
+    # here has TWO on-rail edges to goal-reachable states:
+    #   here --reach--> good  --done--> goal
+    #   here --reach2--> good2 --done2--> goal
+    return Fsm(
+        states=frozenset({"here", "good", "good2", "goal", "dead"}),
+        initial="here",
+        accepting=frozenset({"goal"}),
+        edges=(
+            FsmEdge("here", "good", "reach"),
+            FsmEdge("good", "goal", "done"),
+            FsmEdge("here", "good2", "reach2"),
+            FsmEdge("good2", "goal", "done2"),
+            FsmEdge("here", "dead", "wander"),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_mpc_step_masks_dead_edge_candidate() -> None:
+    # The model proposes the on-rail 'reach', but ('here','reach') is masked dead for
+    # THIS run ⇒ it is scored off-rail and never chosen; the only move is masked ⇒
+    # escalate. The mask is per-call — the FSM is never mutated.
+    model = ScriptedProvider(
+        [ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS)]
+    )
+    decision = await live_mpc_step(
+        _surface("here"), model, _branch_fsm(), surface_to_state=_state_of,
+        dead_edges=frozenset({("here", "reach")}),
+    )
+    assert decision.escalate is True
+    assert decision.action is None
+
+
+@pytest.mark.asyncio
+async def test_mpc_step_dead_edge_default_empty_unchanged() -> None:
+    # The existing pick-on-rail scenario with dead_edges omitted still picks 'reach'
+    # — default-empty is a no-op.
+    model = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_calls=[_tc("wander", "a2"), _tc("reach", "a1")],
+                finish=Finish.TOOL_CALLS,
+            )
+        ]
+    )
+    decision = await live_mpc_step(
+        _surface("here"), model, _branch_fsm(), surface_to_state=_state_of
+    )
+    assert decision.escalate is False
+    assert decision.action is not None and decision.action.label == "reach"
+
+
+@pytest.mark.asyncio
+async def test_mpc_step_dead_edge_routes_to_other_candidate() -> None:
+    # 'here' has two on-rail siblings ('reach', 'reach2'); the model proposes both.
+    # Masking ('here','reach') routes around it to the still-valid 'reach2' rather
+    # than escalating.
+    model = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_calls=[_tc("reach", "a1"), _tc("reach2", "a1")],
+                finish=Finish.TOOL_CALLS,
+            )
+        ]
+    )
+    decision = await live_mpc_step(
+        _surface("here"), model, _branch_fsm_two_routes(), surface_to_state=_state_of,
+        dead_edges=frozenset({("here", "reach")}),
+    )
+    assert decision.escalate is False
+    assert decision.action is not None and decision.action.label == "reach2"
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_threads_dead_edges() -> None:
+    # mpc_run forwards the mask into live_mpc_step: masking the first step's edge ⇒
+    # no on-rail move ⇒ escalate, and the executor never runs across a masked edge.
+    model = ScriptedProvider(
+        [ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS)]
+    )
+    executed: list[str] = []
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        executed.append(cand.label)
+        return _surface("good")
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, dead_edges=frozenset({("here", "reach")}),
+    )
+    assert outcome.escalated is True
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_mpc_step_dead_edge_does_not_mutate_fsm() -> None:
+    # The mask is read-only over the FSM — running live_mpc_step with a dead_edges
+    # mask leaves fsm.states / fsm.edges unchanged (nothing persisted into the
+    # learned model).
+    fsm = _branch_fsm()
+    states_before = fsm.states
+    edges_before = fsm.edges
+    model = ScriptedProvider(
+        [ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS)]
+    )
+    await live_mpc_step(
+        _surface("here"), model, fsm, surface_to_state=_state_of,
+        dead_edges=frozenset({("here", "reach")}),
+    )
+    assert fsm.states == states_before
+    assert fsm.edges == edges_before
+
+
 # --- PART B: the Shadow-sourced transition model --------------------------
 
 
