@@ -29,6 +29,8 @@ from .redaction import RedactionPolicy, redact_event, redact_text
 from .replay_gate import PromotionVerdict, verify_and_gate
 from .synthesizer import SynthesisResult, Synthesizer
 
+__zu_spec__ = "§2.8"  # author by demonstration (issue #30: greppable spec anchor)
+
 __all__ = [
     "PromotionVerdict",
     "RecordedSession",

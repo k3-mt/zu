@@ -1,5 +1,16 @@
 # zu-patterns — the policy-prior / move-ordering layer (§5)
 
+> **Import these** (cross-run memory + guided search already ship here — don't rebuild them):
+> | import | does |
+> |---|---|
+> | `from zu_patterns import recognize` | recognize a surface archetype (cookie wall, login, cart, …) + emit rail invariants |
+> | `from zu_patterns import fsm_from_events` | **cross-run "learned site map"** — induce an FSM from prior run/shadow events |
+> | `from zu_patterns import mpc_run` | the live **model-predictive-control** loop (`live_mpc_step`, `plan`, `classify_action`) |
+>
+> Also: `fsm_from_shadow` / `merge_transition_models` (fold a Shadow recording into the
+> map, merge maps across runs), `Plan` / `PlanStep`, the built-in recognizers
+> (`cookie_banner`, `login_form`, `search_box`, `cart_checkout`, …). Run `zu capabilities`.
+
 A UI is a state space; the **Action Surface** is the move generator (affordances
 = legal moves). This package is the **policy prior + guided search** layer over
 that surface — the *AlphaZero* shape, not Deep Blue. It does **not** brute-force a

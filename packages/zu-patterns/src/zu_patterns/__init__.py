@@ -30,6 +30,8 @@ from .search import (
     plan,
 )
 
+__zu_spec__ = "§5"  # pattern recognition + guided search (issue #30: greppable spec anchor)
+
 __all__ = [
     "Recognition",
     "recognize",

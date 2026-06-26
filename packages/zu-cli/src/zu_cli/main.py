@@ -1522,5 +1522,43 @@ def plugins() -> None:
         typer.echo(f"  ! failed to load {f.kind}:{f.name} — {f.error}", err=True)
 
 
+@app.command()
+def capabilities(as_json: bool = typer.Option(False, "--json", help="emit the manifest as JSON")) -> None:
+    """What Zu provides, reconciled against THIS environment (issue #30).
+
+    For every plugin kind: its interface major, the implementing package + symbol,
+    and whether it is installed here. Plus the headline import-only packages
+    (zu-shadow, zu-patterns, ...) that have no entry points and are easy to miss.
+    """
+    from zu_core import capabilities as core_capabilities
+    from zu_core import library_surface, provenance
+
+    prov = provenance()
+    caps = core_capabilities()
+    libs = library_surface()
+
+    if as_json:
+        import json
+
+        typer.echo(json.dumps({
+            "provenance": prov,
+            "kinds": [c._asdict() for c in caps],
+            "library": [s._asdict() for s in libs],
+        }, indent=2, default=str))
+        return
+
+    typer.echo(f"zu-core {prov['version']}  —  capability surface in this environment\n")
+    typer.echo("PLUGIN KINDS (kind → interface major · installed · implementations)")
+    for c in caps:
+        mark = "✓" if c.installed else "·"
+        impls = ", ".join(f"{n} [{dist}]" for n, _val, dist in c.implementations) or "— not installed here"
+        typer.echo(f"  {mark} {c.kind:20} v{c.interface_major}  {impls}")
+    typer.echo("\nLIBRARY PACKAGES (import these — not plugin-discovered)")
+    for s in libs:
+        mark = "✓" if s.installed else "·"
+        typer.echo(f"  {mark} {s.dist:13} {s.purpose}")
+        typer.echo(f"      import: {', '.join(s.imports)}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

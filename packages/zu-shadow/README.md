@@ -1,5 +1,18 @@
 # zu-shadow — author an agent by demonstration (§2.8)
 
+> **Import these** (so you never reimplement Shadow by hand):
+> | import | does |
+> |---|---|
+> | `from zu_shadow import Recorder` | fold a human session into `data.shadow.*` events, **redacted at capture** |
+> | `from zu_shadow import Synthesizer` | turn a recording into a production agent + rail (offline, `ScriptedProvider`) |
+> | `from zu_shadow.live_executor import run_live` | re-run the demonstrated path on the live site and **generalise** it |
+>
+> Also: `verify_and_gate` / `PromotionVerdict` (the promotion gate before a path is
+> trusted), `redact_event` / `redact_text` (the §9 content-free guarantee),
+> `SemanticTarget` (role+name anchors, never selectors). Run `zu capabilities` to see
+> what's installed. Depending on `zu-core` alone and rebuilding this loses redaction,
+> the promotion gate, and the tested live executor.
+
 A Shadow recording **is** the event bus run over a *human* session: the human is
 the policy for that one run, so recording costs almost nothing architecturally.
 You drive the task once, by hand; Shadow folds your clicks, types, navigations and
