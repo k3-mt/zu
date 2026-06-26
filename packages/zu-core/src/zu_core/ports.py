@@ -939,6 +939,13 @@ class RecognitionResult(BaseModel):
     # THESE, so a control is off-path because of its outcome, not its name. A
     # pattern that declares no outcome scores as UNKNOWN (never off-path).
     outcome: tuple[str, ...] = ()
+    # Whether the outcome is TERMINAL (a dead-end side-quest — newsletter, spin-to-
+    # win, survey: engaging it only wastes a step or springs an anti-bot wall) vs
+    # NAVIGATIONAL (a legitimate MEANS to the goal — search, login, pagination:
+    # off-path by outcome, but must not be avoided). #71: lets a consumer safely
+    # AVOID terminal side-quests during navigation while still USING navigational
+    # tools. Default False — most controls are a means, not a dead end.
+    terminal: bool = False
 
 
 @runtime_checkable

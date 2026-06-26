@@ -84,8 +84,16 @@ class ContactForm:
             matched_handles=tuple(handles),
             script=tuple(script),
             detail="contact/shipping form",
-            # Declared outcome: a submitted contact/shipping message (#69).
-            outcome=("contact", "message", "enquiry", "inquiry", "sent", "submitted"),
+            # Declared outcome (#69/#71): this same pattern fires on a contact-us
+            # form AND a checkout SHIPPING form (postcode/city/address/last-name),
+            # so the outcome spans BOTH — contact/message vocabulary AND
+            # shipping/checkout/order/delivery — making a checkout's own shipping
+            # form ON-PATH for a buy goal (its required fields are real blockers,
+            # not noise), while still on-path for a contact goal.
+            outcome=(
+                "contact", "message", "enquiry", "inquiry", "sent", "submitted",
+                "address", "shipping", "delivery", "checkout", "order", "details",
+            ),
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:

@@ -1,6 +1,6 @@
 [project]
 name = "zu-checks"
-version = "0.6.0"
+version = "0.7.0"
 description = "Zu built-in checks: detectors (empty, error, js-shell, embedded-widget, bot-wall, captcha, human-gate) + validators (schema, grounding)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ classifiers = [
 # The built-in checks are pure-stdlib (+ jsonschema for the schema validator) and
 # always ship with the base runtime — they have no heavy/optional deps, which is
 # why detectors and validators live together here rather than as two packages.
-dependencies = ["zu-core==0.6.0", "jsonschema>=4"]
+dependencies = ["zu-core==0.7.0", "jsonschema>=4"]
 
 [project.entry-points."zu.detectors"]
 empty = "zu_checks.detectors.empty:EmptyDetector"

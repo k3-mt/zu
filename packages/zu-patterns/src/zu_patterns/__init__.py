@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .contact_form import ContactForm
 from .newsletter_signup import NewsletterSignup
-from .progress import GoalContext, goal_progress, is_relevant_blocker
+from .progress import GoalContext, goal_progress, is_relevant_blocker, is_side_quest
 from .recognizer import Recognition, recognize
 from .reversibility import (
     DEFAULT_PRIORS,
@@ -46,6 +46,7 @@ __all__ = [
     "GoalContext",
     "goal_progress",
     "is_relevant_blocker",
+    "is_side_quest",
     "ActionPrior",
     "DEFAULT_PRIORS",
     "classify_action",
