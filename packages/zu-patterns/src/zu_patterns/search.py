@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from zu_core import events as ev
+from zu_core.content_view import ContentView
+from zu_core.escalation import ProblemContext, Repair
 from zu_core.ports import ModelProvider, ModelRequest, RecognitionResult
 from zu_core.reachability import Fsm, FsmEdge, co_reachable, trap_states
 from zu_core.surface import SurfaceAffordance, SurfaceView
@@ -603,6 +605,19 @@ def _proposal_request(
 # next-surfaces; a real run drives the browser. It is async and may be awaited.
 ActionExecutor = Callable[[Candidate, SurfaceView], Awaitable[SurfaceView]]
 
+# An optional REPAIR HOOK — the plain-callable, zu-shadow-free shape of the
+# escalate→diagnose→repair seam (§5 mpc parity). It speaks ONLY zu-core currency
+# (``ProblemContext`` in, ``Repair`` out), so ``zu-patterns`` never imports
+# ``zu-shadow`` (a cycle — §9.9). ``mpc_run`` calls it BEFORE the blind structural
+# sibling-replan on the two stuck signals (a TRAP — ``decision.action is None`` —
+# and a post-executor ``no_op``). A ``Repair`` whose ``kind`` is ``'human'`` /
+# ``'abort'`` STOPS the loop (escalate, no rollback); any other answer falls
+# through to the structural rollback. The hook is content-free here: ``mpc_run`` is
+# a pure FSM planner with no parsed page, so it hands the hook an empty diagnostic
+# ``ContentView`` — a real run supplies the slice. NEVER auto-applies a fill across
+# a commit boundary: a COMMITTING decision escalates WITHOUT ever reaching the hook.
+RepairHook = Callable[[ProblemContext], Awaitable[Repair]]
+
 
 @dataclass(frozen=True)
 class MpcOutcome:
@@ -621,6 +636,29 @@ class MpcOutcome:
     rollbacks: int = 0
 
 
+async def _consult_repair(
+    repair: RepairHook | None,
+    *,
+    index: int,
+    surface: SurfaceView,
+    reason: str,
+) -> Repair | None:
+    """Ask the optional repair hook about a stuck step (§5 mpc parity).
+
+    Returns the ``Repair`` the hook proposed, or ``None`` when no hook is wired.
+    The context speaks ONLY zu-core currency — the content-free action ``surface``,
+    the step ``index`` (the resume cursor), the stuck ``reason``, and an EMPTY
+    diagnostic ``ContentView`` (``mpc_run`` is a pure FSM planner with no parsed
+    page; a real run supplies the slice). A content read never feeds the FSM key, so
+    this leaves ``surface_state_id`` content-free."""
+    if repair is None:
+        return None
+    ctx = ProblemContext(
+        index=index, surface=surface, view=ContentView(url=surface.url), reason=reason
+    )
+    return await repair(ctx)
+
+
 async def mpc_run(
     surface: SurfaceView,
     model: ModelProvider,
@@ -637,6 +675,7 @@ async def mpc_run(
     dead_edges: frozenset[DeadEdge] = frozenset(),
     replan_budget: int = 0,
     on_rollback: Callable[[str, Candidate], Awaitable[None]] | None = None,
+    repair: RepairHook | None = None,
 ) -> MpcOutcome:
     """The driver loop: ``live_mpc_step`` → execute ONE step via the injected
     ``executor`` → re-plan from the REAL resulting state → repeat.
@@ -667,7 +706,28 @@ async def mpc_run(
     ``dead_edges`` is forwarded into every ``live_mpc_step`` call (the per-run mask
     of ``(state_id, edge_label)`` pairs proven dead this run — routed around, NEVER
     persisted into ``fsm``). ``on_rollback`` is an optional async hook fired when a
-    trap triggers a rollback (for audit / checkpoint-event emission)."""
+    trap triggers a rollback (for audit / checkpoint-event emission).
+
+    ESCALATE→DIAGNOSE→REPAIR (§5 mpc parity, the zu-shadow-free mirror). ``repair``
+    is an OPTIONAL plain async callback of the ``(ProblemContext) -> Repair`` shape
+    (zu-core currency only — NO zu-shadow import, §9.9). It is consulted on the TWO
+    stuck signals BEFORE the blind structural sibling-replan:
+      * a TRAP — ``live_mpc_step`` escalated with NO on-rail candidate
+        (``decision.action is None``), reason ``'unresolved'``; and
+      * a ``no_op`` — a chosen reversible step that EXECUTED but changed nothing
+        (``to_state(prev) == to_state(new)`` after the injected executor), reason
+        ``'no_op'``.
+    On either, the loop asks ``repair`` what to do. A ``Repair`` whose ``kind`` is
+    ``'human'`` / ``'abort'`` STOPS the loop (escalate, no rollback); any other
+    answer (e.g. ``'fill'``) falls through to the existing structural rollback. The
+    repair consultation is BOUNDED by ``replan_budget`` (it shares the same budget
+    as the structural replan, so a model that keeps stalling cannot loop) and uses
+    ``on_rollback`` as the audit hook. CONSUME-ONCE is preserved exactly as before:
+    a COMMITTING decision escalates WITHOUT a rollback and WITHOUT consulting the
+    hook, so a repair NEVER crosses a commit boundary — only reversible siblings are
+    ever re-tried. ``surface_state_id`` stays content-free: the hook reads the
+    action view + reason, never the surface state id (a content read never feeds the
+    FSM key). Default ``repair=None`` ⇒ legacy behavior unchanged."""
     to_state = surface_to_state or _surface_state
     taken: list[Candidate] = []
     cur = surface
@@ -691,14 +751,28 @@ async def mpc_run(
             dead_edges=dead_edges, exclude=frozenset(tried.get(here, set())),
         )
         if decision.escalate or decision.action is None:
-            # A TRAP (no on-rail candidate, ``action is None``) MAY roll back to the
-            # last checkpoint surface and replan a DIFFERENT sibling — but a COMMIT-
-            # BOUNDARY escalation (a candidate WAS chosen but is COMMITTING) NEVER
-            # does: stopping at the commit boundary is the whole point, and a re-try
-            # could re-cross a committed side effect. Only a genuine trap rolls back,
-            # so only REVERSIBLE siblings are ever re-tried — consume-once preserved.
+            # A TRAP (no on-rail candidate, ``action is None``) MAY escalate→repair
+            # then roll back to the last checkpoint surface and replan a DIFFERENT
+            # sibling — but a COMMIT-BOUNDARY escalation (a candidate WAS chosen but
+            # is COMMITTING) NEVER does: stopping at the commit boundary is the whole
+            # point, and a re-try could re-cross a committed side effect. Only a
+            # genuine trap repairs/rolls back, so only REVERSIBLE siblings are ever
+            # re-tried — consume-once preserved.
             if decision.action is None and replan_budget > 0:
-                # structural rollback: exclude the off-rail labels the model just
+                # (1) escalate→diagnose→repair, BEFORE the blind structural replan
+                # (§5 mpc parity). The hook reads the content-free action view +
+                # reason ('unresolved'); a 'human'/'abort' answer STOPS the loop
+                # (escalate, no rollback) — a repair never crosses a commit boundary.
+                rep = await _consult_repair(
+                    repair, index=len(taken), surface=cur, reason="unresolved"
+                )
+                if rep is not None and rep.kind in ("human", "abort"):
+                    return MpcOutcome(
+                        reached_goal=False, escalated=True, steps=tuple(taken),
+                        rationale=f"repair → {rep.kind}: {rep.reason}".rstrip(": "),
+                        surface=cur, rollbacks=rollbacks,
+                    )
+                # (2) structural rollback: exclude the off-rail labels the model just
                 # proposed at ``checkpoint`` (so the replan picks a sibling), revert
                 # ``cur`` to the checkpoint surface, and give the model another turn.
                 cp_state = to_state(checkpoint)
@@ -718,9 +792,34 @@ async def mpc_run(
         # re-plan from the REAL resulting surface. This surface is now the last
         # known-good checkpoint, and the chosen label is tried here.
         tried.setdefault(here, set()).add(decision.action.label)
+        prev = cur
         checkpoint = cur
         taken.append(decision.action)
         cur = await executor(decision.action, cur)
+        # POST-EXECUTOR NO-OP CHECK (§5 mpc parity): the reversible step fired but
+        # changed nothing — ``to_state`` is content-free (url+title+handle digest),
+        # so an error-text variant alone does NOT register as a no_op (the FSM key
+        # is stable across error text). Route the no_op through the SAME repair hook
+        # BEFORE the structural sibling-replan, bounded by ``replan_budget``.
+        if to_state(prev) == to_state(cur) and replan_budget > 0:
+            rep = await _consult_repair(
+                repair, index=len(taken) - 1, surface=cur, reason="no_op"
+            )
+            if rep is not None and rep.kind in ("human", "abort"):
+                return MpcOutcome(
+                    reached_goal=False, escalated=True, steps=tuple(taken),
+                    rationale=f"repair → {rep.kind}: {rep.reason}".rstrip(": "),
+                    surface=cur, rollbacks=rollbacks,
+                )
+            # structural rollback: the no-op label is already in ``tried[here]``
+            # (recorded above), so the replan from ``checkpoint`` picks a DIFFERENT
+            # on-rail sibling. Revert ``cur`` to the checkpoint and consume budget.
+            if on_rollback is not None:
+                await on_rollback("no_op", decision.action)
+            cur = checkpoint
+            replan_budget -= 1
+            rollbacks += 1
+            continue
     return MpcOutcome(
         reached_goal=to_state(cur) in fsm.accepting, escalated=False,
         steps=tuple(taken), rationale="max_steps reached", surface=cur,

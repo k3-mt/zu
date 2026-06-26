@@ -18,11 +18,13 @@ from types import SimpleNamespace
 import pytest
 
 from zu_core import events as ev
+from zu_core.escalation import ProblemContext, Repair
 from zu_core.ports import Finish, ModelResponse, ToolCall
 from zu_core.reachability import Fsm, FsmEdge
 from zu_core.surface import SurfaceAffordance, SurfaceView
 from zu_patterns.search import (
     Candidate,
+    _surface_state,
     fsm_from_shadow,
     fsm_from_shadow_events,
     live_mpc_step,
@@ -454,6 +456,162 @@ async def test_mpc_step_dead_edge_does_not_mutate_fsm() -> None:
     )
     assert fsm.states == states_before
     assert fsm.edges == edges_before
+
+
+# --- #41: escalate→diagnose→repair parity (the zu-shadow-free hook) --------
+#
+# mpc_run consults a PLAIN async repair hook ((ProblemContext) -> Repair) on the two
+# stuck signals BEFORE the blind structural sibling-replan: a TRAP (action is None)
+# and a post-executor no_op (to_state(prev) == to_state(new)). NO zu-shadow import —
+# the hook speaks only zu-core currency. A 'human'/'abort' Repair stops the loop; any
+# other answer falls through to the structural rollback (which stays intact).
+
+
+def _noop_surface() -> SurfaceView:
+    # a surface whose act() is a no-op: a reversible 'reach' affordance whose edge
+    # the FSM knows, but the executor returns the SAME state back.
+    return SurfaceView(
+        title="here", url="https://x/here",
+        affordances=(SurfaceAffordance(handle="a1", role="link", label="reach"),),
+    )
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_routes_no_op_through_repair_hook() -> None:
+    # The model picks the on-rail 'reach'; the FAKE executor returns the SAME surface
+    # (a no-op — to_state unchanged). With a repair hook wired and replan_budget>=1
+    # the loop must CONSULT the hook (reason 'no_op') before the structural replan.
+    model = ScriptedProvider(
+        [
+            ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS),
+        ]
+    )
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return _noop_surface()  # changes nothing — a no-op step
+
+    seen: list[ProblemContext] = []
+
+    async def repair(ctx: ProblemContext) -> Repair:
+        seen.append(ctx)
+        return Repair(kind="human", reason="stuck — needs a person")
+
+    outcome = await mpc_run(
+        _noop_surface(), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=2, repair=repair,
+    )
+    # the hook was consulted with the no_op reason and the content-free action view;
+    # a 'human' Repair STOPPED the loop (escalate, no rollback for this stop).
+    assert seen and seen[0].reason == "no_op"
+    assert seen[0].surface.url == "https://x/here"
+    assert outcome.escalated is True
+    assert "human" in outcome.rationale
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_routes_trap_through_repair_hook() -> None:
+    # The model proposes ONLY the trap 'wander'; with a repair hook + budget the loop
+    # consults it (reason 'unresolved') BEFORE the structural replan. A 'human' Repair
+    # stops the loop without a rollback.
+    model = ScriptedProvider(
+        [ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS)]
+    )
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return _surface("goal")
+
+    reasons: list[str] = []
+
+    async def repair(ctx: ProblemContext) -> Repair:
+        reasons.append(ctx.reason)
+        return Repair(kind="abort", reason="give up")
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=1, repair=repair,
+    )
+    assert reasons == ["unresolved"]
+    assert outcome.escalated is True
+    assert outcome.rollbacks == 0  # the repair stop does NOT roll back
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_repair_fill_falls_through_to_structural_rollback() -> None:
+    # A repair hook that does NOT answer 'human'/'abort' (here 'fill') must NOT block
+    # the existing structural rollback: the loop still rolls back, excludes the trap,
+    # and (second model turn) drives the DIFFERENT on-rail sibling to goal. Structural
+    # rollback/exclude stays intact alongside the hook.
+    model = ScriptedProvider(
+        [
+            ModelResponse(tool_calls=[_tc("wander", "a2")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("done", "a1")], finish=Finish.TOOL_CALLS),
+        ]
+    )
+    good = SurfaceView(
+        title="good", url="https://x/good",
+        affordances=(SurfaceAffordance(handle="a1", role="link", label="done"),),
+    )
+    nexts = {"reach": good, "done": _surface("goal")}
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return nexts[cand.label]
+
+    async def repair(ctx: ProblemContext) -> Repair:
+        return Repair(kind="fill", reason="try a sibling")  # not human/abort
+
+    outcome = await mpc_run(
+        _surface("here"), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, replan_budget=1, repair=repair,
+    )
+    assert outcome.reached_goal is True
+    assert outcome.rollbacks == 1
+    assert [c.label for c in outcome.steps] == ["reach", "done"]
+
+
+@pytest.mark.asyncio
+async def test_mpc_run_no_repair_hook_is_legacy_behavior() -> None:
+    # repair=None (the default) ⇒ a no-op executor with no budget simply ends the loop
+    # by max_steps without any repair consultation (legacy behavior unchanged).
+    model = ScriptedProvider(
+        [ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS)] * 3
+    )
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return _noop_surface()
+
+    outcome = await mpc_run(
+        _noop_surface(), model, _branch_fsm(), executor,
+        surface_to_state=_state_of, max_steps=3,
+    )
+    # no hook, no budget ⇒ the no-op simply re-loops until max_steps (no crash, no
+    # escalate path taken on no_op).
+    assert outcome.rollbacks == 0
+
+
+def test_surface_state_id_stable_across_error_text_variants() -> None:
+    # surface_state_id is CONTENT-FREE: two surfaces with identical url/title/handles
+    # collapse to the SAME FSM state id regardless of any page error text (which is
+    # NOT part of SurfaceView at all). A content read never feeds the state id, so the
+    # learned FSM never fragments per error-text variant.
+    base = SurfaceView(
+        title="checkout", url="https://x/checkout",
+        affordances=(
+            SurfaceAffordance(handle="a1", role="textbox", label="Last name"),
+            SurfaceAffordance(handle="a2", role="button", label="Continue"),
+        ),
+    )
+    # a structurally-identical surface (same url/title/handles) — the error text a
+    # page might show lives in content_view, never here.
+    same = SurfaceView(
+        title="checkout", url="https://x/checkout",
+        affordances=(
+            SurfaceAffordance(handle="a1", role="textbox", label="Last name"),
+            SurfaceAffordance(handle="a2", role="button", label="Continue"),
+        ),
+    )
+    assert _surface_state(base) == _surface_state(same)
 
 
 # --- PART B: the Shadow-sourced transition model --------------------------
