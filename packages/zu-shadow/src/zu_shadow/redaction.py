@@ -103,6 +103,21 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
+def looks_like_pan(value: str) -> bool:
+    """Whether ``value`` IS (not merely contains) a Luhn-valid payment card number —
+    13–19 digits, optionally grouped by spaces/dashes, nothing else. Used by the
+    repairer's value-side commit-boundary guard to reject a raw card number echoed
+    into a NON-payment-labelled field (the label guard would miss it). Reuses the
+    same ``_PAN_CANDIDATE`` shape + Luhn check the capture-time redactor uses, so the
+    two guards agree on what a card number is (Issue #41 MED #7)."""
+    s = value.strip()
+    m = _PAN_CANDIDATE.fullmatch(s)
+    if m is None:
+        return False
+    digits = "".join(c for c in s if c.isdigit())
+    return 13 <= len(digits) <= 19 and _luhn_ok(digits)
+
+
 def _redact_pans(text: str) -> str:
     """Redact Luhn-valid payment card numbers anywhere in a string (a card pasted into a
     'why' note, a url, a free-text field). The card FIELD itself is also blanked wholesale

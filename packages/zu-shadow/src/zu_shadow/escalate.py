@@ -36,7 +36,7 @@ from zu_core.escalation import ProblemContext, Repair
 from zu_core.ports import ModelProvider, ModelRequest
 
 from .executor import _PAYMENT_FIELD
-from .redaction import REDACTED
+from .redaction import REDACTED, looks_like_pan
 
 
 @runtime_checkable
@@ -52,12 +52,14 @@ class Repairer(Protocol):
 
 def _is_committing_target(field: FieldState) -> bool:
     """Whether filling this diagnostic field would cross the commit boundary — a
-    payment-card field (by label) or a value the agent does not hold (a redacted
-    secret). Either forces a human; neither is ever auto-filled. ``ProblemContext``
-    deliberately carries no ``Step`` (``zu_core`` cannot import it), so the
-    executor enforces ``step.committing`` independently — this is the content-side
-    half of the same guard (Issue #41 §5, §6 risk 6)."""
-    return bool(_PAYMENT_FIELD.search(field.label)) or field.value == REDACTED
+    payment-card field, by label. This is the content-side half of the guard;
+    ``ProblemContext`` deliberately carries no ``Step`` (``zu_core`` cannot import
+    it), so the executor enforces ``step.committing`` independently. The ``REDACTED``
+    (agent-doesn't-hold-the-secret) protection lives there too — this function is
+    only ever reached with a target the caller already filtered to ``not f.value``
+    (required + empty), so a ``field.value == REDACTED`` comparison here is dead
+    (``REDACTED`` is truthy → never an empty-value target) (Issue #41 §5, LOW #6)."""
+    return bool(_PAYMENT_FIELD.search(field.label))
 
 
 class DefaultRepairer:
@@ -126,8 +128,11 @@ class DefaultRepairer:
         if not value:
             return Repair("human", reason="model proposed no fill value")
         # Defence in depth: a model that echoes a card-shaped value back is still
-        # routed to a human, never typed.
-        if _PAYMENT_FIELD.search(value) or value == REDACTED:
+        # routed to a human, never typed. The label guard (``_is_committing_target``)
+        # only catches a payment-LABELLED field; this also rejects a Luhn-valid card
+        # NUMBER echoed into a plainly-labelled field — the value itself crosses the
+        # commit boundary regardless of where it would land (Issue #41 MED #7).
+        if _PAYMENT_FIELD.search(value) or value == REDACTED or looks_like_pan(value):
             return Repair("human", reason="proposed value crosses the commit boundary")
         # ``reason`` is human-/audit-route prose (it flows into ``StepOutcome.detail``
         # and the ``STEP_REPAIRED`` event), so it too refers to the field by a

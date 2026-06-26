@@ -200,14 +200,20 @@ def _surface_digest(surface: SurfaceView) -> str:
     """A LOCAL "changed nothing" comparator: url + title + the sorted affordance set.
 
     The same shape the learned FSM keys on (``zu_patterns._surface_state``: url +
-    title + handles), but with each affordance's role+label folded in too — so a
-    page transition that REUSES a handle (``a1``) for a genuinely different control
-    is still seen as a change. Replicated here in stdlib ``hashlib`` rather than
-    imported — ``zu-shadow`` must NOT take a ``zu-patterns`` dependency (Issue #41 §5,
-    group constraint). The comparator is built from the ACTION view only; page
-    CONTENT never enters this digest, so it stays consistent with the content-free
-    FSM and never fragments per error-text variant."""
-    affs = sorted(f"{a.handle}\t{a.role}\t{a.label}" for a in surface.affordances)
+    title + handles), but with each affordance's role+label — AND its ``value`` and
+    ``states`` — folded in too. The role+label fold means a page transition that
+    REUSES a handle (``a1``) for a genuinely different control is still seen as a
+    change; folding ``value``+``states`` means a click that flips ONLY a field's
+    value or a control's state (a checkbox toggling, a field gaining text) is also
+    seen as a change rather than misread as a no-op. Replicated here in stdlib
+    ``hashlib`` rather than imported — ``zu-shadow`` must NOT take a ``zu-patterns``
+    dependency (Issue #41 §5, group constraint). The comparator is built from the
+    ACTION view only; page CONTENT never enters this digest, so it stays consistent
+    with the content-free FSM and never fragments per error-text variant."""
+    affs = sorted(
+        f"{a.handle}\t{a.role}\t{a.label}\t{a.value or ''}\t{','.join(a.states)}"
+        for a in surface.affordances
+    )
     canon = "\n".join([surface.url, surface.title, *affs])
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
@@ -223,9 +229,12 @@ def _field_value(surface: SurfaceView, handle: str) -> str | None:
 
 def _is_no_op(before: SurfaceView, after: SurfaceView, step: Step, handle: str) -> bool:
     """Did the act fire but change NOTHING? True when the local surface digest is
-    unchanged AND — for a ``type`` step — the target field is still empty. Checked
-    ONLY after the existing interstitial-dismiss / re-perceive retries have run, so a
-    slow-loading page is not a false no-op (Issue #41 §5, §9 risk 7)."""
+    unchanged AND — for a ``type`` step — the target field is still empty. The digest
+    now folds each affordance's ``value`` + ``states`` (above), so for a NON-type step
+    a click that flipped only a field's value or a control's state changes the digest
+    and is correctly treated as progress, not a no-op. Checked ONLY after the existing
+    interstitial-dismiss / re-perceive retries have run, so a slow-loading page is not
+    a false no-op (Issue #41 §5, §9 risk 7)."""
     if _surface_digest(before) != _surface_digest(after):
         return False
     if step.kind == "type":
@@ -380,6 +389,11 @@ async def execute(
                 surface = session.perceive()
                 if not _is_no_op(before, surface, step, handle):
                     report.outcomes.append(StepOutcome(step, via, handle=handle, value=value))
+                    # A repaired + de-escalated step is a SUCCESSFUL step: checkpoint it so
+                    # ``escalated_at`` ↔ last-known-good stays a 1:1 map (a repaired step is a
+                    # resume cursor too, not a gap) (Issue #41 §6, HIGH #10).
+                    if on_checkpoint is not None:
+                        await on_checkpoint(i)
                     return None  # back on the cheap path — caller continues to the next step
         # Budget exhausted — bounded, no infinite loop.
         report.outcomes.append(StepOutcome(step, "escalated", ok=False,

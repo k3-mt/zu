@@ -5,10 +5,13 @@ SUCCESSFUL step ``on_checkpoint(i)`` fires, so ``escalated_at`` maps 1:1 to a
 last-known-good cursor.
 
 * Strategy 1 — REPLAY: re-walk the SAME recorded path up to the stuck point by
-  re-running ``execute(steps[:escalated_at])`` on a fresh session. It lands at the
-  same step, and because the diagnostic read journals ``CONTENT_CAPTURED``
-  (provenance + hash, never body), the resumed run asserts it re-perceived the
-  SAME content by hash match (shadow-replay correctness) — at $0, no parser.
+  re-running ``execute(steps[:escalated_at])`` on a fresh session. The prefix is
+  re-walked on the CONTENT-FREE path (no repairer → no content read); mid-prefix
+  repairs are NOT auto-re-applied. The repair is re-attempted ONLY at the stuck
+  cursor, where the run RE-PERCEIVES ``content_view`` and journals its own
+  ``CONTENT_CAPTURED`` (provenance + hash, never body). Shadow-replay correctness is
+  then the hash match between the RESUMED run's re-perceived content and the
+  ORIGINAL run's — at $0, no parser.
 
 * Strategy 2 — NAVIGATE/REPLAN: pick a DIFFERENT path. A prior event log with a
   ``CHECKPOINT_MARKED`` → ``last_known_good`` returns it, and
@@ -27,6 +30,7 @@ from uuid import uuid4
 from zu_core import events as ev
 from zu_core.bus import EventBus
 from zu_core.content_view import (
+    WANT_DIAGNOSTIC,
     ContentView,
     FieldState,
     Provenance,
@@ -61,6 +65,14 @@ def _diag(label: str) -> ContentView:
         field_states=(FieldState(label=label, value=None, required=True, invalid=True,
                                  error_text="Required", provenance=prov),),
     )
+
+
+def _perceived_diag() -> ContentView:
+    """A FRESH diagnostic view, rebuilt from scratch each call — what a session
+    'perceives' at the stuck point. Two independent runs each build their own; the
+    cross-run view-hash compare is therefore a genuine re-perceive match (the hash is
+    a pure function of content), not an identity check on one shared object."""
+    return _diag("Last name")
 
 
 class StuckSession:
@@ -106,9 +118,11 @@ def _ev(type_: str, payload: dict, *, event_id=None) -> Event:
 
 
 async def test_resume_by_replay_lands_at_the_same_step_with_matching_hash() -> None:
-    # Three "Go" clicks; the third is unreachable → escalate at index 2.
+    # Three "Go" clicks; the third is unreachable → escalate at index 2. Each session
+    # builds its diagnostic from its OWN label (``_perceived_diag``), so the hash
+    # compare below is a genuine RE-PERCEIVE compare (two independent runs each emit
+    # their own CONTENT_CAPTURED), not a tautology against one shared object.
     steps = [Step(kind="click", role="button", name="Go") for _ in range(3)]
-    diag = _diag("Last name")
 
     bus1 = EventBus()
     checkpoints: list[int] = []
@@ -116,7 +130,7 @@ async def test_resume_by_replay_lands_at_the_same_step_with_matching_hash() -> N
     async def _cp(i: int) -> None:
         checkpoints.append(i)
 
-    session1 = StuckSession(n_ok=2, diagnostic=diag)
+    session1 = StuckSession(n_ok=2, diagnostic=_perceived_diag())
     report1 = await execute(steps, session1, ScriptedProvider.from_moves([]),
                             repairer=_HumanRepairer(), bus=bus1, on_checkpoint=_cp,
                             trace_id=_TRACE, task_id=_TASK)
@@ -126,9 +140,12 @@ async def test_resume_by_replay_lands_at_the_same_step_with_matching_hash() -> N
     cap1 = next(e for e in await bus1.query() if e.type == ev.CONTENT_CAPTURED)
     await bus1.aclose()
 
-    # REPLAY: re-run the recorded prefix up to the stuck point on a FRESH session.
+    # REPLAY (Strategy 1): re-walk the recorded prefix on the CONTENT-FREE path
+    # (steps[:escalated_at], no repairer → no content read), landing exactly where we
+    # got stuck. Mid-prefix repairs are NOT auto-re-applied; the repair is re-attempted
+    # ONLY at the stuck cursor — which is what the continuation below does.
     bus2 = EventBus()
-    session2 = StuckSession(n_ok=2, diagnostic=diag)
+    session2 = StuckSession(n_ok=2, diagnostic=_perceived_diag())
     report2 = await execute(steps[: report1.escalated_at], session2,
                             ScriptedProvider.from_moves([]), bus=bus2,
                             trace_id=_TRACE, task_id=_TASK)
@@ -139,10 +156,23 @@ async def test_resume_by_replay_lands_at_the_same_step_with_matching_hash() -> N
     assert session2.content_reads == []
     await bus2.aclose()
 
-    # Shadow-replay correctness: re-perceiving the SAME diagnostic yields the SAME
-    # view hash (the journalled signal), so a resumed run can assert it re-perceived
-    # the same content — at $0, no parser.
-    assert cap1.payload["view_hash"] == diag.hash()
+    # Now re-attempt the stuck step on a FRESH resumed session WITH a repairer: it
+    # genuinely RE-PERCEIVES content_view at the stuck cursor and emits its OWN
+    # CONTENT_CAPTURED. Shadow-replay correctness is the compare of the RESUMED run's
+    # journalled view hash against the ORIGINAL run's — both produced by the executor
+    # from each session's independent content_view(), so a real re-perceive match, not
+    # a producer tautology (#11/#16).
+    bus3 = EventBus()
+    session3 = StuckSession(n_ok=2, diagnostic=_perceived_diag())
+    report3 = await execute(steps, session3, ScriptedProvider.from_moves([]),
+                            repairer=_HumanRepairer(), bus=bus3,
+                            trace_id=_TRACE, task_id=_TASK)
+    assert report3.escalated_at == 2
+    assert session3.content_reads == [frozenset(WANT_DIAGNOSTIC)]  # it re-perceived
+    cap3 = next(e for e in await bus3.query() if e.type == ev.CONTENT_CAPTURED)
+    await bus3.aclose()
+    # The resumed run re-perceived the SAME content as the original at the stuck point.
+    assert cap3.payload["view_hash"] == cap1.payload["view_hash"]
 
 
 # ---------- Strategy 2: navigate / rollback-and-replan -----------------------

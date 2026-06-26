@@ -182,6 +182,56 @@ async def test_committing_step_is_never_auto_filled() -> None:
     assert ("f1", "type", "x") not in session.acts
 
 
+async def test_committing_step_in_the_repair_loop_escalates_at_line_353() -> None:
+    # MED #5: isolate the IN-LOOP committing guard (executor.py ~353) from the EARLIER
+    # commit-boundary escape (~396). Bypass the early escape by passing on_commit other
+    # than 'escalate', then drive a COMMITTING step INTO the repair loop via a no_op:
+    # the act fires but the field stays empty → no_op → _capture_diagnostic. Inside the
+    # loop the repairer proposes a 'fill', but ``step.committing`` (line 353) stops it —
+    # it escalates to a human and NEVER auto-fills. Negative control: drop ``step.committing``
+    # from the line-353 condition and the fill would be applied → the act assertion fails.
+    steps = [Step(kind="type", role="textbox", name="Notes", value="", committing=True)]
+    diag = _diag("Notes", error="Required")
+    # fill_value never matches what the repairer proposes, so the field stays empty (no_op).
+    session = FakeSession(stuck_field="Notes", fill_value="WONT-MATCH", diagnostic=diag)
+    repairer = ScriptedRepairer(Repair("fill", handle="f1", value="anything", reason="r"))
+    bus = EventBus()
+    report = await execute(steps, session, ScriptedProvider.from_moves([]),
+                           repairer=repairer, escalation_budget=1, on_commit="continue",
+                           bus=bus)
+
+    # The early escape (~396) did NOT fire (on_commit != 'escalate'): the run actually
+    # entered the loop, proven by the journalled escalation event + the no_op outcome.
+    events = await _drain(bus)
+    assert any(e.type == "harness.step.escalated" for e in events)
+    assert "no_op" in [o.via for o in report.outcomes]
+    # The IN-LOOP committing guard stopped it: escalated to human, fill NEVER applied.
+    assert not report.completed and report.escalated_at == 0
+    assert report.outcomes[-1].via == "escalated"
+    assert ("f1", "type", "anything") not in session.acts
+    await bus.aclose()
+
+
+async def test_default_repairer_rejects_a_luhn_valid_pan_value() -> None:
+    # MED #7: the value-side guard must reject a Luhn-valid card NUMBER echoed into a
+    # plainly-labelled (non-payment) field. The label guard misses it (label is 'Last
+    # name'); the strengthened value guard (looks_like_pan) catches it and forces a
+    # human. Negative control: remove ``looks_like_pan(value)`` from the guard and the
+    # repairer returns Repair('fill', value=<the PAN>) → this assertion fails.
+    prov = Provenance(url="u", region="form#checkout")
+    view = ContentView(field_states=(FieldState(
+        label="Last name", value=None, required=True, invalid=True,
+        error_text="Required", provenance=prov),))
+    surface = SurfaceView(affordances=(
+        SurfaceAffordance(handle="f1", role="textbox", label="Last name"),))
+    ctx = ProblemContext(index=0, surface=surface, view=view, reason="no_op")
+    # The model echoes a Luhn-VALID PAN (4242 4242 4242 4242) into a non-payment field.
+    model = ScriptedProvider.from_moves([{"text": "4242 4242 4242 4242", "finish": "stop"}])
+    repair = await DefaultRepairer().diagnose_and_repair(ctx, model, budget=1)
+    assert repair.kind == "human"
+    assert repair.value is None  # the PAN was never carried into a fill
+
+
 async def test_default_repairer_routes_payment_field_to_human() -> None:
     # The DefaultRepairer's content-side guard: a payment-card field forces a human
     # BEFORE the model is even consulted (the model must never see it).
@@ -270,3 +320,57 @@ async def test_page_controlled_label_never_reaches_the_trusted_instruction() -> 
     frame = TrustedFrame.from_view(view, WANT_DIAGNOSTIC, instruction="repair the form")
     obs = frame.as_observation()
     assert injection not in obs.content[0].text  # type: ignore[union-attr]
+
+
+def test_click_that_flips_only_states_or_value_is_not_a_no_op() -> None:
+    # MED #8: a click that changes ONLY a control's ``states`` (a checkbox toggling) or
+    # ONLY a field's ``value`` must NOT be misread as a no_op. The same handle/role/label
+    # is reused, so the OLD digest (url+title+handle+role+label) was identical before and
+    # after → false positive. Folding value+states into _surface_digest makes the digests
+    # differ → not a no_op. Negative control: drop value+states from _surface_digest and
+    # both digests collapse to equal → _is_no_op returns True → these assertions fail.
+    from zu_shadow.executor import _is_no_op
+
+    before_states = SurfaceView(url="u", title="t", affordances=(
+        SurfaceAffordance(handle="c1", role="checkbox", label="Agree", states=()),))
+    after_states = SurfaceView(url="u", title="t", affordances=(
+        SurfaceAffordance(handle="c1", role="checkbox", label="Agree", states=("checked",)),))
+    click = Step(kind="click", role="checkbox", name="Agree")
+    assert not _is_no_op(before_states, after_states, click, "c1")  # states flip = progress
+
+    before_value = SurfaceView(url="u", title="t", affordances=(
+        SurfaceAffordance(handle="f1", role="textbox", label="Qty", value="1"),))
+    after_value = SurfaceView(url="u", title="t", affordances=(
+        SurfaceAffordance(handle="f1", role="textbox", label="Qty", value="2"),))
+    # A non-type step (a click that incremented a value) — the value change is progress.
+    assert not _is_no_op(before_value, after_value, click, "f1")
+
+    # Sanity (the true-no_op case still holds): identical surface → genuinely a no_op.
+    same = SurfaceView(url="u", title="t", affordances=(
+        SurfaceAffordance(handle="c1", role="checkbox", label="Agree", states=()),))
+    assert _is_no_op(before_states, same, click, "c1")
+
+
+async def test_repaired_step_checkpoints_its_index() -> None:
+    # HIGH #10: a step that is repaired + de-escalated is a SUCCESSFUL step and MUST call
+    # on_checkpoint(i), or escalated_at ↔ last-known-good stops being a 1:1 map (the
+    # repaired step would be a gap a resume could not anchor on). Negative control: remove
+    # the on_checkpoint call at the successful-repair de-escalate exit and index 0 is never
+    # checkpointed → this assertion fails.
+    steps = [Step(kind="type", role="textbox", name="Last name", value="")]
+    diag = _diag("Last name")
+    session = FakeSession(stuck_field="Last name", fill_value="Smith", diagnostic=diag)
+    repairer = ScriptedRepairer(Repair("fill", handle="f1", value="Smith",
+                                       reason="fill required field"))
+    checkpoints: list[int] = []
+
+    async def _cp(i: int) -> None:
+        checkpoints.append(i)
+
+    report = await execute(steps, session, ScriptedProvider.from_moves([]),
+                           repairer=repairer, escalation_budget=1, on_checkpoint=_cp)
+
+    assert report.completed
+    assert "repaired" in [o.via for o in report.outcomes]
+    # The repaired step (index 0) WAS checkpointed — the de-escalate exit is a good step.
+    assert checkpoints == [0]
