@@ -7,6 +7,24 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-27
+
+### Added/Fixed — outcome inference follow-up: checkout on-path + terminal vs navigational (#71)
+Two refinements to #69's outcome inference, from Conduit's adoption:
+- **Gap 1 — a checkout/shipping form is now on-path for a buy goal.** `contact_form` also fires
+  on a checkout shipping form (postcode/city/address/last-name); its outcome is broadened to span
+  both contact-us *and* shipping/checkout/order/delivery vocabulary, so `goal_progress(buy,
+  contact_form)` is on-path and the checkout's own required fields read as real blockers, not
+  noise. (Deletes the consumer-side `contact_form`/`cart_checkout` exemption.)
+- **Gap 2 — distinguish a TERMINAL side-quest from a NAVIGATIONAL tool.** New `terminal: bool`
+  field on `RecognitionResult` (default False) and `zu_patterns.is_side_quest(goal, recognition)`
+  = off-path **and** terminal. A newsletter ("subscribed", terminal) is a side-quest to actively
+  avoid during navigation; a search box or login is off-path by outcome but **navigational** (a
+  legitimate means) and is *not* a side-quest. `newsletter_signup` declares `terminal=True`. This
+  lets a consumer steer around distractions during navigation without skipping the search box it
+  needs — the behavioural win #69 hinted at. `is_relevant_blocker` (the blocker decision) is
+  unchanged.
+
 ## [0.6.0] — 2026-06-27
 
 ### Added — outcome inference: score a control by goal-progress, not by name (#69)

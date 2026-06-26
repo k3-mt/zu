@@ -96,3 +96,19 @@ def is_relevant_blocker(goal: GoalContext, recognition: RecognitionResult) -> bo
     newsletter fix and the consumer-side ``fill_region`` stopgap, and extends to
     distractions no one has named."""
     return goal_progress(goal, recognition).weight >= 0.0
+
+
+def is_side_quest(goal: GoalContext, recognition: RecognitionResult) -> bool:
+    """A control safe to ACTIVELY AVOID during navigation (#71).
+
+    Off-path by outcome alone is NOT enough to avoid a control: a search box or a
+    login form is off-path for a "buy" goal yet is the legitimate MEANS to reach it
+    — skipping it strands the agent. A side-quest is off-path AND **terminal**: its
+    outcome is a dead end (newsletter "subscribed", a spin-to-win prize, a survey),
+    so engaging it only wastes a step or springs an anti-bot wall.
+
+    Use this to STEER navigation ("don't engage distractions") — distinct from
+    :func:`is_relevant_blocker`, which governs only the blocker decision. A
+    navigational tool (``terminal=False``) is never a side-quest, even when
+    off-path."""
+    return recognition.terminal and goal_progress(goal, recognition).weight < 0.0

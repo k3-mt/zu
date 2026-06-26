@@ -74,6 +74,10 @@ class NewsletterSignup:
             # Declared outcome: "subscribed" — a marketing side-quest, off-path for
             # a purchase/research goal (#69). This is why a footer email box is noise.
             outcome=m.SUBSCRIBE_TOKENS,
+            # TERMINAL (#71): "subscribed" is a dead end — engaging it only wastes a
+            # step or springs an anti-bot wall. Safe to ACTIVELY AVOID during
+            # navigation (unlike search/login, which are off-path but navigational).
+            terminal=True,
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:

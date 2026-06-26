@@ -11,8 +11,9 @@ from typing import Any
 
 from zu_core.ports import RecognitionResult
 from zu_core.surface import SurfaceAffordance, SurfaceView
-from zu_patterns import GoalContext, goal_progress, is_relevant_blocker
+from zu_patterns import GoalContext, goal_progress, is_relevant_blocker, is_side_quest
 from zu_patterns.cart_checkout import CartCheckout
+from zu_patterns.contact_form import ContactForm
 from zu_patterns.newsletter_signup import NewsletterSignup
 
 
@@ -89,3 +90,62 @@ def test_signal_is_a_content_free_token_match() -> None:
     # under the BUY goal the search box is merely unknown-vs-off — still off (its
     # outcome doesn't overlap 'buy'), proving relevance is per-goal.
     assert goal_progress(_BUY, search).weight == -1.0
+
+
+def test_checkout_shipping_form_is_on_path_for_a_buy_goal() -> None:
+    # #71 Gap 1: contact_form ALSO fires on a checkout SHIPPING form. Under a buy
+    # goal, filling that shipping form is exactly how you reach place-order — so it
+    # must be ON-PATH (its required fields are real blockers, not noise), even
+    # though the SAME pattern serves a contact-us page.
+    checkout = SurfaceView(
+        affordances=(
+            aff("n", "textbox", "Last name", states=("required",)),
+            aff("a", "textbox", "Address line 1"),
+            aff("p", "textbox", "Postcode"),
+            aff("c", "textbox", "City"),
+            aff("s", "button", "Continue"),
+        )
+    )
+    rec = ContactForm().recognize(checkout)
+    assert rec is not None and rec.archetype == "contact_form"
+    assert goal_progress(_BUY, rec).weight == 1.0  # on-path (checkout/order/address)
+    assert is_relevant_blocker(_BUY, rec) is True
+
+
+def test_terminal_side_quest_vs_navigational_tool() -> None:
+    # #71 Gap 2: off-path ALONE is not enough to AVOID a control during navigation.
+    # newsletter — TERMINAL: off-path + a dead end ⇒ a side-quest, safe to avoid.
+    footer = SurfaceView(
+        affordances=(aff("e", "textbox", "Enter your email"), aff("b", "button", "Subscribe"))
+    )
+    news = NewsletterSignup().recognize(footer)
+    assert news is not None and news.terminal is True
+    assert goal_progress(_BUY, news).weight == -1.0  # off-path
+    assert is_side_quest(_BUY, news) is True  # ⇒ steer around it
+
+    # search — NAVIGATIONAL: off-path by outcome, but a legitimate MEANS to the
+    # goal. NOT a side-quest — avoiding it would strand the agent.
+    search = RecognitionResult(
+        archetype="search_box", confidence=1.0, outcome=("search", "results"), terminal=False
+    )
+    assert goal_progress(_BUY, search).weight == -1.0  # also off-path…
+    assert is_side_quest(_BUY, search) is False  # …but must NOT be avoided
+
+    # an on-path control is never a side-quest, terminal flag or not.
+    cart = RecognitionResult(
+        archetype="cart_checkout", confidence=1.0, outcome=("basket", "checkout", "order")
+    )
+    assert is_side_quest(_BUY, cart) is False
+
+
+def test_unnamed_terminal_distraction_is_a_side_quest() -> None:
+    # The behavioural win #69 hinted at but couldn't deliver safely: a novel
+    # spin-to-win wheel (no pattern) a consumer marks terminal is a side-quest to
+    # steer around — purely from outcome + terminal, no name-list.
+    spin = RecognitionResult(
+        archetype="spin_to_win",
+        confidence=1.0,
+        outcome=("discount", "prize", "spin the wheel"),
+        terminal=True,
+    )
+    assert is_side_quest(_BUY, spin) is True
