@@ -61,6 +61,8 @@ class LoginForm:
             matched_handles=handles,
             script=tuple(script),
             detail="login form",
+            # Declared outcome: an authenticated/signed-in account surface (#69).
+            outcome=("sign in", "log in", "login", "account", "signed in"),
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:

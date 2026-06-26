@@ -7,6 +7,23 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-27
+
+### Added — outcome inference: score a control by goal-progress, not by name (#69)
+zu could say WHAT a control is (recognizers) and HOW RISKY it is
+(`reversibility.Commitment`); now it can say WHETHER pursuing it ADVANCES THE GOAL.
+`zu_patterns.goal_progress(GoalContext, RecognitionResult) -> Signal` returns a content-free
+relevance: **+1 on-path** (the control's declared outcome overlaps the goal), **−1 off-path**
+side-quest (a definite outcome the goal doesn't want), **0 unknown**. Patterns now declare their
+outcome on `RecognitionResult.outcome` (additive; cart/checkout → basket/order, newsletter →
+subscribed, login → signed-in, search → results, contact → submitted-message), so the judgement
+is by *outcome*, not by *name* — it generalises to unnamed distractions (a spin-to-win wheel, a
+survey modal) at once. `is_relevant_blocker(goal, recognition)` is the diagnosis-side rule for
+#41 consumers: an off-path required widget (a footer newsletter "ENTER YOUR EMAIL" box with its
+own `required` attribute, under a "buy" goal) is **noise, not a boundary** — subsuming the #67
+fix and the consumer-side `fill_region` stopgap. Derived only from declared-outcome tokens + goal
+tokens; page text is never fed to a model as instructions.
+
 ## [0.5.1] — 2026-06-26
 
 ### Fixed — `contact_form` no longer false-positives on content pages (#67)

@@ -71,6 +71,9 @@ class NewsletterSignup:
             matched_handles=tuple(handles),
             script=tuple(script),
             detail="newsletter signup",
+            # Declared outcome: "subscribed" — a marketing side-quest, off-path for
+            # a purchase/research goal (#69). This is why a footer email box is noise.
+            outcome=m.SUBSCRIBE_TOKENS,
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:

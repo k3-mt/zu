@@ -65,6 +65,8 @@ class CartCheckout:
             matched_handles=tuple(handles),
             script=tuple(script),
             detail="cart/checkout (irreversible boundary)",
+            # Declared outcome: a basket/cart → order/checkout surface (#69).
+            outcome=m.CART_TOKENS + m.CHECKOUT_TOKENS + m.PLACE_ORDER_TOKENS,
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:

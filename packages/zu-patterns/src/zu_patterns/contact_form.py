@@ -84,6 +84,8 @@ class ContactForm:
             matched_handles=tuple(handles),
             script=tuple(script),
             detail="contact/shipping form",
+            # Declared outcome: a submitted contact/shipping message (#69).
+            outcome=("contact", "message", "enquiry", "inquiry", "sent", "submitted"),
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:

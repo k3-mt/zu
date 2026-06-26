@@ -47,6 +47,8 @@ class SearchBox:
             matched_handles=handles,
             script=tuple(script),
             detail="search box",
+            # Declared outcome: a results/listing surface — on-path for a "find X" goal (#69).
+            outcome=m.SEARCH_TOKENS + ("results", "listing"),
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:
