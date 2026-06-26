@@ -1,6 +1,6 @@
 [project]
 name = "zu-runtime"
-version = "0.5.0"
+version = "0.5.1"
 description = "An opinionated, backend-agnostic runtime for agents that work in production — deterministic, auditable, injection-resistant. Import as `zu`."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -23,18 +23,18 @@ keywords = ["agents", "llm", "ai-agents", "runtime", "web-scraping", "sandbox", 
 # the Docker sandbox, MCP); every plugin is also installable standalone (pip install
 # zu-tools, …) so a plugin author can depend on just what they need (the ecosystem).
 dependencies = [
-    "zu-cli==0.5.0",
-    "zu-providers==0.5.0",
-    "zu-checks==0.5.0",
-    "zu-backends==0.5.0",
-    "zu-tools==0.5.0",       # web tools — the common case, so it ships in the base
+    "zu-cli==0.5.1",
+    "zu-providers==0.5.1",
+    "zu-checks==0.5.1",
+    "zu-backends==0.5.1",
+    "zu-tools==0.5.1",       # web tools — the common case, so it ships in the base
 ]
 
 [project.optional-dependencies]
 # The web tools now ship in the BASE; [web]/[demo] remain as no-op back-compat
 # aliases so an existing `pip install 'zu-runtime[web]'` / `[demo]` still resolves.
-web = ["zu-tools==0.5.0"]
-demo = ["zu-tools==0.5.0"]
+web = ["zu-tools==0.5.1"]
+demo = ["zu-tools==0.5.1"]
 # Real model SDKs (the adapters ship in the base; these add the vendor client).
 anthropic = ["zu-providers[anthropic]==0.2.4"]
 openai = ["zu-providers[openai]==0.2.4"]
@@ -54,7 +54,7 @@ huggingface = ["zu-huggingface[hosted]==0.2.4"]
 # Everything: web tools, both model SDKs, the server, the Docker sandbox, MCP,
 # the test gate, and the HuggingFace adapter.
 all = [
-    "zu-tools==0.5.0",
+    "zu-tools==0.5.1",
     "zu-providers[anthropic]==0.2.4",
     "zu-providers[openai]==0.2.4",
     "zu-cli[serve]==0.2.4",
