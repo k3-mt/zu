@@ -7,6 +7,25 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — make the capability surface explicit, type-checkable, and version-stamped (issue #30)
+A downstream integrator reimplemented `zu-shadow`, the recognizers, and providers locally
+because none of it was discoverable, type-checkable, or version-stamped from the outside.
+Fixed at the source:
+- **`py.typed` in every package**, packaged into every wheel (PEP 561). A strict-typed
+  downstream importing `zu_core` / `zu_patterns` / `zu_shadow` now gets Zu's real types —
+  zero `import-untyped` errors. The typed public symbols **are** the contract.
+- **`zu_core.__version__` + `zu_core.provenance()`** — a running process is self-describing
+  (its Zu version + the interface major it provides per kind), no git-pin lookup needed.
+- **`zu_core.capabilities()` + `zu capabilities` CLI** (and `--json`) — every
+  `INTERFACE_VERSION` kind reconciled against the install: interface major, implementing
+  package + canonical symbol, and an installed flag for THIS environment.
+- **`zu_core.library_surface()`** + top-of-README "import these" maps on `zu-shadow` /
+  `zu-patterns`, and `docs/capability-surface.md` — surfacing the powerful import-only
+  packages (no entry points) a consumer is most likely to rebuild by hand. The cross-run
+  memory layer `zu_patterns.fsm_from_events` — assumed missing downstream, shipped all
+  along — is now pointed at by name.
+- **`__zu_spec__` spec anchors** on the headline modules (greppable code→spec linkage).
+
 ## [0.3.0] — 2026-06-25
 
 First coordinated release of the capabilities build-out (§1–§9). Every distribution is

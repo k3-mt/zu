@@ -8,6 +8,14 @@ from __future__ import annotations
 
 from . import events
 from .bus import EventBus, SubscriberFailure
+from .capabilities import (
+    Capability,
+    LibrarySurface,
+    __version__,
+    capabilities,
+    library_surface,
+    provenance,
+)
 from .chain import chain_head, event_digest, link, verify_against_anchor, verify_chain
 from .codec import IdentityCodec, KeyProvider, PayloadCodec, decode_payload, encode_payload
 from .content import Action, Audio, Content, ContentPart, Image, Observation, Text
@@ -94,6 +102,13 @@ from .sinks import MemoryEventSink
 from .view import RENDER_KEYS, scope_event, scope_payload
 
 __all__ = [
+    # capability surface + provenance (issue #30) — what Zu provides, here
+    "__version__",
+    "provenance",
+    "capabilities",
+    "Capability",
+    "library_surface",
+    "LibrarySurface",
     # contracts
     "Budget",
     "Event",
