@@ -1,6 +1,6 @@
 [project]
 name = "zu-testing"
-version = "0.5.0"
+version = "0.5.1"
 description = "Zu test kit: shared fakes, fixtures, and a pytest plugin for testing Zu and its plugins"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ classifiers = [
 # (zu-tools, zu-providers) are LAZY-imported inside the fixtures that need them,
 # so the dep graph stays acyclic — every package can depend on zu-testing for
 # dev without zu-testing depending back on them.
-dependencies = ["zu-core==0.5.0", "pytest>=8", "httpx"]
+dependencies = ["zu-core==0.5.1", "pytest>=8", "httpx"]
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

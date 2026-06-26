@@ -7,6 +7,17 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-06-26
+
+### Fixed — `contact_form` no longer false-positives on content pages (#67)
+`ContactForm` (#33) fired `contact_form` (0.62) on any page with ≥3 fillable controls — e.g. a
+search box + a sort dropdown + a footer newsletter email — none of them a real form. That false
+positive let a downstream autofill type into a stray newsletter box and spring a site's
+reCAPTCHA. The bare `>=3 fillable fields` fallback is **removed**: a match now requires genuine
+contact vocabulary — a shipping/OTP field, or a name (shipping vocab) with an email. Search +
+sort + lone email → no match; name + email / a shipping field / an OTP field → `contact_form`
+(0.85). The other archetypes are unaffected.
+
 ## [0.5.0] — 2026-06-26
 
 Issue #41 — a **content/reading projection** beside the content-free action view, plus an

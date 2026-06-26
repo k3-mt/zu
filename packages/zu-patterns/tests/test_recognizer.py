@@ -262,24 +262,40 @@ def test_contact_form_otp_branch() -> None:
     assert ContactForm().recognize(by_state) is not None
 
 
-def test_contact_form_three_field_fallback() -> None:
-    # 3 unrelated textboxes, no shipping/OTP/subscribe vocab ⇒ contact_form ~0.62.
-    view = SurfaceView(
+def test_contact_form_requires_genuine_contact_vocab_not_a_bare_count() -> None:
+    # #67: a bare count of fillable controls is NOT a contact form. Three unrelated
+    # fillables with no shipping/OTP vocabulary ⇒ no match (was a 0.62 false positive).
+    three = SurfaceView(
         affordances=(
             aff("a1", "textbox", "Field A"),
             aff("a2", "textbox", "Field B"),
             aff("a3", "textbox", "Field C"),
         ),
     )
-    r = ContactForm().recognize(view)
-    assert r is not None
-    assert r.archetype == "contact_form"
-    assert round(r.confidence, 2) == 0.62
-    # two unrelated fields is below the fallback floor ⇒ no match.
-    two = SurfaceView(
-        affordances=(aff("a1", "textbox", "Field A"), aff("a2", "textbox", "Field B"))
+    assert ContactForm().recognize(three) is None
+    # The exact #67 repro: a content page — search box + sort dropdown + footer
+    # newsletter email — is three fillables but no form. Typing into the stray email
+    # box sprang a site's reCAPTCHA, so this must NOT match.
+    content_page = SurfaceView(
+        affordances=(
+            aff("s", "combobox", "Search"),
+            aff("z", "combobox", "Sort"),
+            aff("e", "textbox", "Enter your email"),
+        ),
     )
-    assert ContactForm().recognize(two) is None
+    assert ContactForm().recognize(content_page) is None
+    # But a real contact form — a name AND an email together — still fires (name is
+    # shipping vocabulary, the genuine worded tell), at the 0.85 shipping confidence.
+    real = SurfaceView(
+        affordances=(
+            aff("a1", "textbox", "Full name"),
+            aff("a2", "textbox", "Email"),
+            aff("a3", "button", "Send"),
+        ),
+    )
+    r = ContactForm().recognize(real)
+    assert r is not None and r.archetype == "contact_form"
+    assert round(r.confidence, 2) == 0.85
 
 
 def test_newsletter_context_only_confidence() -> None:
@@ -313,7 +329,7 @@ def test_newsletter_submit_prior_reversible_leaning() -> None:
 
 def test_contact_form_defers_to_login_password() -> None:
     # a login surface (password field) keeps login_form's territory: the password
-    # field is excluded from the fillable count, so the >=3 fallback never fires.
+    # field is excluded from the fillable region, and email alone is not contact vocab.
     view = SurfaceView(
         affordances=(
             aff("a1", "textbox", "Email"),

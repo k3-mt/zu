@@ -2,10 +2,11 @@
 
 Fires when a surface shows a fillable form whose slots read like a contact or
 shipping form (postcode/city/address line/full name/phone), OR carries an OTP /
-one-time-code field, OR simply offers >=3 distinct fillable fields. The submit
-step is COMMITTING (a form POST that hands over real personal data) — the live
-search and rail commit boundary. A bare email + <=2 fields with no shipping/OTP
-vocabulary is NOT this pattern (that is newsletter_signup's territory).
+one-time-code field. The submit step is COMMITTING (a form POST that hands over
+real personal data) — the live search and rail commit boundary. Genuine contact
+vocabulary is REQUIRED: a bare count of fillable controls (a search box + a sort
+dropdown + a footer newsletter email is three, but none is a form) does NOT match
+(#67). A lone email with no shipping/OTP field is newsletter_signup's territory.
 
 Script (a PROPOSAL, never auto-run): fill each fillable slot, then submit.
 Success: a post-submit confirmation surface. Failure: a validation/error alert.
@@ -28,8 +29,8 @@ _ERROR_TOKENS = ("required", "invalid", "error", "please enter", "try again")
 
 
 def _is_password(aff: SurfaceAffordance) -> bool:
-    """A password field — excluded from the fillable count so a login surface
-    (login_form's 0.95 territory) never trips the >=3-field fallback."""
+    """A password field — excluded from the fillable region so a login surface
+    (login_form's 0.95 territory) is never miscounted as a contact form."""
     return m.has_state(aff, "password") or m.label_has(aff, m.PASSWORD_TOKENS)
 
 
@@ -55,12 +56,14 @@ class ContactForm:
             return None
         shipping = [a for a in fillable if m.label_has(a, m.SHIPPING_TOKENS)]
         otp = [a for a in fillable if _is_otp(a)]
-        # A contact/shipping slot or an OTP field is a strong, worded tell.
+        # A contact/shipping slot (postcode/city/address/full name/phone) or an OTP
+        # field is the REQUIRED worded tell — name + email lands here because name
+        # is shipping vocabulary. A bare count of fillable controls is NOT enough:
+        # a search box + a sort dropdown + a footer newsletter email is three
+        # fillables but no contact form, and typing into the stray email box can
+        # spring an anti-bot challenge (#67). No genuine vocabulary → not us.
         if shipping or otp:
             confidence = 0.85
-        # The bare fallback: >=3 distinct fillable fields with no special vocab.
-        elif len(fillable) >= 3:
-            confidence = 0.62
         else:
             return None
         # The proposed script fills each slot, then submits — submit is COMMITTING.
