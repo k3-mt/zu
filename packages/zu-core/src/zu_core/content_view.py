@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -55,13 +56,26 @@ def _canonical(*parts: object) -> str:
 
 
 def _encode(p: object) -> str:
-    """Encode one part: tuples recurse (length-prefixed), Provenance by its
-    fields, everything else by ``str``."""
+    """Encode one part, TYPE-TAGGED so distinct types can never collide.
+
+    The hash is load-bearing, so the encoding must be injective across TYPES, not
+    just values: without a type sigil ``None`` and the string ``"None"`` (and
+    ``True`` vs ``1`` vs ``"True"``) all fall through to ``str(p)`` and hash
+    identically — a type-confusion collision (e.g. ``FieldState(value=None)`` and
+    ``FieldState(value="None")`` would seal to the same ``content_hash``). Each
+    leaf is prefixed with a distinct per-type sigil before length-prefixing; the
+    ``bool`` check precedes ``int`` because ``bool`` is a subclass of ``int``."""
     if isinstance(p, tuple):
         return _canonical(*p)
     if isinstance(p, Provenance):
         return _canonical("prov", p.url, p.region)
-    return str(p)
+    if p is None:
+        return "N:"
+    if isinstance(p, bool):
+        return f"b:{p}"
+    if isinstance(p, int):
+        return f"i:{p}"
+    return f"s:{p}"
 
 
 def _hash(*parts: object) -> str:
@@ -69,6 +83,46 @@ def _hash(*parts: object) -> str:
     value object, computed at construction by the ``_seal`` validators."""
     digest = hashlib.sha256(_canonical(*parts).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _seal_unit(unit: ContentUnit) -> ContentUnit:
+    """Enforce the ContentUnit invariant + fill its content hash. Factored out of the
+    validator so BOTH the normal-construction path AND ``model_construct`` (which skips
+    validation) seal identically — the trust boundary cannot be bypassed either way."""
+    # HARD-FAIL: the trust boundary cannot be opted out of. A content unit is
+    # untrusted by construction; no producer can yield "trusted page content".
+    if unit.untrusted is not True:
+        raise ValueError("ContentUnit.untrusted may not be set False")
+    if not unit.content_hash:
+        # ``level`` IS hashed (type-tagged, so a missing level (None) differs from
+        # level 0) — every field a unit carries is covered, so the "any field change
+        # → hash change" guarantee holds for level too (LOW #21).
+        object.__setattr__(
+            unit,
+            "content_hash",
+            _hash("unit", unit.kind, unit.text, unit.rows, unit.level, unit.provenance),
+        )
+    return unit
+
+
+def _seal_field(field: FieldState) -> FieldState:
+    """Fill a FieldState's content hash — factored out like ``_seal_unit`` so the
+    validation-skipping ``model_construct`` path seals identically (LOW #4)."""
+    if not field.content_hash:
+        object.__setattr__(
+            field,
+            "content_hash",
+            _hash(
+                "field",
+                field.label,
+                field.value,
+                field.required,
+                field.invalid,
+                field.error_text,
+                field.provenance,
+            ),
+        )
+    return field
 
 
 class Provenance(BaseModel):
@@ -109,17 +163,16 @@ class ContentUnit(BaseModel):
 
     @model_validator(mode="after")
     def _seal(self) -> ContentUnit:
-        # HARD-FAIL: the trust boundary cannot be opted out of. A content unit is
-        # untrusted by construction; no producer can yield "trusted page content".
-        if self.untrusted is not True:
-            raise ValueError("ContentUnit.untrusted may not be set False")
-        if not self.content_hash:
-            object.__setattr__(
-                self,
-                "content_hash",
-                _hash("unit", self.kind, self.text, self.rows, self.provenance),
-            )
-        return self
+        return _seal_unit(self)
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> ContentUnit:
+        # ``model_construct`` SKIPS validation — that is its whole point — which
+        # would let a caller bypass the ``_seal`` invariant (build an
+        # ``untrusted=False`` unit, or skip the content hash). Re-run the seal so
+        # the trust boundary is ABSOLUTE, not merely the normal-construction path
+        # (LOW #4): ``model_construct(untrusted=False)`` still raises.
+        return _seal_unit(super().model_construct(_fields_set, **values))
 
     @classmethod
     def make(
@@ -163,21 +216,14 @@ class FieldState(BaseModel):
 
     @model_validator(mode="after")
     def _seal(self) -> FieldState:
-        if not self.content_hash:
-            object.__setattr__(
-                self,
-                "content_hash",
-                _hash(
-                    "field",
-                    self.label,
-                    self.value,
-                    self.required,
-                    self.invalid,
-                    self.error_text,
-                    self.provenance,
-                ),
-            )
-        return self
+        return _seal_field(self)
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> FieldState:
+        # Re-run the seal on the validation-skipping path so the content hash is
+        # always filled, even via ``model_construct`` (LOW #4) — the same absolute
+        # invariant as ``ContentUnit``.
+        return _seal_field(super().model_construct(_fields_set, **values))
 
 
 class Want(str, Enum):
