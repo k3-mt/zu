@@ -932,6 +932,13 @@ class RecognitionResult(BaseModel):
     matched_handles: tuple[str, ...] = ()
     script: tuple[PatternStep, ...] = ()
     detail: str | None = None
+    # The control's DECLARED OUTCOME — generic, content-free tokens describing the
+    # surface acting on it produces ("subscribed", "basket"/"order", "signed in").
+    # The bridge from "what a control is" to "does it advance the goal" (outcome
+    # inference, #69): zu_patterns.goal_progress scores a goal's tokens against
+    # THESE, so a control is off-path because of its outcome, not its name. A
+    # pattern that declares no outcome scores as UNKNOWN (never off-path).
+    outcome: tuple[str, ...] = ()
 
 
 @runtime_checkable

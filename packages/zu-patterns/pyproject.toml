@@ -1,6 +1,6 @@
 [project]
 name = "zu-patterns"
-version = "0.5.1"
+version = "0.6.0"
 description = "Zu pattern library: the policy-prior / move-ordering layer over the Action Surface (§5)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ classifiers = [
 # The boundary holds: zu-patterns speaks ONLY the core SurfaceView — it depends
 # on zu-core and NOT on zu-tools. A pattern recognizes over the core type; the
 # zu-tools Surface → SurfaceView projection lives in zu-tools, one-way.
-dependencies = ["zu-core==0.5.1"]
+dependencies = ["zu-core==0.6.0"]
 
 [project.entry-points."zu.patterns"]   # <- how a pattern is registered (§5)
 cookie_banner = "zu_patterns.cookie_banner:CookieBanner"
