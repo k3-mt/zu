@@ -571,6 +571,55 @@ async def test_mpc_run_repair_fill_falls_through_to_structural_rollback() -> Non
 
 
 @pytest.mark.asyncio
+async def test_mpc_run_no_op_fill_rolls_back_once_then_proceeds() -> None:
+    # The post-executor no_op branch (search.py ~799-822): the model picks the on-rail
+    # reversible 'reach'; the FAKE executor returns the SAME surface on the FIRST call
+    # (a no_op — to_state(prev) == to_state(new)), but the REAL next surface on a
+    # later call. A repair hook answering 'fill' (NOT human/abort) must NOT stop the
+    # loop — it falls through to the structural rollback, which reverts to the
+    # checkpoint, excludes the no-op 'reach' label, and (second model turn) drives the
+    # DIFFERENT on-rail sibling 'reach2' to goal. The no_op must roll back EXACTLY once
+    # and then proceed — never an infinite loop, and the commit boundary is untouched
+    # (every move here is reversible).
+    model = ScriptedProvider(
+        [
+            ModelResponse(tool_calls=[_tc("reach", "a1")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("reach2", "a1")], finish=Finish.TOOL_CALLS),
+            ModelResponse(tool_calls=[_tc("done2", "a1")], finish=Finish.TOOL_CALLS),
+        ]
+    )
+    here = _surface("here")
+    good2 = SurfaceView(
+        title="good2", url="https://x/good2",
+        affordances=(SurfaceAffordance(handle="a1", role="link", label="done2"),),
+    )
+    # 'reach' fires but lands back on the SAME state (no_op); 'reach2' advances; 'done2'
+    # reaches goal.
+    nexts = {"reach": here, "reach2": good2, "done2": _surface("goal")}
+
+    async def executor(cand: Candidate, surface: SurfaceView) -> SurfaceView:
+        return nexts[cand.label]
+
+    seen: list[str] = []
+
+    async def repair(ctx: ProblemContext) -> Repair:
+        seen.append(ctx.reason)
+        return Repair(kind="fill", reason="not human/abort — fall through")
+
+    outcome = await mpc_run(
+        here, model, _branch_fsm_two_routes(), executor,
+        surface_to_state=_state_of, replan_budget=1, repair=repair,
+    )
+    # the no_op was diagnosed exactly once, the loop rolled back exactly once, then the
+    # excluded-'reach' replan picked the sibling 'reach2' and drove to goal.
+    assert seen == ["no_op"]
+    assert outcome.reached_goal is True
+    assert outcome.escalated is False
+    assert outcome.rollbacks == 1
+    assert [c.label for c in outcome.steps] == ["reach", "reach2", "done2"]
+
+
+@pytest.mark.asyncio
 async def test_mpc_run_no_repair_hook_is_legacy_behavior() -> None:
     # repair=None (the default) ⇒ a no-op executor with no budget simply ends the loop
     # by max_steps without any repair consultation (legacy behavior unchanged).
@@ -592,26 +641,44 @@ async def test_mpc_run_no_repair_hook_is_legacy_behavior() -> None:
 
 def test_surface_state_id_stable_across_error_text_variants() -> None:
     # surface_state_id is CONTENT-FREE: two surfaces with identical url/title/handles
-    # collapse to the SAME FSM state id regardless of any page error text (which is
-    # NOT part of SurfaceView at all). A content read never feeds the state id, so the
-    # learned FSM never fragments per error-text variant.
-    base = SurfaceView(
+    # collapse to the SAME FSM state id even when their CONTENT channel differs. The
+    # ``context`` tuple is exactly where orienting/error text rides on a SurfaceView
+    # (surface.py: "headings, alerts, error text"), yet ``_surface_state`` keys ONLY on
+    # url+title+handles — never ``context``. So a page that shows an error, a clean
+    # page, and a page with a DIFFERENT error all collapse to one FSM state id; the
+    # learned FSM never fragments per error-text variant and rollback/resume stay
+    # stable. (Revert the content-free digest — e.g. fold ``context`` into the payload —
+    # and these now hash differently, so this assertion FAILS: the guard is non-vacuous.)
+    clean = SurfaceView(
         title="checkout", url="https://x/checkout",
         affordances=(
             SurfaceAffordance(handle="a1", role="textbox", label="Last name"),
             SurfaceAffordance(handle="a2", role="button", label="Continue"),
         ),
+        context=(),  # no error shown yet
     )
-    # a structurally-identical surface (same url/title/handles) — the error text a
-    # page might show lives in content_view, never here.
-    same = SurfaceView(
+    # SAME url/title/handles, but the CONTENT channel now carries an error — exactly
+    # the kind of text content_view would surface on escalation.
+    with_error = SurfaceView(
         title="checkout", url="https://x/checkout",
         affordances=(
             SurfaceAffordance(handle="a1", role="textbox", label="Last name"),
             SurfaceAffordance(handle="a2", role="button", label="Continue"),
         ),
+        context=("Last name is required",),
     )
-    assert _surface_state(base) == _surface_state(same)
+    # a DIFFERENT error in the content channel — still the same structural surface.
+    with_other_error = SurfaceView(
+        title="checkout", url="https://x/checkout",
+        affordances=(
+            SurfaceAffordance(handle="a1", role="textbox", label="Last name"),
+            SurfaceAffordance(handle="a2", role="button", label="Continue"),
+        ),
+        context=("Please enter a valid last name",),
+    )
+    # all three collapse to the SAME state id — content never feeds the FSM key.
+    assert _surface_state(clean) == _surface_state(with_error)
+    assert _surface_state(with_error) == _surface_state(with_other_error)
 
 
 # --- PART B: the Shadow-sourced transition model --------------------------
