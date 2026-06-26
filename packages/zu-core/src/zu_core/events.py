@@ -107,6 +107,17 @@ CHECKPOINT_MARKED = "harness.checkpoint.marked"
 # LKG that were truncated)}. Parented to run.root. The good prefix is folded; the
 # failed tail is dropped; consume-once claims from the good prefix are preserved.
 RUN_ROLLED_BACK = "harness.run.rolled_back"
+# A deterministic executor step got STUCK and entered the escalation arm (Issue
+# #41 §5): {"step": int, "reason": "unresolved"|"no_op"}. Parented to the turn.
+# Paired with the diagnostic content read (data.content.captured) — the auditable
+# record of "the cheap path could not resolve/changed nothing here".
+STEP_ESCALATED = "harness.step.escalated"
+# A bounded, REVERSIBLE repair was applied to a stuck step (Issue #41 §5):
+# {"step": int, "repair_kind": "fill", "field": str (label, REDACTED)}. The filled
+# VALUE is NEVER on the log — a commit/payment/redacted target is forced to a
+# human escalation, never auto-filled. The run then retries the step on the
+# content-free path (de-escalate).
+STEP_REPAIRED = "harness.step.repaired"
 # A consume-once execution claim (ZU-CD-6): {"key"}. The first claim of a key wins
 # and is recorded here; the in-memory ExecutionLedger is a cache over these events,
 # so a resumed/replayed run folds them to rebuild the claimed set and REFUSES to
@@ -161,6 +172,17 @@ RECORD_EXTRACTED = "data.record.extracted"
 # handle list + counts are the auditable surface. Emitted by ActionSurface when
 # op=open/reduce yields a surface.
 SURFACE_CAPTURED = "data.surface.captured"
+# The reading projection (content_view) the agent read at one step (Issue #41
+# §2.3, §4). data.* because it is perception the agent CONSUMED — but a content
+# read is UNTRUSTED and a NEW secret surface, so this seam carries the auditable
+# FINGERPRINT only, NEVER body text. Payload:
+# {"url": str, "want": list[str], "counts": {region: int}, "view_hash": str,
+#  "unit_hashes": list[str]}. The hash + provenance is what makes the read
+# auditable AND replayable (a resumed run asserts a hash match); the body is not
+# on the log. Default-DENY at any view boundary (the payload keys are not in
+# RENDER_KEYS, so they are summarized to type/len/sha256). Emitted by the loop
+# when a tool observation carries a ``content_view`` key.
+CONTENT_CAPTURED = "data.content.captured"
 # One pointer move/click trajectory the agent PRODUCED (Engineering Design §5.4 /
 # §12). data.* because it is an agent-produced action on the world — the audit
 # answer to "where did the cursor go". The full per-sample path rides in the tool
@@ -240,6 +262,8 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         RUN_RESUMED,
         CHECKPOINT_MARKED,
         RUN_ROLLED_BACK,
+        STEP_ESCALATED,
+        STEP_REPAIRED,
         EXECUTION_CLAIMED,
         CAPABILITY_USED,
         GRANT_ISSUED,
@@ -259,6 +283,7 @@ DATA_TYPES: frozenset[str] = frozenset(
         SOURCE_FETCHED,
         RECORD_EXTRACTED,
         SURFACE_CAPTURED,
+        CONTENT_CAPTURED,
         POINTER_DISPATCHED,
         PATTERN_RECOGNIZED,
         SHADOW_SESSION_START,
