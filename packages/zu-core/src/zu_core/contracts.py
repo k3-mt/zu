@@ -31,6 +31,14 @@ class Budget(BaseModel):
     max_tokens: int = 200_000
     wall_time_s: int = 120
     max_tool_calls: int = 32  # per single model response — caps a runaway turn
+    # --- the reliability budget (navigation-reliability layer) -----------------
+    # The hard cap on harness-level retry-on-stale: when an act's target handle no longer
+    # locates (the element detached / the page re-rendered), the runtime re-resolves the SAME
+    # control by identity (role+name+nth) and re-dispatches at most this many times before
+    # giving up and escalating — so recovery is bounded and can never loop forever. It reuses
+    # the existing axtree/locate ops (no new server support), so it is ON by default; it only
+    # ever engages on a stale miss (a pure recovery).
+    stale_retries_max: int = 2
 
 
 class TaskSpec(BaseModel):

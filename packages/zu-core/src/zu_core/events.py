@@ -191,6 +191,15 @@ CONTENT_CAPTURED = "data.content.captured"
 #  float, "dest": {"x": float, "y": float}, "seed": str}. Emitted by PointerControl
 # after a successful dispatch.
 POINTER_DISPATCHED = "data.pointer.dispatched"
+# A harness-level bounded retry-on-stale re-bound a detached element by IDENTITY
+# (navigation-reliability layer). data.* because it records an action the runtime took to
+# recover perception — "the handle no longer located, so I re-resolved the SAME control by
+# role+name+nth and retried". The model is NOT relied on to notice and recover. The locator
+# stays harness-side: the payload carries the opaque old/new handles + role only, NEVER the
+# accessible name (no content on the log). Payload: {"old_handle": str, "new_handle": str|None,
+# "attempt": int, "role": str}. Bounded by Budget.stale_retries_max; emitted by the loop per
+# ``handle_rebound`` entry an observation carries.
+HANDLE_REBOUND = "data.handle.rebound"
 # A pattern recognizer matched an archetype over one step's action surface
 # (Engineering Design §5). data.* because it is perception the agent
 # INFERRED — the auditable record of "what did the agent recognize here" — NOT
@@ -285,6 +294,7 @@ DATA_TYPES: frozenset[str] = frozenset(
         SURFACE_CAPTURED,
         CONTENT_CAPTURED,
         POINTER_DISPATCHED,
+        HANDLE_REBOUND,
         PATTERN_RECOGNIZED,
         SHADOW_SESSION_START,
         SHADOW_SESSION_END,
