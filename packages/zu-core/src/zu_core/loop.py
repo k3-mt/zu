@@ -38,6 +38,7 @@ from uuid import UUID, uuid5
 from . import events as ev
 from .bus import EventBus
 from .contracts import Budget, Event, Result, Status, TaskSpec
+from .effect import verify_effect
 from .grants import InMemoryGrantStore
 from .ledger import InMemoryExecutionLedger
 from .ports import (
@@ -57,6 +58,7 @@ from .ports import (
 from .registry import REGISTRY, Registry
 from .runlifecycle import close_run as _run_cleanup
 from .security import SecurityBlock, _needs_containment, enforce_containment
+from .surface import SurfaceView
 from .track import MAX_REPLAY_WAIT_MS, Track, TrackStep, replay_extra_delay_ms
 
 log = logging.getLogger("zu.loop")
@@ -294,6 +296,77 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
             "seed": str(pointer.get("seed", "")),
         }))
     return out
+
+
+def _surface_from_obs(obs: dict) -> SurfaceView | None:
+    """Reconstruct the modality-agnostic :class:`SurfaceView` from an ``action_surface``
+    observation (the dict the reducer emitted — affordances, states and all). Pure parsing
+    of a dict the loop already holds: zu-core never imports zu-tools, it only reads the
+    shape. Returns None when the obs carries no (well-formed) surface."""
+    raw = obs.get("action_surface")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return SurfaceView.model_validate({
+            "title": raw.get("title", ""),
+            "url": raw.get("url", ""),
+            "affordances": raw.get("affordances", []),
+            "context": raw.get("context", []),
+            "blind": bool(raw.get("blind", False)),
+            "blind_reason": raw.get("blind_reason"),
+        })
+    except Exception:  # noqa: BLE001 - a malformed surface is simply not verifiable
+        return None
+
+
+def _acted_handle(obs: dict) -> str | None:
+    """The handle a CLICK acted on this step, or None. Only a click (not a bare move) is
+    expected to change the surface, so only a click arms effect verification."""
+    pointer = obs.get("pointer")
+    if isinstance(pointer, dict) and pointer.get("clicked") and pointer.get("handle"):
+        return str(pointer["handle"])
+    return None
+
+
+async def _effect_checkpoint(run: _Run, turn: UUID, name: str, obs: dict) -> None:
+    """Verify the EFFECT of the previous handle-click once the next surface is captured —
+    the generalisation UP into zu-core of conduit's ``verify_effect``. Tool-agnostic, keyed
+    on observation SHAPE exactly like ``_perception_action_events``:
+
+    * a fresh ``action_surface`` reduction RESOLVES a pending click — compare the before
+      surface to this after surface (``zu_core.effect.verify_effect``), emit
+      ``data.effect.verified`` {acted_handle, result, before/after fingerprint}, and surface
+      a ``silent-no-op`` back to the policy as a non-fatal ``effect`` key on the observation
+      so it can react (retry differently) rather than charging on as if the click worked.
+    * a ``pointer`` click ARMS the next check, recording (acted_handle, the last surface) as
+      the ``before``.
+
+    Opportunistic and never control-flow-changing: it fires only when a click is bracketed
+    by two surfaces; absent that it is inert. Deterministic and replayable — a pure
+    comparison of two frozen surfaces, no I/O, no clock."""
+    surf = _surface_from_obs(obs)
+    if surf is not None:
+        if run.pending_effect is not None:
+            acted_handle, before = run.pending_effect
+            run.pending_effect = None
+            result = verify_effect(before, surf, acted_handle)
+            await run.emit(
+                ev.EFFECT_VERIFIED,
+                {
+                    "acted_handle": acted_handle,
+                    "result": result or "changed",
+                    "before_fp": before.fingerprint(),
+                    "after_fp": surf.fingerprint(),
+                },
+                parent=turn,
+                source=name,
+            )
+            if result is not None:
+                obs["effect"] = result  # non-fatal signal: the click changed nothing
+        run.last_surface = surf
+    acted = _acted_handle(obs)
+    if acted is not None and run.last_surface is not None:
+        run.pending_effect = (acted, run.last_surface)
 
 
 # Map-reduce extraction over a too-big page. A blunt cap keeps the first N chars
@@ -634,6 +707,12 @@ class _Run:
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
         self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
+        # Action-effect verification state (generalised UP from conduit). The last
+        # reduced action surface seen this run, and a pending (acted_handle, before)
+        # recorded when a handle-click is dispatched — resolved into a
+        # ``data.effect.verified`` verdict when the next surface is captured.
+        self.last_surface: SurfaceView | None = None
+        self.pending_effect: tuple[str, SurfaceView] | None = None
 
     async def emit(
         self, type_: str, payload: dict | None = None, *,
@@ -1603,6 +1682,10 @@ async def _invoke(
             )
         for etype, payload in _perception_action_events(obs):
             await run.emit(etype, payload, parent=turn, source=name)
+        # Action-effect verification (generalised UP from conduit): when a handle-click is
+        # bracketed by two captured surfaces, record whether it actually changed the surface
+        # (data.effect.verified) and flag a silent no-op back to the policy.
+        await _effect_checkpoint(run, turn, name, obs)
     await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": returned}, parent=turn, source=name)
     return obs
 
