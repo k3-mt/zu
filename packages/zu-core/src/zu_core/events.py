@@ -191,6 +191,15 @@ CONTENT_CAPTURED = "data.content.captured"
 #  float, "dest": {"x": float, "y": float}, "seed": str}. Emitted by PointerControl
 # after a successful dispatch.
 POINTER_DISPATCHED = "data.pointer.dispatched"
+# A harness-owned auto-settle waited for the surface to quiesce before/after an act
+# (navigation-reliability layer). data.* because it records a perception fact the runtime
+# established — "I waited for the page to go DOM-stable / network-idle / SPA-quiescent".
+# Budget-bounded (Budget.settle_ms_max): a settle can never stall the run. Payload:
+# {"phase": "pre"|"post", "ms_waited": int, "reason": "quiescent"|"stable"|
+#  "budget_exhausted", "polls": int}. Emitted by the loop, tool-agnostically, for each settle
+# entry a tool observation carries under a ``settle`` key. (A session that does not implement
+# the quiescence probe yields no settle entry — a transparent no-op, so no event.)
+SETTLE_WAITED = "data.settle.waited"
 # A pattern recognizer matched an archetype over one step's action surface
 # (Engineering Design §5). data.* because it is perception the agent
 # INFERRED — the auditable record of "what did the agent recognize here" — NOT
@@ -285,6 +294,7 @@ DATA_TYPES: frozenset[str] = frozenset(
         SURFACE_CAPTURED,
         CONTENT_CAPTURED,
         POINTER_DISPATCHED,
+        SETTLE_WAITED,
         PATTERN_RECOGNIZED,
         SHADOW_SESSION_START,
         SHADOW_SESSION_END,
