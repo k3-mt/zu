@@ -123,6 +123,17 @@ def put_handle_map(run_key: str, handle_map: dict[str, dict]) -> None:
             entry.handle_map = dict(handle_map)
 
 
+def handle_map_of(run_key: str) -> dict[str, dict]:
+    """A COPY of the run's full handle → {role, name} map, in insertion (document) order — the
+    raw material for identity re-binding (role+name+nth) when a handle goes stale. Empty when no
+    session/map is registered for the run. A copy, so a caller can never mutate the live map."""
+    if not run_key:
+        return {}
+    with _LOCK:
+        entry = _RUNS.get(run_key)
+        return {h: dict(loc) for h, loc in entry.handle_map.items()} if entry is not None else {}
+
+
 def resolve_handle(run_key: str, handle: str) -> dict | None:
     """Resolve an opaque handle to its durable ``{role, name}`` locator from the run's
     shared handle_map. The HARNESS does this — the model only ever emits the handle.

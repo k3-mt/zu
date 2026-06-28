@@ -308,6 +308,18 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
                     "reason": entry.get("reason"),
                     "polls": entry.get("polls", 0),
                 }))
+    # A ``handle_rebound`` list → one ``data.handle.rebound`` per attempt: the auditable
+    # record of a bounded retry-on-stale that re-resolved a detached control by identity.
+    rebound = obs.get("handle_rebound")
+    if isinstance(rebound, list):
+        for entry in rebound:
+            if isinstance(entry, dict):
+                out.append((ev.HANDLE_REBOUND, {
+                    "old_handle": entry.get("old_handle"),
+                    "new_handle": entry.get("new_handle"),
+                    "attempt": entry.get("attempt", 0),
+                    "role": entry.get("role"),
+                }))
     return out
 
 

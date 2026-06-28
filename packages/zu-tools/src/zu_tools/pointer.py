@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle
 
 from ._session import attach, resolve_handle, run_key
+from .rebind import rebind_stale_handle, stale_retries_max
 
 # Fitts's-law constants (seconds). MT = a + b·log₂(2D/W). The defaults give
 # plausible sub-second moves for typical web targets; both are tunable per run.
@@ -299,10 +300,29 @@ class PointerControl:
 
         # Resolve the locator to on-screen bounds + current cursor position.
         located = await session.send({"op": "locate", "locator": locator})
+        rebounds: list[dict] = []
+        if not isinstance(located, dict) or located.get("bounds") is None:
+            # The element no longer locates (it detached / the page re-rendered). Bounded
+            # retry-on-stale (navigation-reliability layer): re-capture the surface and re-bind
+            # the SAME control by identity (role+name+nth), then retry — up to the run's
+            # stale-retry budget. The harness recovers; the model is not relied on to notice.
+            attempts = stale_retries_max(ctx)
+            if attempts > 0:
+                recovered = await rebind_stale_handle(
+                    ctx, session, handle, locator, retries_max=attempts, rebounds=rebounds)
+                if recovered is not None:
+                    located = recovered
         if not isinstance(located, dict) or located.get("bounds") is None:
             reason = located.get("error") if isinstance(located, dict) else "bad response"
             # A handle that no longer resolves is an escalation, not a failure.
-            return {"stale_handle": handle, "error": f"could not locate target: {reason}"}
+            out: dict = {"stale_handle": handle, "error": f"could not locate target: {reason}"}
+            if rebounds:
+                # Re-binding was attempted and exhausted: record the attempts and flag the
+                # gated grounding/vision escalation (the action-surface-blind detector reads it),
+                # so a persistently-stale element climbs the existing ladder, not loops.
+                out["handle_rebound"] = rebounds
+                out["stale_exhausted"] = True
+            return out
 
         start = tuple(located.get("cursor", [0.0, 0.0]))[:2]
         target = Target(bounds=[float(v) for v in located["bounds"]])
@@ -325,7 +345,7 @@ class PointerControl:
         # The path lands on the event log via the observation — the audit story
         # for "where did the cursor go" (§12.2). Samples included for replay; the
         # summary keeps the common read cheap.
-        return {
+        result: dict = {
             "pointer": {
                 "handle": handle,
                 "clicked": op == "move_click",
@@ -336,3 +356,8 @@ class PointerControl:
             },
             "samples": dispatch["samples"],
         }
+        if rebounds:
+            # The act succeeded only after a bounded re-bind: carry the rebound record so the
+            # loop logs data.handle.rebound (the recovery is auditable, not silent).
+            result["handle_rebound"] = rebounds
+        return result

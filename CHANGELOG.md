@@ -7,6 +7,26 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — navigation-reliability layer, primitive 3: bounded live retry-on-stale
+Recover a detached element in the LIVE path by re-resolving the SAME control by IDENTITY
+(role+name+nth), bounded and event-sourced — bringing zu's replay-only soft-miss tolerance to
+the live loop as a generic primitive, while the model keeps holding only an opaque handle.
+- **`Budget.stale_retries_max`** (default `2`) — the hard cap on harness-level retry-on-stale,
+  so recovery can never loop forever. ON by default: it reuses the existing `axtree`/`locate`
+  ops (no new server support) and only ever engages on a stale miss (a pure recovery).
+- **`zu_tools.rebind.rebind_stale_handle()`** — on a stale `locate`, re-captures the surface
+  (`op=axtree` → `reduce_surface`), refreshes the run's shared handle_map, re-binds the same
+  control by (role,name,nth) to its fresh handle, and re-locates, up to the budget. The locator
+  stays harness-side; the record carries opaque handles + role only (never the accessible name).
+- **`Pointer`** integration: a stale handle is re-bound and re-dispatched automatically; on
+  exhaustion it flags `stale_exhausted`, which the **`action-surface-blind` detector** now reads
+  to climb the existing gated vision-escalation ladder (pixels can locate what the handle path
+  can't) — never an infinite loop, never model-authored recovery code.
+- **`data.handle.rebound`** event, emitted by the loop per rebound attempt.
+- New `zu_tools._session.handle_map_of()` (full-map copy for nth disambiguation).
+- Offline-proven (recovery, bounded exhaustion, control-gone, detector escalation, loop
+  emission) with a fake session; no live browser, network, or Docker.
+
 ### Added — navigation-reliability layer, primitive 2: harness-owned auto-settle
 A harness-owned, **budget-bounded** wait for a browser surface to quiesce before/after an act
 — so settling is an automatic precondition of acting, not a `wait_until`/`wait_ms` the model
