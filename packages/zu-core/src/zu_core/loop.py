@@ -560,14 +560,23 @@ class _Ladder:
     nowhere to climb: it ends the run, which is the step-4 behaviour preserved.
     """
 
-    def __init__(self, tools: dict[str, Any], max_tier: int) -> None:
+    def __init__(self, tools: dict[str, Any], max_tier: int, *, quarantined: bool = False) -> None:
         self._all = tools
         self.current = 1
         top = max((_tier_of(t) for t in tools.values()), default=1)
         self.ceiling = min(max_tier, top)
+        # Quarantined run-mode (#83): a tool-less reader. The ladder offers NOTHING
+        # at any tier, so the policy is structurally incapable of acting — egress is
+        # denied because the only path off-box (a tool) is never on the menu. A tool
+        # call that arrives anyway is the content trying to escape (refused in
+        # ``_invoke`` with a high-signal event), not a normal dispatch.
+        self._quarantined = quarantined
 
     def active(self) -> dict[str, Any]:
-        """The tools the model may use right now: tier <= current tier."""
+        """The tools the model may use right now: tier <= current tier (NONE when
+        the run is quarantined — a tool-less reader, #83)."""
+        if self._quarantined:
+            return {}
         return {n: t for n, t in self._all.items() if _tier_of(t) <= self.current}
 
     def schemas(self) -> list[dict]:
@@ -608,6 +617,9 @@ class _Run:
         # Run mode (ZU-RAIL-2): "execute" (default) or "explore". In explore the
         # loop disarms capability-bearing tool calls (stub instead of execute).
         self.mode: str = str(getattr(spec, "mode", "execute") or "execute")
+        # Quarantined run-mode (#83): a tool-less, egress-free reader for untrusted
+        # content. The ladder offers no tools and ``_invoke`` refuses any tool call.
+        self.quarantined: bool = bool(getattr(spec, "quarantined", False))
         # Durable per-grant state (ZU-CD-4): the injected store or the in-memory
         # default (a cache over ``harness.grant.updated`` events).
         self.grant_state: Any = grants if grants is not None else InMemoryGrantStore()
@@ -633,6 +645,7 @@ class _Run:
         self._ctx.execution = self.exec_ledger
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
+        self._ctx.quarantined = self.quarantined
         self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
 
     async def emit(
@@ -667,6 +680,7 @@ class _Run:
         self._ctx.annotations = annotations
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
+        self._ctx.quarantined = self.quarantined
         return self._ctx
 
     def raise_taint(self, source: str, detail: str | None = None) -> bool:
@@ -1073,7 +1087,7 @@ async def _run_task(
     enforce_containment(containment, tools)
 
     # The tier ladder gates which tools the model sees; the run starts at tier 1.
-    ladder = _Ladder(tools, spec.max_tier)
+    ladder = _Ladder(tools, spec.max_tier, quarantined=run.quarantined)
 
     start = time.monotonic()
     tokens = 0
@@ -1452,6 +1466,32 @@ async def _invoke(
         invoked_payload["ctx"] = dict(annotations)
     invoked_id = await run.emit(ev.TOOL_INVOKED, invoked_payload, parent=turn, source=name)
     call = ToolCall(name=name, args=args)
+    # Quarantined run-mode (#83): the reader was offered an EMPTY tool set, so ANY
+    # tool call here is the untrusted content trying to ACT — a high-signal escape
+    # attempt, refused BEFORE gates/execution. Surface it (don't silently drop it),
+    # raise run-level taint, and return a hard-error observation. This is what makes
+    # a quarantined reader a PROVABLE mode: injection is structurally contained to a
+    # data-integrity problem (the typed facts it returns), never a control-flow one.
+    if run.quarantined:
+        if run.raise_taint("quarantine_escape"):
+            await run.emit(
+                ev.TAINT_RAISED,
+                {"source": "quarantine_escape", "detail": f"tool call {name!r} in quarantined run"},
+                parent=invoked_id,
+                source="quarantine",
+            )
+        await run.emit(
+            ev.QUARANTINE_ESCAPE_ATTEMPT,
+            {"tool": name, "args": args},
+            parent=invoked_id,
+            source="quarantine",
+        )
+        obs: dict = {
+            "error": f"quarantined run refuses all tool calls; {name!r} was blocked",
+            "blocked": "quarantine_escape",
+        }
+        await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
+        return obs
     if approved_key is not None:
         # Consume-once (ZU-CD-6): a human approval authorises EXACTLY ONE
         # irreversible side effect. Claim the approved key BEFORE executing — a
@@ -1468,8 +1508,8 @@ async def _invoke(
                 parent=invoked_id,
                 source="human",
             )
-            obs: dict = {"error": "approved invocation already executed",
-                         "blocked": "duplicate_execution"}
+            obs = {"error": "approved invocation already executed",
+                   "blocked": "duplicate_execution"}
             await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
             return obs
         await run.flush_claims(parent=invoked_id)

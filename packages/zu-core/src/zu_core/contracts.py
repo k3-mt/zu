@@ -56,6 +56,13 @@ class TaskSpec(BaseModel):
     # loop reads it; what a stub returns and when to flip explore→execute is the
     # consumer's policy.
     mode: str = "execute"
+    # Quarantined run-mode (#83): a tool-less, egress-free reader for UNTRUSTED
+    # content. When True the loop offers an EMPTY tool set and refuses any tool call
+    # as a hard error (recording ``harness.quarantine.escape_attempt`` + raising
+    # taint), so injection in the content cannot become an ACTION — it is contained
+    # to the typed facts the reader returns. The keystone of the dual-LLM
+    # "quarantined reader / privileged planner" pattern, as a provable mode.
+    quarantined: bool = False
 
 
 class Result(BaseModel):

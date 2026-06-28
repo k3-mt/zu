@@ -39,6 +39,11 @@ GROUPS = {
     "sinks": "zu.sinks",
     "policies": "zu.policies",
     "triggers": "zu.triggers",
+    # Discovery/trust kinds — the ModelProvider siblings for "find the site" (#81)
+    # and "who is safe to transact with" (#84). Ports in zu_core.ports; reference
+    # impls are plugins, discovered like any other kind.
+    "retrieval_providers": "zu.retrieval_providers",
+    "reputation_providers": "zu.reputation_providers",
     # Security-conformance kinds (ports in zu_core.ports; impls are plugins):
     "gates": "zu.gates",
     "channels": "zu.channels",
@@ -274,6 +279,8 @@ sink = kind_decorator("sinks")
 policy = kind_decorator("policies")
 trigger = kind_decorator("triggers")
 gate = kind_decorator("gates")
+retrieval_provider = kind_decorator("retrieval_providers")
+reputation_provider = kind_decorator("reputation_providers")
 channel = kind_decorator("channels")
 arbiter = kind_decorator("replay_arbiters")
 monitor = kind_decorator("monitors")
