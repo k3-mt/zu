@@ -27,6 +27,26 @@ must remember to pass.
 - Offline-proven (`settle()` unit + Browser integration + loop emission); no live browser,
   network, or Docker. (The container browser server's `op=quiescence` read is the live arm.)
 
+### Added — navigation-reliability layer, primitive 1: native action-effect verification
+The first of the native navigation-reliability primitives (clean-room behavior matrix in
+`docs/navigation-reliability/HARVEST.md`). Generalises the content-free silent-no-op oracle
+that had been living DOWNSTREAM in Conduit (`conduit_api.effect.verify_effect`) UP into
+zu-core, so every consumer inherits it.
+- **`SurfaceView.fingerprint()`** (`zu_core.surface`) — a stable digest folding each
+  affordance's role+label+value+states (and title/url) but NOT the per-render handle, so a
+  click that merely renumbers handles reads as *no change* while a state-only change (a radio
+  became `checked`, a swatch `selected`) moves the fingerprint — the finer signal the coarse
+  `surface_state_id` cannot see.
+- **`zu_core.effect.verify_effect(before, after, acted_handle)`** — a pure, content-free
+  four-signal before/after diff over `SurfaceView`, returning `"silent-no-op"` or `None`.
+- **`data.effect.verified`** event + loop integration: when a handle-click is bracketed by
+  two captured action surfaces, the loop's effect checkpoint records the verdict
+  (`{acted_handle, result, before_fp, after_fp}`) and surfaces a `silent-no-op` back to the
+  policy as a non-fatal `effect` key so it can react instead of charging on. Opportunistic,
+  deterministic, replayable; keyed on observation SHAPE (tool-agnostic), never control-flow.
+- Proven offline with `ScriptedProvider` + fake tools (no live model, network, or Docker).
+  (Follow-up: Conduit's `effect.py` can now delegate to `zu_core.effect`.)
+
 ## [0.7.0] — 2026-06-27
 
 ### Added/Fixed — outcome inference follow-up: checkout on-path + terminal vs navigational (#71)

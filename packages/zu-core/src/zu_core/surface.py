@@ -19,6 +19,8 @@ These are frozen value objects: pydantic + stdlib only, no model, no I/O.
 
 from __future__ import annotations
 
+import hashlib
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -57,3 +59,23 @@ class SurfaceView(BaseModel):
     context: tuple[str, ...] = ()
     blind: bool = False
     blind_reason: str | None = None
+
+    def fingerprint(self) -> str:
+        """A stable, content-free digest of the surface's SHAPE — the before/after
+        oracle action-effect verification compares (``zu_core.effect.verify_effect``).
+
+        It folds ``title``/``url`` and, per affordance in document order,
+        ``role``/``label``/``value``/``states`` — but DELIBERATELY NOT the opaque
+        ``handle``: a click that re-renders a page often renumbers every handle while
+        the surface is otherwise identical, and that must read as *no change*, not a
+        spurious effect. Conversely a state-only change (a radio became ``checked``, a
+        swatch became ``selected``) DOES move the fingerprint — which is exactly what
+        the coarse ``surface_state_id`` (url+title, or sorted handles) cannot see, and
+        why effect verification needs this finer digest. Content-free by construction:
+        labels/roles/states are perception structure, never page prose (§9)."""
+        parts = [f"t={self.title}", f"u={self.url}"]
+        for a in self.affordances:
+            states = ",".join(a.states)
+            parts.append(f"r={a.role}\x1fl={a.label}\x1fv={a.value or ''}\x1fs={states}")
+        basis = "\x1e".join(parts)
+        return "sfp_" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]

@@ -148,6 +148,12 @@ RAIL_VERIFIED = "harness.rail.verified"
 # {"tool"}. The tool did not execute — a stub observation was returned instead, so
 # pathfinding on a hostile surface is never armed with live instruments.
 RAIL_DISARMED = "harness.rail.disarmed"
+# A tool call was attempted inside a QUARANTINED run (#83): {"tool", "args"}. The
+# run was offered an EMPTY tool set, so a tool call can only be the untrusted
+# content trying to ACT — a high-signal escape attempt. The loop refuses it (no
+# execution), raises run-level taint, and surfaces THIS event rather than silently
+# dropping the call: in a quarantined reader an attempted action IS the alarm.
+QUARANTINE_ESCAPE_ATTEMPT = "harness.quarantine.escape_attempt"
 
 # --- harness.pipeline.* — multi-phase orchestration (zu.Pipeline) ------------
 # A pipeline chains runs under ONE shared trace_id; these record its boundaries
@@ -191,6 +197,16 @@ CONTENT_CAPTURED = "data.content.captured"
 #  float, "dest": {"x": float, "y": float}, "seed": str}. Emitted by PointerControl
 # after a successful dispatch.
 POINTER_DISPATCHED = "data.pointer.dispatched"
+# Action-effect verification over a handle-click bracketed by two captured surfaces
+# (the generalisation UP into zu-core of conduit's verify_effect). data.* because it is
+# perception the agent INFERRED about its own last action — "did the act change the
+# surface, or was it a silent no-op?". Content-free: the payload carries the acted handle,
+# the verdict, and the two SHAPE fingerprints — never page prose. Payload:
+# {"acted_handle": str, "result": "silent-no-op"|"changed", "before_fp": str,
+#  "after_fp": str}. Emitted by the loop's effect checkpoint when a pointer-click is
+# followed by a fresh action surface; a "silent-no-op" is also surfaced to the policy as a
+# non-fatal ``effect`` key on the after-observation so it can react (retry differently).
+EFFECT_VERIFIED = "data.effect.verified"
 # A harness-owned auto-settle waited for the surface to quiesce before/after an act
 # (navigation-reliability layer). data.* because it records a perception fact the runtime
 # established — "I waited for the page to go DOM-stable / network-idle / SPA-quiescent".
@@ -279,6 +295,7 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         GRANT_REVOKED,
         RAIL_VERIFIED,
         RAIL_DISARMED,
+        QUARANTINE_ESCAPE_ATTEMPT,
         PIPELINE_STARTED,
         PIPELINE_PHASE_STARTED,
         PIPELINE_PHASE_COMPLETED,
@@ -294,6 +311,7 @@ DATA_TYPES: frozenset[str] = frozenset(
         SURFACE_CAPTURED,
         CONTENT_CAPTURED,
         POINTER_DISPATCHED,
+        EFFECT_VERIFIED,
         SETTLE_WAITED,
         PATTERN_RECOGNIZED,
         SHADOW_SESSION_START,

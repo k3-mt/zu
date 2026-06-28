@@ -1,6 +1,6 @@
 [project]
 name = "zu-providers"
-version = "0.7.0"
+version = "0.8.0"
 description = "Zu model-provider adapters: scripted, anthropic, openai-compatible"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Typing :: Typed",
 ]
-dependencies = ["zu-core==0.7.0"]
+dependencies = ["zu-core==0.8.0"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
@@ -25,6 +25,16 @@ openai = ["openai>=1.40"]
 scripted = "zu_providers.scripted:ScriptedProvider"
 anthropic = "zu_providers.anthropic:AnthropicProvider"
 openai-compatible = "zu_providers.openai_compatible:OpenAICompatibleProvider"
+
+# RetrievalProvider — typed vendor/product discovery (#81). The scripted fake is
+# the offline default; the web_search reducer is the open-web fallback.
+[project.entry-points."zu.retrieval_providers"]
+scripted = "zu_providers.retrieval:ScriptedRetrievalProvider"
+web_search = "zu_providers.retrieval:WebSearchRetrievalProvider"
+
+# ReputationProvider — the deterministic merchant-trust scorer (#84).
+[project.entry-points."zu.reputation_providers"]
+deterministic = "zu_providers.reputation:DeterministicReputationScorer"
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

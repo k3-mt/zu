@@ -21,6 +21,19 @@ tier 1. The loop only offers tools at or below the current tier; a detector
 `ESCALATE` climbs the ladder. The browser runs in a sandbox behind a seam tests
 can freeze (a saved rendered page), so the escalation arc is proven offline.
 
+## Structured extraction — `extract` (the safe read→decide bridge, #82)
+
+`zu_tools.extract(view, schema, provider, *, want=WANT_FULL, instruction="")`
+turns a fenced `ContentView` (the reading projection, #41) into typed facts
+against a caller-supplied JSON schema. The model runs in an **extraction-only**
+role over the `TrustedFrame` (content as DATA, never instructions), and its output
+is filtered to the schema — a field is a typed value or it is dropped. So an
+injected instruction in the page can never become a field; only structured facts
+flow downstream. Returns an `ExtractResult` (`fields`, per-field `provenance`,
+`unmatched`). The model call is injected (any `ModelProvider`), so it is exercised
+offline with a `ScriptedProvider` at $0. Pairs with the discovery/trust ports in
+`zu-providers` (#81/#84) for the open-web vendor-research flow.
+
 ## Extend
 
 Implement the `Tool` shape (see [`AGENTS.md`](../../AGENTS.md) → *Recipe: add a
