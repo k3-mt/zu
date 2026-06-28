@@ -197,6 +197,16 @@ CONTENT_CAPTURED = "data.content.captured"
 #  float, "dest": {"x": float, "y": float}, "seed": str}. Emitted by PointerControl
 # after a successful dispatch.
 POINTER_DISPATCHED = "data.pointer.dispatched"
+# Action-effect verification over a handle-click bracketed by two captured surfaces
+# (the generalisation UP into zu-core of conduit's verify_effect). data.* because it is
+# perception the agent INFERRED about its own last action — "did the act change the
+# surface, or was it a silent no-op?". Content-free: the payload carries the acted handle,
+# the verdict, and the two SHAPE fingerprints — never page prose. Payload:
+# {"acted_handle": str, "result": "silent-no-op"|"changed", "before_fp": str,
+#  "after_fp": str}. Emitted by the loop's effect checkpoint when a pointer-click is
+# followed by a fresh action surface; a "silent-no-op" is also surfaced to the policy as a
+# non-fatal ``effect`` key on the after-observation so it can react (retry differently).
+EFFECT_VERIFIED = "data.effect.verified"
 # A pattern recognizer matched an archetype over one step's action surface
 # (Engineering Design §5). data.* because it is perception the agent
 # INFERRED — the auditable record of "what did the agent recognize here" — NOT
@@ -292,6 +302,7 @@ DATA_TYPES: frozenset[str] = frozenset(
         SURFACE_CAPTURED,
         CONTENT_CAPTURED,
         POINTER_DISPATCHED,
+        EFFECT_VERIFIED,
         PATTERN_RECOGNIZED,
         SHADOW_SESSION_START,
         SHADOW_SESSION_END,
