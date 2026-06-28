@@ -148,6 +148,12 @@ RAIL_VERIFIED = "harness.rail.verified"
 # {"tool"}. The tool did not execute — a stub observation was returned instead, so
 # pathfinding on a hostile surface is never armed with live instruments.
 RAIL_DISARMED = "harness.rail.disarmed"
+# A tool call was attempted inside a QUARANTINED run (#83): {"tool", "args"}. The
+# run was offered an EMPTY tool set, so a tool call can only be the untrusted
+# content trying to ACT — a high-signal escape attempt. The loop refuses it (no
+# execution), raises run-level taint, and surfaces THIS event rather than silently
+# dropping the call: in a quarantined reader an attempted action IS the alarm.
+QUARANTINE_ESCAPE_ATTEMPT = "harness.quarantine.escape_attempt"
 
 # --- harness.pipeline.* — multi-phase orchestration (zu.Pipeline) ------------
 # A pipeline chains runs under ONE shared trace_id; these record its boundaries
@@ -270,6 +276,7 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         GRANT_REVOKED,
         RAIL_VERIFIED,
         RAIL_DISARMED,
+        QUARANTINE_ESCAPE_ATTEMPT,
         PIPELINE_STARTED,
         PIPELINE_PHASE_STARTED,
         PIPELINE_PHASE_COMPLETED,

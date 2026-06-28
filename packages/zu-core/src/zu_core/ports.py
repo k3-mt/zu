@@ -46,6 +46,10 @@ INTERFACE_VERSION: dict[str, int] = {
     "sinks": 1,
     "policies": 1,
     "triggers": 1,
+    # Discovery/trust ports (the ModelProvider siblings for "find the site" and
+    # "who is safe to transact with"; port shapes in this module, impls are plugins):
+    "retrieval_providers": 1,  # RetrievalProvider — typed vendor/product discovery (#81)
+    "reputation_providers": 1,  # ReputationProvider — computed merchant trust (#84)
     # Security-conformance ports (the port shapes live in this module; the
     # implementations are plugins, several in sibling packages):
     "gates": 1,  # InvocationGate — the pre-execution gate (ZU-CORE-2)
@@ -153,6 +157,110 @@ class Policy(Protocol):
     async def act(self, observation: Observation, tools: list[ToolSpec]) -> Action: ...
 
 
+# --- the retrieval provider — the discovery sibling of ModelProvider (#81) -
+#
+# ``ModelProvider`` is the "act on a NAMED site" seam. ``RetrievalProvider`` is its
+# missing sibling for "FIND the site": the user says *"buy a dog collar"* with no
+# vendor, so discovery must return **typed candidates**, not raw HTML. That typing
+# is the whole point — Zu's content-free discipline says the planning model never
+# ingests untrusted prose, so discovery preserves it: a provider returns
+# ``Candidate`` records (facts: title, url, domain, price, …), and shortlisting/
+# ranking happens over a schema, never over persuasive page content. Backed by a
+# structured shopping/search API or, as a fallback, the existing ``web_search``
+# tool reduced to typed records. Egress is declared per provider (fail-closed, like
+# every other capability), so discovery cannot reach outside its allowlist.
+
+
+class RetrievalQuery(BaseModel):
+    """The discovery request — the spec normalised to query terms + typed
+    constraints. ``constraints`` is a free dict (``price_max``, ``ships_to``,
+    ``in_stock``, …) a provider applies as far as its backend supports, so a new
+    constraint needs no shape change here."""
+
+    text: str
+    constraints: dict = Field(default_factory=dict)
+    limit: int = 20
+
+
+class Candidate(BaseModel):
+    """One typed discovery result — FACTS, never instructions.
+
+    A candidate is the content-free unit the ranker scores: the planning model
+    never has to read a product page to shortlist. ``price`` is in MINOR units
+    (cents/pence) so money is an int, never a parsed-prose float. ``source`` is the
+    provenance — which provider/feed produced it — so a verdict is auditable back
+    to where the fact came from. Frozen + hashable so a shortlist round-trips on
+    the event log and dedupes by identity."""
+
+    model_config = {"frozen": True}
+
+    title: str
+    url: str
+    domain: str
+    price: int | None = None  # minor units (cents/pence); never a parsed-prose float
+    currency: str | None = None
+    in_stock: bool | None = None
+    image: str | None = None
+    source: str = ""  # which provider/feed produced it (provenance)
+
+
+@runtime_checkable
+class RetrievalProvider(Protocol):
+    name: str
+
+    async def search(self, query: RetrievalQuery) -> list[Candidate]: ...
+
+
+# --- the reputation provider — computed, auditable merchant trust (#84) -----
+#
+# When the AGENT (not the user) picks the vendor, the system chooses *who gets the
+# money* — a new attack surface (scam / SEO-poisoned / non-fulfilling shops). This
+# is the seam for a **deterministic, auditable merchant-trust score** computed from
+# external, **hard-to-forge** domain signals — NEVER from the page's persuasive
+# content, so it is inherently injection-immune. It generalises the *static*
+# domain-allowlist into a *computed* trust decision.
+#
+# Design principles a reference impl carries (see the deterministic scorer):
+#   * Forge-resistance weighting — weight a signal by how expensive it is to fake
+#     (HTTPS-present is weak; domain age + third-party review depth are strong).
+#   * Asymmetry — strong NEGATIVES, weak positives (most good signals are
+#     necessary-not-sufficient; most decisive signals are negatives).
+#   * Hard gates (veto → REFUSE regardless of score): on a reputable blocklist, no
+#     valid HTTPS, suspended/parked/sinkholed, or a high aggregator risk score.
+#   * Two axes — a "malicious?" axis (threat-intel aggregators) AND a
+#     "real shop that ships?" axis (registration, review depth+age, domain age);
+#     a clean-but-non-fulfilling scam passes every malware check, so neither
+#     axis alone suffices.
+#   * Domain-level, not page-level — cacheable per registrable domain, immune to
+#     on-page manipulation.
+
+
+class ReputationVerdict(BaseModel):
+    """The auditable trust decision for one registrable domain.
+
+    ``band`` is the actionable outcome; ``score`` (0..100, documented weights) is
+    the underlying number. ``gate`` is the veto reason when ``band == "refuse"``
+    (``None`` otherwise) — a hard gate refuses regardless of score. ``signals`` is
+    the per-signal value + weight (the auditable breakdown), and ``provenance``
+    records which source produced each signal, so the whole verdict is replayable
+    and contestable, never a black box."""
+
+    model_config = {"frozen": True}
+
+    band: str  # "trusted" | "caution" | "refuse"
+    score: int  # 0..100
+    gate: str | None = None  # the veto reason if band == "refuse"
+    signals: dict = Field(default_factory=dict)  # per-signal value + weight
+    provenance: dict = Field(default_factory=dict)  # which source produced each signal
+
+
+@runtime_checkable
+class ReputationProvider(Protocol):
+    name: str
+
+    async def assess(self, domain: str) -> ReputationVerdict: ...
+
+
 # --- the capability envelope ---------------------------------------------
 #
 # The security thesis (see PHILOSOPHY.md §5–6): a plugin **declares** the
@@ -247,6 +355,17 @@ class RunContext(BaseModel):
     # Run mode (ZU-RAIL-2): "execute" (default) or "explore"; a gate/tool reads it
     # to disarm in exploration. The loop also enforces it mechanically.
     mode: str = "execute"
+    # Quarantined run-mode (#83): a tool-less, egress-free reader for processing
+    # UNTRUSTED content. When True the loop offers the policy an EMPTY tool set and
+    # refuses any tool call as a hard error — so prompt injection in the content is
+    # STRUCTURALLY downgraded from a control-flow attack ("make the agent *do*
+    # something") to a data-integrity one ("make it *believe* something"). A
+    # tool-call attempt is itself a high-signal event (the content tried to act):
+    # the loop surfaces ``harness.quarantine.escape_attempt`` and raises taint. This
+    # is the "quarantined reader / privileged planner" (dual-LLM) pattern made a
+    # provable mode, composing the domain-allowlist / declarative policies / content
+    # fencing into one contract rather than reassembled per consumer.
+    quarantined: bool = False
     # Durable per-grant state handle (ZU-CD-4): a ``GrantStore`` (kept ``Any`` so
     # the contract stays a thin value object, matching ``spec``/``observation``).
     grants: Any = None
