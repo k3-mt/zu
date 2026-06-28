@@ -32,6 +32,16 @@ class Budget(BaseModel):
     wall_time_s: int = 120
     max_tool_calls: int = 32  # per single model response — caps a runaway turn
     # --- the reliability budget (navigation-reliability layer) -----------------
+    # A dedicated, SMALL bound for the auto-settle gate, distinct from the global
+    # wall clock: when enabled, a settle (wait for the surface to go DOM-stable /
+    # network-idle / SPA-quiescent before/after an act) polls at most this many
+    # milliseconds, then gives up and proceeds — so a hostile or buggy page can NEVER
+    # stall the runtime on a settle. It is HARNESS-owned (not a model-chosen wait) and,
+    # like every other reliability seam (gates/monitors/arbiters), is INERT UNTIL USED:
+    # 0 disables auto-settle (the pre-layer behaviour); a run/agent opts in by setting it
+    # positive, at which point settling becomes an automatic precondition of every act
+    # wherever the session implements the quiescence probe.
+    settle_ms_max: int = 0
     # The hard cap on harness-level retry-on-stale: when an act's target handle no longer
     # locates (the element detached / the page re-rendered), the runtime re-resolves the SAME
     # control by identity (role+name+nth) and re-dispatches at most this many times before
@@ -64,6 +74,13 @@ class TaskSpec(BaseModel):
     # loop reads it; what a stub returns and when to flip explore→execute is the
     # consumer's policy.
     mode: str = "execute"
+    # Quarantined run-mode (#83): a tool-less, egress-free reader for UNTRUSTED
+    # content. When True the loop offers an EMPTY tool set and refuses any tool call
+    # as a hard error (recording ``harness.quarantine.escape_attempt`` + raising
+    # taint), so injection in the content cannot become an ACTION — it is contained
+    # to the typed facts the reader returns. The keystone of the dual-LLM
+    # "quarantined reader / privileged planner" pattern, as a provable mode.
+    quarantined: bool = False
 
 
 class Result(BaseModel):

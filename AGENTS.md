@@ -79,6 +79,8 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 | a sandbox backend           | `zu-backends`    | `zu.backends`     | `SandboxBackend`|
 | an event sink (storage)     | `zu-backends`    | `zu.sinks`        | `EventSink`     |
 | a policy (the decision-maker) | `zu-providers` | `zu.policies`     | `Policy`        |
+| typed vendor/product discovery | `zu-providers` | `zu.retrieval_providers` | `RetrievalProvider` |
+| a computed merchant-trust score | `zu-providers` | `zu.reputation_providers` | `ReputationProvider` |
 | a trigger (inbound event)   | `zu-backends`    | `zu.triggers`     | `Trigger`       |
 | a pre-execution gate        | (your pkg)       | `zu.gates`        | `InvocationGate`|
 | a harness-owned channel     | `zu-backends`    | `zu.channels`     | `Channel`       |
@@ -103,6 +105,20 @@ embodied controller implements it directly; `Trigger` (`listen()`) is the
 inbound mirror of `EventSink`, carrying **untrusted** payloads. Both the
 observation and the action are typed multimodal `Content` (`Text`/`Image`/
 `Audio`) in `zu_core.content`.
+
+The **open-web research** seams (the vendor-research capability set, #81–84) are the
+discovery siblings of `ModelProvider`: `RetrievalProvider` (`search(query) ->
+list[Candidate]`) FINDS the site and returns typed candidate facts, never prose;
+`ReputationProvider` (`assess(domain) -> ReputationVerdict`) is a computed,
+auditable merchant-trust decision over hard-to-forge domain signals (a deterministic
+reference scorer ships in `zu-providers`). Two more pieces compose with them:
+`zu_tools.extract` (#82) turns a fenced `ContentView` into typed facts against a
+schema (the safe read→decide bridge — only typed values flow downstream, never
+injected instructions), and the **quarantined run-mode** (#83, `TaskSpec(...,
+quarantined=True)`) is a provable tool-less/egress-free reader — the loop offers an
+empty tool set and refuses any tool call as a high-signal escape attempt, so
+injection in untrusted content is contained to a data-integrity problem, never an
+action.
 
 Plugins are discovered three ways, all resolving into one registry: installed
 packages via entry points (`pyproject.toml`), the in-process decorators

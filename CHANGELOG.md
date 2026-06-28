@@ -27,6 +27,46 @@ the live loop as a generic primitive, while the model keeps holding only an opaq
 - Offline-proven (recovery, bounded exhaustion, control-gone, detector escalation, loop
   emission) with a fake session; no live browser, network, or Docker.
 
+### Added — navigation-reliability layer, primitive 2: harness-owned auto-settle
+A harness-owned, **budget-bounded** wait for a browser surface to quiesce before/after an act
+— so settling is an automatic precondition of acting, not a `wait_until`/`wait_ms` the model
+must remember to pass.
+- **`Budget.settle_ms_max`** (the *ReliabilityBudget*) — a dedicated small bound, distinct
+  from the global wall clock, so a settle can NEVER stall the run. Inert until used
+  (default `0`, like the gate/monitor/arbiter seams); a run/agent opts in by setting it
+  positive, at which point auto-settle engages wherever the session implements the probe.
+- **`zu_tools.settle.settle()`** — polls a generic session quiescence read
+  (`op=quiescence` → `{quiescent, fingerprint}`) until the surface is quiescent (pre-act) or
+  has stopped mutating — two equal fingerprints (post-act = SPA-settled, the
+  "always-terminating signal" discipline). Bounded by an integer poll count derived from the
+  budget (no wall-clock read → deterministic/replayable); a server that lacks the probe is a
+  transparent no-op.
+- **`Browser`** integration: `op=open` settles after navigation, `op=act` settles pre + post.
+- **`data.settle.waited`** event, emitted by the loop tool-agnostically for each `settle`
+  entry an observation carries.
+- Offline-proven (`settle()` unit + Browser integration + loop emission); no live browser,
+  network, or Docker. (The container browser server's `op=quiescence` read is the live arm.)
+
+### Added — navigation-reliability layer, primitive 1: native action-effect verification
+The first of the native navigation-reliability primitives (clean-room behavior matrix in
+`docs/navigation-reliability/HARVEST.md`). Generalises the content-free silent-no-op oracle
+that had been living DOWNSTREAM in Conduit (`conduit_api.effect.verify_effect`) UP into
+zu-core, so every consumer inherits it.
+- **`SurfaceView.fingerprint()`** (`zu_core.surface`) — a stable digest folding each
+  affordance's role+label+value+states (and title/url) but NOT the per-render handle, so a
+  click that merely renumbers handles reads as *no change* while a state-only change (a radio
+  became `checked`, a swatch `selected`) moves the fingerprint — the finer signal the coarse
+  `surface_state_id` cannot see.
+- **`zu_core.effect.verify_effect(before, after, acted_handle)`** — a pure, content-free
+  four-signal before/after diff over `SurfaceView`, returning `"silent-no-op"` or `None`.
+- **`data.effect.verified`** event + loop integration: when a handle-click is bracketed by
+  two captured action surfaces, the loop's effect checkpoint records the verdict
+  (`{acted_handle, result, before_fp, after_fp}`) and surfaces a `silent-no-op` back to the
+  policy as a non-fatal `effect` key so it can react instead of charging on. Opportunistic,
+  deterministic, replayable; keyed on observation SHAPE (tool-agnostic), never control-flow.
+- Proven offline with `ScriptedProvider` + fake tools (no live model, network, or Docker).
+  (Follow-up: Conduit's `effect.py` can now delegate to `zu_core.effect`.)
+
 ## [0.7.0] — 2026-06-27
 
 ### Added/Fixed — outcome inference follow-up: checkout on-path + terminal vs navigational (#71)

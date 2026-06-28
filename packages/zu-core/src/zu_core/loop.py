@@ -38,6 +38,7 @@ from uuid import UUID, uuid5
 from . import events as ev
 from .bus import EventBus
 from .contracts import Budget, Event, Result, Status, TaskSpec
+from .effect import verify_effect
 from .grants import InMemoryGrantStore
 from .ledger import InMemoryExecutionLedger
 from .ports import (
@@ -57,6 +58,7 @@ from .ports import (
 from .registry import REGISTRY, Registry
 from .runlifecycle import close_run as _run_cleanup
 from .security import SecurityBlock, _needs_containment, enforce_containment
+from .surface import SurfaceView
 from .track import MAX_REPLAY_WAIT_MS, Track, TrackStep, replay_extra_delay_ms
 
 log = logging.getLogger("zu.loop")
@@ -293,6 +295,19 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
             "dest": pointer.get("dest", {}),
             "seed": str(pointer.get("seed", "")),
         }))
+    # A ``settle`` list → one ``data.settle.waited`` per phase (navigation-reliability
+    # layer): the auditable record that the runtime waited (bounded) for the surface to
+    # quiesce before/after an act. Tool-agnostic, keyed on shape like the rest.
+    settle = obs.get("settle")
+    if isinstance(settle, list):
+        for entry in settle:
+            if isinstance(entry, dict):
+                out.append((ev.SETTLE_WAITED, {
+                    "phase": entry.get("phase"),
+                    "ms_waited": entry.get("ms_waited", 0),
+                    "reason": entry.get("reason"),
+                    "polls": entry.get("polls", 0),
+                }))
     # A ``handle_rebound`` list → one ``data.handle.rebound`` per attempt: the auditable
     # record of a bounded retry-on-stale that re-resolved a detached control by identity.
     rebound = obs.get("handle_rebound")
@@ -306,6 +321,77 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
                     "role": entry.get("role"),
                 }))
     return out
+
+
+def _surface_from_obs(obs: dict) -> SurfaceView | None:
+    """Reconstruct the modality-agnostic :class:`SurfaceView` from an ``action_surface``
+    observation (the dict the reducer emitted — affordances, states and all). Pure parsing
+    of a dict the loop already holds: zu-core never imports zu-tools, it only reads the
+    shape. Returns None when the obs carries no (well-formed) surface."""
+    raw = obs.get("action_surface")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return SurfaceView.model_validate({
+            "title": raw.get("title", ""),
+            "url": raw.get("url", ""),
+            "affordances": raw.get("affordances", []),
+            "context": raw.get("context", []),
+            "blind": bool(raw.get("blind", False)),
+            "blind_reason": raw.get("blind_reason"),
+        })
+    except Exception:  # noqa: BLE001 - a malformed surface is simply not verifiable
+        return None
+
+
+def _acted_handle(obs: dict) -> str | None:
+    """The handle a CLICK acted on this step, or None. Only a click (not a bare move) is
+    expected to change the surface, so only a click arms effect verification."""
+    pointer = obs.get("pointer")
+    if isinstance(pointer, dict) and pointer.get("clicked") and pointer.get("handle"):
+        return str(pointer["handle"])
+    return None
+
+
+async def _effect_checkpoint(run: _Run, turn: UUID, name: str, obs: dict) -> None:
+    """Verify the EFFECT of the previous handle-click once the next surface is captured —
+    the generalisation UP into zu-core of conduit's ``verify_effect``. Tool-agnostic, keyed
+    on observation SHAPE exactly like ``_perception_action_events``:
+
+    * a fresh ``action_surface`` reduction RESOLVES a pending click — compare the before
+      surface to this after surface (``zu_core.effect.verify_effect``), emit
+      ``data.effect.verified`` {acted_handle, result, before/after fingerprint}, and surface
+      a ``silent-no-op`` back to the policy as a non-fatal ``effect`` key on the observation
+      so it can react (retry differently) rather than charging on as if the click worked.
+    * a ``pointer`` click ARMS the next check, recording (acted_handle, the last surface) as
+      the ``before``.
+
+    Opportunistic and never control-flow-changing: it fires only when a click is bracketed
+    by two surfaces; absent that it is inert. Deterministic and replayable — a pure
+    comparison of two frozen surfaces, no I/O, no clock."""
+    surf = _surface_from_obs(obs)
+    if surf is not None:
+        if run.pending_effect is not None:
+            acted_handle, before = run.pending_effect
+            run.pending_effect = None
+            result = verify_effect(before, surf, acted_handle)
+            await run.emit(
+                ev.EFFECT_VERIFIED,
+                {
+                    "acted_handle": acted_handle,
+                    "result": result or "changed",
+                    "before_fp": before.fingerprint(),
+                    "after_fp": surf.fingerprint(),
+                },
+                parent=turn,
+                source=name,
+            )
+            if result is not None:
+                obs["effect"] = result  # non-fatal signal: the click changed nothing
+        run.last_surface = surf
+    acted = _acted_handle(obs)
+    if acted is not None and run.last_surface is not None:
+        run.pending_effect = (acted, run.last_surface)
 
 
 # Map-reduce extraction over a too-big page. A blunt cap keeps the first N chars
@@ -572,14 +658,23 @@ class _Ladder:
     nowhere to climb: it ends the run, which is the step-4 behaviour preserved.
     """
 
-    def __init__(self, tools: dict[str, Any], max_tier: int) -> None:
+    def __init__(self, tools: dict[str, Any], max_tier: int, *, quarantined: bool = False) -> None:
         self._all = tools
         self.current = 1
         top = max((_tier_of(t) for t in tools.values()), default=1)
         self.ceiling = min(max_tier, top)
+        # Quarantined run-mode (#83): a tool-less reader. The ladder offers NOTHING
+        # at any tier, so the policy is structurally incapable of acting — egress is
+        # denied because the only path off-box (a tool) is never on the menu. A tool
+        # call that arrives anyway is the content trying to escape (refused in
+        # ``_invoke`` with a high-signal event), not a normal dispatch.
+        self._quarantined = quarantined
 
     def active(self) -> dict[str, Any]:
-        """The tools the model may use right now: tier <= current tier."""
+        """The tools the model may use right now: tier <= current tier (NONE when
+        the run is quarantined — a tool-less reader, #83)."""
+        if self._quarantined:
+            return {}
         return {n: t for n, t in self._all.items() if _tier_of(t) <= self.current}
 
     def schemas(self) -> list[dict]:
@@ -620,6 +715,9 @@ class _Run:
         # Run mode (ZU-RAIL-2): "execute" (default) or "explore". In explore the
         # loop disarms capability-bearing tool calls (stub instead of execute).
         self.mode: str = str(getattr(spec, "mode", "execute") or "execute")
+        # Quarantined run-mode (#83): a tool-less, egress-free reader for untrusted
+        # content. The ladder offers no tools and ``_invoke`` refuses any tool call.
+        self.quarantined: bool = bool(getattr(spec, "quarantined", False))
         # Durable per-grant state (ZU-CD-4): the injected store or the in-memory
         # default (a cache over ``harness.grant.updated`` events).
         self.grant_state: Any = grants if grants is not None else InMemoryGrantStore()
@@ -645,7 +743,14 @@ class _Run:
         self._ctx.execution = self.exec_ledger
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
+        self._ctx.quarantined = self.quarantined
         self.root: UUID | None = None  # event_id of TASK_STARTED; parent of terminal events
+        # Action-effect verification state (generalised UP from conduit). The last
+        # reduced action surface seen this run, and a pending (acted_handle, before)
+        # recorded when a handle-click is dispatched — resolved into a
+        # ``data.effect.verified`` verdict when the next surface is captured.
+        self.last_surface: SurfaceView | None = None
+        self.pending_effect: tuple[str, SurfaceView] | None = None
 
     async def emit(
         self, type_: str, payload: dict | None = None, *,
@@ -679,6 +784,7 @@ class _Run:
         self._ctx.annotations = annotations
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
+        self._ctx.quarantined = self.quarantined
         return self._ctx
 
     def raise_taint(self, source: str, detail: str | None = None) -> bool:
@@ -1085,7 +1191,7 @@ async def _run_task(
     enforce_containment(containment, tools)
 
     # The tier ladder gates which tools the model sees; the run starts at tier 1.
-    ladder = _Ladder(tools, spec.max_tier)
+    ladder = _Ladder(tools, spec.max_tier, quarantined=run.quarantined)
 
     start = time.monotonic()
     tokens = 0
@@ -1464,6 +1570,32 @@ async def _invoke(
         invoked_payload["ctx"] = dict(annotations)
     invoked_id = await run.emit(ev.TOOL_INVOKED, invoked_payload, parent=turn, source=name)
     call = ToolCall(name=name, args=args)
+    # Quarantined run-mode (#83): the reader was offered an EMPTY tool set, so ANY
+    # tool call here is the untrusted content trying to ACT — a high-signal escape
+    # attempt, refused BEFORE gates/execution. Surface it (don't silently drop it),
+    # raise run-level taint, and return a hard-error observation. This is what makes
+    # a quarantined reader a PROVABLE mode: injection is structurally contained to a
+    # data-integrity problem (the typed facts it returns), never a control-flow one.
+    if run.quarantined:
+        if run.raise_taint("quarantine_escape"):
+            await run.emit(
+                ev.TAINT_RAISED,
+                {"source": "quarantine_escape", "detail": f"tool call {name!r} in quarantined run"},
+                parent=invoked_id,
+                source="quarantine",
+            )
+        await run.emit(
+            ev.QUARANTINE_ESCAPE_ATTEMPT,
+            {"tool": name, "args": args},
+            parent=invoked_id,
+            source="quarantine",
+        )
+        obs: dict = {
+            "error": f"quarantined run refuses all tool calls; {name!r} was blocked",
+            "blocked": "quarantine_escape",
+        }
+        await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
+        return obs
     if approved_key is not None:
         # Consume-once (ZU-CD-6): a human approval authorises EXACTLY ONE
         # irreversible side effect. Claim the approved key BEFORE executing — a
@@ -1480,8 +1612,8 @@ async def _invoke(
                 parent=invoked_id,
                 source="human",
             )
-            obs: dict = {"error": "approved invocation already executed",
-                         "blocked": "duplicate_execution"}
+            obs = {"error": "approved invocation already executed",
+                   "blocked": "duplicate_execution"}
             await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
             return obs
         await run.flush_claims(parent=invoked_id)
@@ -1615,6 +1747,10 @@ async def _invoke(
             )
         for etype, payload in _perception_action_events(obs):
             await run.emit(etype, payload, parent=turn, source=name)
+        # Action-effect verification (generalised UP from conduit): when a handle-click is
+        # bracketed by two captured surfaces, record whether it actually changed the surface
+        # (data.effect.verified) and flag a silent no-op back to the policy.
+        await _effect_checkpoint(run, turn, name, obs)
     await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": returned}, parent=turn, source=name)
     return obs
 
