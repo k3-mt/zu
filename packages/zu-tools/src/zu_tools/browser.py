@@ -23,6 +23,7 @@ from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandl
 
 from ._session import close_run, get_or_open, run_key
 from .net import validate_and_pin
+from .settle import settle, settle_budget_ms
 
 _DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
 _OBS_KEYS = ("status", "url", "text", "html", "content", "network",
@@ -134,17 +135,49 @@ class Browser:
                 cmd["height"] = int(height)
             if html:
                 cmd["html"] = True
-            return self._normalise(await self._session.send(cmd))
+            obs = self._normalise(await self._session.send(cmd))
+            # Auto-settle after navigation (navigation-reliability layer): wait, bounded by
+            # the settle budget, for the page to go quiescent / SPA-settled before the model
+            # reads it — a harness precondition, not a model-chosen wait. Inert when the run
+            # carries no settle budget or the session can't answer the probe.
+            post = await settle(self._session, budget_ms=settle_budget_ms(ctx),
+                                phase="post", want_stable=True)
+            if post is not None:
+                obs["settle"] = [post]
+            return obs
 
-        if op in ("act", "read"):
+        if op == "read":
             if self._session is None:
                 return {"error": "no open session; call browser(op=open, url=...) first"}
-            cmd = {"op": op}
-            if op == "act" and actions:
-                cmd["actions"] = actions
+            cmd = {"op": "read"}
             if html:
                 cmd["html"] = True
             return self._normalise(await self._session.send(cmd))
+
+        if op == "act":
+            if self._session is None:
+                return {"error": "no open session; call browser(op=open, url=...) first"}
+            cmd = {"op": "act"}
+            if actions:
+                cmd["actions"] = actions
+            if html:
+                cmd["html"] = True
+            budget_ms = settle_budget_ms(ctx)
+            settles: list[dict] = []
+            # Auto-settle BEFORE acting: let the prior step's mutations land so the action
+            # targets a stable surface (no longer the model's job to remember wait_until).
+            pre = await settle(self._session, budget_ms=budget_ms, phase="pre")
+            if pre is not None:
+                settles.append(pre)
+            obs = self._normalise(await self._session.send(cmd))
+            # Auto-settle AFTER acting: wait for the reactive surface to stabilise before read.
+            post = await settle(self._session, budget_ms=budget_ms, phase="post",
+                                want_stable=True)
+            if post is not None:
+                settles.append(post)
+            if settles:
+                obs["settle"] = settles
+            return obs
 
         if op == "close":
             # The model explicitly closed the page: tear down the run's SHARED session

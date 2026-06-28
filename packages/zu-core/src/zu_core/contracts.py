@@ -31,6 +31,17 @@ class Budget(BaseModel):
     max_tokens: int = 200_000
     wall_time_s: int = 120
     max_tool_calls: int = 32  # per single model response — caps a runaway turn
+    # --- the reliability budget (navigation-reliability layer) -----------------
+    # A dedicated, SMALL bound for the auto-settle gate, distinct from the global
+    # wall clock: when enabled, a settle (wait for the surface to go DOM-stable /
+    # network-idle / SPA-quiescent before/after an act) polls at most this many
+    # milliseconds, then gives up and proceeds — so a hostile or buggy page can NEVER
+    # stall the runtime on a settle. It is HARNESS-owned (not a model-chosen wait) and,
+    # like every other reliability seam (gates/monitors/arbiters), is INERT UNTIL USED:
+    # 0 disables auto-settle (the pre-layer behaviour); a run/agent opts in by setting it
+    # positive, at which point settling becomes an automatic precondition of every act
+    # wherever the session implements the quiescence probe.
+    settle_ms_max: int = 0
 
 
 class TaskSpec(BaseModel):

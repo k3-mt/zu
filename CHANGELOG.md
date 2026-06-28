@@ -7,6 +7,26 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — navigation-reliability layer, primitive 2: harness-owned auto-settle
+A harness-owned, **budget-bounded** wait for a browser surface to quiesce before/after an act
+— so settling is an automatic precondition of acting, not a `wait_until`/`wait_ms` the model
+must remember to pass.
+- **`Budget.settle_ms_max`** (the *ReliabilityBudget*) — a dedicated small bound, distinct
+  from the global wall clock, so a settle can NEVER stall the run. Inert until used
+  (default `0`, like the gate/monitor/arbiter seams); a run/agent opts in by setting it
+  positive, at which point auto-settle engages wherever the session implements the probe.
+- **`zu_tools.settle.settle()`** — polls a generic session quiescence read
+  (`op=quiescence` → `{quiescent, fingerprint}`) until the surface is quiescent (pre-act) or
+  has stopped mutating — two equal fingerprints (post-act = SPA-settled, the
+  "always-terminating signal" discipline). Bounded by an integer poll count derived from the
+  budget (no wall-clock read → deterministic/replayable); a server that lacks the probe is a
+  transparent no-op.
+- **`Browser`** integration: `op=open` settles after navigation, `op=act` settles pre + post.
+- **`data.settle.waited`** event, emitted by the loop tool-agnostically for each `settle`
+  entry an observation carries.
+- Offline-proven (`settle()` unit + Browser integration + loop emission); no live browser,
+  network, or Docker. (The container browser server's `op=quiescence` read is the live arm.)
+
 ### Added — navigation-reliability layer, primitive 1: native action-effect verification
 The first of the native navigation-reliability primitives (clean-room behavior matrix in
 `docs/navigation-reliability/HARVEST.md`). Generalises the content-free silent-no-op oracle

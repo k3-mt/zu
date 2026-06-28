@@ -295,6 +295,19 @@ def _perception_action_events(obs: dict) -> list[tuple[str, dict]]:
             "dest": pointer.get("dest", {}),
             "seed": str(pointer.get("seed", "")),
         }))
+    # A ``settle`` list → one ``data.settle.waited`` per phase (navigation-reliability
+    # layer): the auditable record that the runtime waited (bounded) for the surface to
+    # quiesce before/after an act. Tool-agnostic, keyed on shape like the rest.
+    settle = obs.get("settle")
+    if isinstance(settle, list):
+        for entry in settle:
+            if isinstance(entry, dict):
+                out.append((ev.SETTLE_WAITED, {
+                    "phase": entry.get("phase"),
+                    "ms_waited": entry.get("ms_waited", 0),
+                    "reason": entry.get("reason"),
+                    "polls": entry.get("polls", 0),
+                }))
     return out
 
 
