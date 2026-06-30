@@ -65,6 +65,11 @@ INTERFACE_VERSION: dict[str, int] = {
     # credential containment to ALL credentials/instruments). The policy holds an
     # opaque capability handle; the broker uses the secret harness-side.
     "credential_brokers": 1,
+    # Web-action runtime ports — the surface a host that owns its OWN browser drives over an
+    # external CDP target (port shapes here; the runtime is the implementation):
+    "connected_surfaces": 1,  # ConnectedSurface — shadow/iframe-flattened perceive+act over CDP (#93)
+    "consent_resolvers": 1,  # ConsentResolver — deterministic cookie/consent dismissal (#94)
+    "selection_satisfiers": 1,  # SelectionSatisfier — satisfy required variant selects (#95)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -263,6 +268,102 @@ class ReputationProvider(Protocol):
     name: str
 
     async def assess(self, domain: str) -> ReputationVerdict: ...
+
+
+# --- the web-action runtime ports (#93/#94/#95) ---------------------------
+#
+# zu-tools' ``action_surface`` already reduces a page to content-free affordances from raw CDP
+# ``Accessibility.getFullAXTree`` nodes — and the AX tree FLATTENS open Shadow DOM + same-document
+# iframes for free. But that reduction + its act-by-handle are welded to Zu's own SessionBackend.
+# A host that owns its OWN browser and connects over an external CDP endpoint (a sandboxed
+# Chromium reached via ``connect_over_cdp``) cannot reuse it, so it hand-rolls a DOM enumerator —
+# and a plain ``document.querySelectorAll`` does NOT cross shadow boundaries, so controls inside
+# web components / CMP widgets are invisible. These three ports are the seam that lets such a host
+# reuse Zu's reduction + the universal, deterministic web ACTIONS (consent, required-option) that
+# unblock a real checkout funnel. Port shapes here; the runtime is the implementation (a plugin).
+
+
+class SurfaceAction(BaseModel):
+    """One act to perform on a perceived surface, addressed by opaque ``handle``.
+
+    ``kind`` is a free string (``"click"`` / ``"type"`` / ``"select"``) so a new producer can
+    introduce actions without a core edit; ``text`` carries the value for ``type``/``select``.
+    Content-free by construction — a handle + an action verb, never page prose."""
+
+    model_config = {"frozen": True}
+
+    handle: str
+    kind: str  # "click" | "type" | "select"
+    text: str | None = None
+
+
+@runtime_checkable
+class ConnectedSurface(Protocol):
+    """An Action Surface bound to an ALREADY-RUNNING browser target the host owns (e.g. a CDP
+    endpoint). ``perceive()`` returns a :class:`~zu_core.surface.SurfaceView` flattened across
+    OPEN shadow roots AND child frames (the AX tree already does this); ``act()`` resolves an
+    opaque handle to its element ACROSS those boundaries and returns the resulting surface. Lets a
+    host reuse Zu's reduction + blind/unlabeled detectors instead of re-implementing a
+    shadow-piercing walk. Closed shadow roots remain unreachable to any page script (a browser
+    security boundary) — only a pixel/vision producer could see those. (#93)"""
+
+    async def perceive(self) -> SurfaceView: ...
+
+    async def act(self, action: SurfaceAction) -> SurfaceView: ...
+
+
+class ConsentControl(BaseModel):
+    """The consent control to engage. ``kind == "accept"`` clears the banner in one click;
+    ``kind == "open_panel"`` opens a two-step CMP's preferences panel (the caller re-perceives,
+    then the now-revealed Accept is engaged). ``handle`` is the opaque surface handle; ``label``
+    is its accessible name (for the audit trail). Frozen value object."""
+
+    model_config = {"frozen": True}
+
+    handle: str
+    kind: str  # "accept" | "open_panel"
+    label: str = ""
+
+
+@runtime_checkable
+class ConsentResolver(Protocol):
+    """Find + clear a cookie/consent banner DETERMINISTICALLY (recognition -> action; the
+    ``CookieBanner`` pattern only NAMES one).
+
+    ``find()`` returns the ACCEPT control chosen by WHOLE-WORD accessible name — never a
+    ``Manage preferences`` / ``Decline`` / ``Settings`` control (clicking those leaves the banner
+    up), and never a bare-substring match (``"ok"`` must not match "Bespoke") — or an
+    ``open_panel`` control for a two-step CMP. ``dismiss()`` performs the FULL clear: open-panel
+    -> accept, across OPEN shadow roots and child frames (CMPs render in cross-origin iframes),
+    returning whether the banner was actually cleared (so a host latches 'handled' rather than
+    re-detecting a persistent 'Manage consent' footer tab forever). Content-free. (#94)"""
+
+    def find(self, view: SurfaceView) -> ConsentControl | None: ...
+
+    async def dismiss(self, surface: ConnectedSurface) -> bool: ...
+
+
+class RequiredSelection(BaseModel):
+    """One required single-choice control that was satisfied: its ``handle`` and the
+    ``chosen_label`` selected. Returned so a 'control is now selected' invariant (#39) can
+    confirm each took. Frozen value object."""
+
+    model_config = {"frozen": True}
+
+    handle: str
+    chosen_label: str
+
+
+@runtime_checkable
+class SelectionSatisfier(Protocol):
+    """Deterministically satisfy UNSET required single-choice controls — a product-variant
+    ``<select>`` (colour/size/fitting) whose default is an unselected placeholder, the silent gate
+    that disables add-to-basket — by choosing the first VALID option (placeholder/disabled/empty
+    excluded; in-stock where known). Returns what it set, so the #39 success invariant can confirm
+    add-to-basket should now be enabled. Content-free: chooses by option structure, never page
+    prose. Pairs with the #39 ``VariantPicker`` pattern + invariant. (#95)"""
+
+    async def satisfy_required(self, surface: ConnectedSurface) -> list[RequiredSelection]: ...
 
 
 # --- the capability envelope ---------------------------------------------
