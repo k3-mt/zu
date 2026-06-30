@@ -14,8 +14,9 @@ ubiquitous analytics/ad scripts:
 * an ``<iframe>`` with an external ``http(s)`` ``src`` — an embedded application
   whose content is not in this DOM; or
 * a **widget mount point** — an element whose *attributes* (id/class/data-*/domain)
-  name a content widget (``widget``, ``embed``, ``scheduler``, or a known booking
-  vendor) — together with an external ``<script>`` that fills it.
+  name a content widget by a generic structural marker (``widget``, ``embed``,
+  ``scheduler``, ``data-widget``) — together with an external ``<script>`` that
+  fills it.
 
 ESCALATE only *unlocks* the browser; the model renders only if it still lacks the
 data, so being a touch generous here is cheap and fail-safe.
@@ -30,12 +31,14 @@ from zu_core.ports import RunContext, Scope, Severity, Verdict
 from . import _html_of
 
 # Tokens that, when they appear in an element's ATTRIBUTES (not visible text),
-# mark a JS content-widget mount. Generic structural words plus a few common
-# booking/scheduling vendors — kept to attribute context so a nav link like
-# href="/book-an-appointment" or body copy never trips it.
+# mark a JS content-widget mount. GENERIC structural words only — no named
+# third-party vendors (a built-in must not hardcode site/vendor literals; the
+# anti-hardcode rule, #61). Kept to attribute context so a nav link like
+# href="/book-an-appointment" or body copy never trips it. A real vendor widget
+# is still caught structurally: by its external iframe src, or by a generic
+# widget/embed/scheduler mount attribute plus the external <script> that fills it.
 _WIDGET_TOKENS = (
     "widget", "embed", "scheduler", "data-widget",
-    "vetstoria", "oabp", "calendly", "acuityscheduling", "simplybook", "petsapp",
 )
 
 # An <iframe ...> carrying an external http(s) src — an embedded app.

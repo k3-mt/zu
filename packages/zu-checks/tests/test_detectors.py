@@ -6,6 +6,8 @@ build step 5; these lock the basic verdicts and the entry-point contract now.
 
 from __future__ import annotations
 
+import inspect
+
 from zu_checks.detectors.bot_wall import BotWallDetector
 from zu_checks.detectors.empty import EmptyDetector
 from zu_checks.detectors.error import ErrorDetector
@@ -109,11 +111,14 @@ def test_bot_wall_fires_on_weak_phrase_with_cloudflare_fingerprint() -> None:
 
 # --- embedded-widget: content deferred to a JS widget/iframe -----------------
 
-_VETSTORIA = (
-    "<html><body><h1>Park Vets</h1><p>Lots of normal page chrome here, nav, "
+# A generic JS content-widget mount: a structural ``data-widget`` marker filled
+# by an external script. No vendor brand names — the detector keys on structure
+# (#61), so any vendor's widget is caught the same way.
+_WIDGET_MOUNT = (
+    "<html><body><h1>Book a visit</h1><p>Lots of normal page chrome here, nav, "
     "footer, plenty of visible text so this is NOT an empty shell.</p>"
-    "<div id='oabp-widget' domain='booking.vetstoria.com'></div>"
-    "<script src='https://booking.vetstoria.com/js/oabp-widget.js'></script>"
+    "<div id='booking-mount' data-widget='1'></div>"
+    "<script src='https://booking.example/js/scheduler.js'></script>"
     "</body></html>"
 )
 
@@ -121,8 +126,18 @@ _VETSTORIA = (
 def test_embedded_widget_fires_on_a_js_booking_widget() -> None:
     from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
 
-    v = EmbeddedWidgetDetector().inspect(_ctx({"html": _VETSTORIA}))
+    v = EmbeddedWidgetDetector().inspect(_ctx({"html": _WIDGET_MOUNT}))
     assert v is not None and v.severity is Severity.ESCALATE
+
+
+def test_embedded_widget_is_brand_free() -> None:
+    # Regression for #61: the built-in detector must not carry named third-party
+    # vendor literals — it keys on generic structure only.
+    from zu_checks.detectors import embedded_widget
+
+    src = inspect.getsource(embedded_widget)
+    for brand in ("vetstoria", "oabp", "calendly", "acuityscheduling", "simplybook", "petsapp"):
+        assert brand not in src.lower(), f"built-in detector hardcodes vendor brand {brand!r}"
 
 
 def test_embedded_widget_fires_on_an_external_iframe_app() -> None:
@@ -155,12 +170,12 @@ def test_embedded_widget_fires_once_then_stays_quiet() -> None:
     from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
 
     det = EmbeddedWidgetDetector()
-    assert det.inspect(RunContext(spec=None, observation={"html": _VETSTORIA}, events=[])) is not None
+    assert det.inspect(RunContext(spec=None, observation={"html": _WIDGET_MOUNT}, events=[])) is not None
     for prior in (
         types.SimpleNamespace(type="harness.task.escalated", source=None, payload={}),
         types.SimpleNamespace(type="data.source.fetched", source="render_dom", payload={}),
     ):
-        ctx = RunContext(spec=None, observation={"html": _VETSTORIA}, events=[prior])
+        ctx = RunContext(spec=None, observation={"html": _WIDGET_MOUNT}, events=[prior])
         assert det.inspect(ctx) is None
 
 
@@ -256,3 +271,28 @@ def test_detectors_discoverable() -> None:
     for name in ("empty", "error", "js-shell", "embedded-widget", "bot-wall",
                  "captcha", "human-gate"):
         assert name in reg.names("detectors")
+
+
+def test_content_free_anomaly_detectors_ship_and_satisfy_the_port() -> None:
+    # #37 — the content-free anomaly detectors the doctrine references must SHIP:
+    # bot-wall/captcha, error, empty/blank, embedded-widget all import in a clean
+    # install, satisfy the runtime-checkable Detector Protocol, and are discoverable
+    # under the "detectors" registry kind (so _detector_checkpoint runs them).
+    from zu_checks.detectors.embedded_widget import EmbeddedWidgetDetector
+    from zu_checks.detectors.human_gate import CaptchaDetector
+    from zu_core.ports import Detector
+
+    required = {
+        "bot-wall": BotWallDetector,
+        "captcha": CaptchaDetector,
+        "error": ErrorDetector,
+        "empty": EmptyDetector,
+        "embedded-widget": EmbeddedWidgetDetector,
+    }
+    reg = Registry()
+    reg.discover()
+    registered = reg.names("detectors")
+    for name, cls in required.items():
+        instance = cls()
+        assert isinstance(instance, Detector), f"{cls.__name__} does not satisfy the Detector Protocol"
+        assert name in registered, f"detector {name!r} is not discoverable under the detectors kind"
