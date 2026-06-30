@@ -41,6 +41,27 @@ class BlockedURLError(SecurityBlock):
     kind = "fetch_blocked"
 
 
+def _check_allowlist(host: str, allowed_domains: list[str] | None) -> None:
+    """Enforce a POSITIVE per-agent navigation allowlist (issue #74) ON TOP of the
+    SSRF default-deny backstop. ``allowed_domains`` is a list of wildcard host
+    patterns (``*.example.com``); ``None`` ⇒ no allowlist configured (the backstop
+    alone governs). When configured, a host that matches NO pattern is refused —
+    enforced here so it holds on the initial URL AND on every redirect hop, not just
+    the first navigation. Uses the SAME shared matcher the pre-exec gate uses, so
+    the gate and this hop-level check cannot drift."""
+    if allowed_domains is None:
+        return
+    from zu_core.hosts import host_matches_any
+
+    if not host_matches_any(host, allowed_domains):
+        raise BlockedURLError(
+            f"refusing to navigate to {host!r}: not in the agent's allowed_domains "
+            f"allowlist {list(allowed_domains)!r}",
+            kind="off_allowlist",
+            target=host,
+        )
+
+
 def _resolve_ips(host: str) -> set[str]:
     try:
         infos = socket.getaddrinfo(host, None)
@@ -80,12 +101,21 @@ def _ip_blocked_reason(ip_str: str) -> str | None:
     return None
 
 
-def check_url(url: str, *, allow_private: bool | None = None) -> None:
+def check_url(
+    url: str, *, allow_private: bool | None = None, allowed_domains: list[str] | None = None
+) -> None:
     """Raise BlockedURLError if ``url`` should not be fetched.
 
     ``allow_private`` None consults the ``ZU_HTTP_ALLOW_PRIVATE`` env var;
     an explicit bool overrides it.
-    """
+
+    ``allowed_domains`` (issue #74) is an optional POSITIVE per-agent navigation
+    allowlist of wildcard host patterns (``*.example.com``). It is an ADDITIONAL
+    gate ON TOP of the SSRF default-deny backstop, NOT a replacement: a host must
+    pass the backstop AND match the allowlist. Because callers pass it on every
+    redirect hop, an off-allowlist 302 is blocked at the hop, not just the initial
+    URL. ``None`` ⇒ no allowlist (the backstop alone governs); ``allow_private``
+    does NOT bypass the allowlist (a positive guarantee, even in local dev)."""
     if allow_private is None:
         allow_private = os.environ.get("ZU_HTTP_ALLOW_PRIVATE") == "1"
 
@@ -97,6 +127,10 @@ def check_url(url: str, *, allow_private: bool | None = None) -> None:
     host = parts.hostname
     if not host:
         raise BlockedURLError(f"no host in URL {url!r}")
+
+    # The positive allowlist is enforced regardless of allow_private — it is a
+    # per-agent navigation guarantee, not an SSRF backstop that local dev waives.
+    _check_allowlist(host, allowed_domains)
 
     if allow_private:
         return
@@ -116,7 +150,9 @@ def check_url(url: str, *, allow_private: bool | None = None) -> None:
             )
 
 
-def validate_and_pin(url: str, *, allow_private: bool | None = None) -> str | None:
+def validate_and_pin(
+    url: str, *, allow_private: bool | None = None, allowed_domains: list[str] | None = None
+) -> str | None:
     """Scheme/host check + SSRF validation + pin, resolving the host exactly ONCE.
 
     A combined ``check_url`` + ``pin_ip`` for callers (e.g. ``render_dom``) that
@@ -140,6 +176,9 @@ def validate_and_pin(url: str, *, allow_private: bool | None = None) -> str | No
     host = parts.hostname
     if not host:
         raise BlockedURLError(f"no host in URL {url!r}")
+    # Positive navigation allowlist (issue #74), enforced before the SSRF resolve
+    # and regardless of allow_private — same matcher as the pre-exec gate.
+    _check_allowlist(host, allowed_domains)
     if allow_private:
         return None
     ips = _resolve_ips(host)  # the single, authoritative resolution

@@ -258,6 +258,22 @@ class RunConfig(BaseModel):
             raise ValueError(f"containment must be 'audit' or 'required', got {v!r}")
         return v
 
+    # Declarative ACTION POLICIES (#76): an ORDERED list of rules
+    # ``{tool, op?, match?, effect: deny|escalate|allow}``, or the preset string
+    # ``"read-only"``. First matching rule wins; default allow. Compiled at
+    # config-load to ONE unbypassable pre-execution InvocationGate
+    # (zu_cli.policies.compile_action_policies) and registered under ``gates`` —
+    # the gate the policy can't bypass. An unknown tool/op or malformed rule fails
+    # fast in ``build_registry``/``assemble``, never mid-run.
+    action_policies: list[Any] = Field(default_factory=list)
+    # Declarative NAVIGATION ALLOWLIST (#74): a wildcard host list
+    # (``["*.example.com", "api.partner.com"]``). Compiled to a pre-execution
+    # InvocationGate that DENIES an off-allowlist navigation BEFORE it runs, threaded
+    # into the nav tools' ``check_url`` for the per-redirect-hop check, AND fed to the
+    # post-hoc DOMAIN_ALLOWLIST audit invariant from the SAME value so they can't
+    # drift. Malformed entries fail at config-load.
+    allowed_domains: list[str] = Field(default_factory=list)
+
 
 # --- loading -----------------------------------------------------------------
 
@@ -619,6 +635,15 @@ def build_registry(
         backend_obj = backend_obj() if isinstance(backend_obj, type) else backend_obj
 
     extra = {"backend": backend_obj} if backend_obj is not None else {}
+    # The per-agent navigation allowlist (#74) is injected into any nav tool whose
+    # constructor declares ``allowed_domains`` (signature-filtered like ``backend``),
+    # so check_url enforces it on every redirect hop — not just the pre-exec gate.
+    if cfg.allowed_domains:
+        from .policies import compile_allowed_domains
+
+        patterns = compile_allowed_domains(cfg.allowed_domains)
+        if patterns:
+            extra["allowed_domains"] = patterns
 
     # Tools: from the config-owned escalation ladder (``tiers``) and/or the flat
     # ``plugins.tools`` list. A name in ``tiers`` is registered with its effective
@@ -647,7 +672,46 @@ def build_registry(
         for name in getattr(cfg.plugins, kind):
             obj = _resolve_plugin(kind, name, catalog, extra, allow_imports=allow_imports)
             reg.register(kind, getattr(obj, "name", name), obj)
+
+    # Declarative guardrails → pre-execution gates (#76, #74). Compiled here, at
+    # config-load, so an unknown tool/op or a malformed rule/host pattern fails fast
+    # (surfaced from ``assemble``), never mid-run. The active tool instances built
+    # above are the validation target for ``action_policies`` (unknown tool/op).
+    _register_policy_gates(cfg, reg)
     return reg
+
+
+def _register_policy_gates(cfg: RunConfig, reg: Registry) -> None:
+    """Compile ``action_policies`` (#76) and ``allowed_domains`` (#74) into
+    InvocationGate(s) + the post-hoc audit invariant, and register them on ``reg``.
+
+    Both compile to the EXISTING ``InvocationGate`` port (no new core port). The
+    allowlist gate and the ``DOMAIN_ALLOWLIST`` monitor derive from the SAME pattern
+    list, so the pre-exec enforcement and the audit backstop can't drift. Raises
+    ``ConfigError`` on any malformed/unknown rule — at load, not mid-run."""
+    from zu_core.invariants import compile_invariant
+
+    from .policies import (
+        allowed_domains_invariant,
+        compile_action_policies,
+        compile_allowed_domains,
+    )
+
+    # The active tools (name → instance) are what action_policies validates against.
+    tools = {name: reg.get("tools", name) for name in reg.names("tools")}
+
+    gate = compile_action_policies(cfg.action_policies, tools)
+    if gate is not None:
+        reg.register("gates", gate.name, gate)
+
+    patterns = compile_allowed_domains(cfg.allowed_domains)
+    if patterns:
+        from .policies import AllowedDomainsGate
+
+        reg.register("gates", "allowed_domains", AllowedDomainsGate(patterns))
+        # The post-hoc audit backstop, fed from the SAME pattern list (no drift).
+        inv = compile_invariant(allowed_domains_invariant(patterns))
+        reg.register("monitors", inv.name, inv)
 
 
 def _refuse_path(spec: EventSinkConfig) -> None:

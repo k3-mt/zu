@@ -563,6 +563,7 @@ def _egress_allowlist(cfg) -> list[str]:
     """The hosts the proxy permits for a contained run: the union of the configured
     tools' declared egress. ``*`` (open) is surfaced as a warning — a real boundary
     wants an explicit host list, not 'any'."""
+    from zu_core.loop import _materialize
     from zu_core.ports import declared_envelope
 
     from .config import build_registry
@@ -570,7 +571,17 @@ def _egress_allowlist(cfg) -> list[str]:
     reg = build_registry(cfg)
     allow: set[str] = set()
     for name in reg.names("tools"):
-        allow.update(declared_envelope(reg.get("tools", name))["egress"])
+        # Materialize before reading the envelope — mirroring the loop, which
+        # reads ``declared_envelope`` off the same materialized instances it runs
+        # (loop._materialize / the ENVELOPE_DECLARED event). A tool that derives
+        # its egress per instance (e.g. WebSearch, whose host is set in __init__)
+        # declares NOTHING on the class, so a bare ``plugins.tools: [web_search]``
+        # entry — registered as the class — would otherwise contribute egress []
+        # and silently drop ``api.exa.ai`` from the proxy allowlist. ``_materialize``
+        # instantiates a class entry with no args and passes an instance through
+        # unchanged, keeping this view consistent with the ENVELOPE_DECLARED audit.
+        tool = _materialize(reg.get("tools", name))
+        allow.update(declared_envelope(tool)["egress"])
     if "*" in allow:
         typer.echo(
             "warning: a configured tool declares open egress ('*'); the proxy will "
