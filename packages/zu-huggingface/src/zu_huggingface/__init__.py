@@ -29,6 +29,7 @@ from .supply_chain import (
     SupplyChainPolicy,
     assert_no_remote_code,
     file_sha256,
+    resolve_cached_snapshot,
     safe_pipeline_kwargs,
     verify_file_hash,
     verify_model_source,
@@ -92,4 +93,5 @@ __all__ = [
     "safe_pipeline_kwargs",
     "file_sha256",
     "verify_file_hash",
+    "resolve_cached_snapshot",
 ]
