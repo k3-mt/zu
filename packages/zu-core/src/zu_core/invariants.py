@@ -73,7 +73,11 @@ class Predicate(BaseModel):
 
       * budget_cap:       {"metric": "tool_calls"|"events", "limit": int}
       * domain_allowlist: {"event_type": str, "field": <dotted path into payload>,
-                           "allow": list[str]}
+                           "allow": list[str], "wildcard": bool (optional, default
+                           False — when True, ``field`` holds a URL/host and ``allow``
+                           is matched as wildcard host patterns via zu_core.hosts, the
+                           SAME match the pre-exec navigation gate uses so they can't
+                           drift)}
       * required_field:   {"event_type": str, "field": str}
       * surface_contains: {"event_type": str, one of "handle"|"label"|"archetype",
                            "negate": bool (optional, default False),
@@ -143,9 +147,36 @@ def _eval_budget_cap(events: Sequence[Any], params: dict) -> bool:
 
 
 def _eval_domain_allowlist(events: Sequence[Any], params: dict) -> bool:
-    """True iff every matching event's field value is in the allowlist."""
+    """True iff every matching event's field value is in the allowlist.
+
+    Two modes, selected by ``wildcard``:
+      * ``wildcard`` absent/False (the original) — exact set membership; the field
+        value must equal one of ``allow`` literally.
+      * ``wildcard: True`` — the value is treated as a URL (or a bare host) and its
+        HOST is matched against ``allow`` as wildcard host patterns via the shared
+        ``zu_core.hosts`` helper (``*.example.com``). This is the mode the
+        declarative ``allowed_domains`` block feeds, so the pre-execution gate and
+        this audit invariant use the SAME match and cannot drift.
+    """
     event_type = str(params.get("event_type", ""))
     field = str(params.get("field", ""))
+    wildcard = bool(params.get("wildcard", False))
+    if wildcard:
+        from .hosts import host_matches_any, normalize_host
+
+        allow_patterns = list(params.get("allow", []))
+        for e in events:
+            if getattr(e, "type", None) != event_type:
+                continue
+            value = _dotted(_payload(e), field)
+            if value is _MISSING or not isinstance(value, str):
+                continue  # nothing to check on this event
+            host = _host_of(value)
+            if not host:
+                continue  # no host to judge (e.g. a non-URL value)
+            if not host_matches_any(normalize_host(host), allow_patterns):
+                return False
+        return True
     allow = set(params.get("allow", []))
     for e in events:
         if getattr(e, "type", None) != event_type:
@@ -156,6 +187,24 @@ def _eval_domain_allowlist(events: Sequence[Any], params: dict) -> bool:
         if value not in allow:
             return False
     return True
+
+
+def _host_of(value: str) -> str:
+    """The host of a URL string, or the value itself if it is already a bare host.
+    Defensive — returns ``""`` when neither shape yields a host."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(value).hostname
+    except ValueError:
+        host = None
+    if host:
+        return host
+    # already a bare host (no scheme) — accept it as-is if it has no path/space
+    v = value.strip()
+    if v and "/" not in v and " " not in v:
+        return v
+    return ""
 
 
 def _eval_required_field(events: Sequence[Any], params: dict) -> bool:

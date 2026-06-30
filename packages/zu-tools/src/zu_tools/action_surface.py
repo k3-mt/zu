@@ -334,11 +334,15 @@ class ActionSurface:
         proxy: dict | None = None,
         network_name: str | None = None,
         egress_dns: object | None = None,
+        allowed_domains: list[str] | None = None,
     ) -> None:
         self._backend = backend
         self.image = image
         self.allow_private = allow_private
         self.unlabeled_ratio = unlabeled_ratio
+        # The per-agent positive navigation allowlist (issue #74): None ⇒ unset.
+        # Enforced on op=open url via validate_and_pin, alongside the pre-exec gate.
+        self.allowed_domains = allowed_domains
         # Egress-enforcement wiring (issue #54): a provisioned proxy + internal
         # network scopes in-browser egress to the validated target set.
         self._proxy = proxy
@@ -406,7 +410,9 @@ class ActionSurface:
         return self._emit(surface)
 
     async def _open_op(self, ctx: Any, url: str, title: str) -> dict:
-        pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
+        pinned_ip = validate_and_pin(
+            url, allow_private=self.allow_private, allowed_domains=self.allowed_domains
+        )
         host = urlsplit(url).hostname
         # The spec carries the validated target as the egress allowlist (issue #54):
         # in-browser subresources/redirects are scoped to it, not bare/open.

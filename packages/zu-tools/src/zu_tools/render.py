@@ -118,7 +118,11 @@ class RenderDom:
         proxy: dict | None = None,
         network_name: str | None = None,
         egress_dns: object | None = None,
+        allowed_domains: list[str] | None = None,
     ) -> None:
+        # The per-agent positive navigation allowlist (issue #74): None ⇒ unset.
+        # Enforced on the target host via validate_and_pin, alongside the pre-exec gate.
+        self.allowed_domains = allowed_domains
         # backend None -> the local-docker default, imported lazily so this
         # module (and tier-1-only deployments) need not pull in the backend
         # package or a Docker client until a render is actually attempted.
@@ -174,7 +178,9 @@ class RenderDom:
         # sandbox's in-browser egress is scoped to the target, not bare/open. Absent
         # a provisioned proxy the declaration stays the honest EGRESS_OPEN, but the
         # allowlist is attached for a firewall-capable backend to enforce.
-        pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
+        pinned_ip = validate_and_pin(
+            url, allow_private=self.allow_private, allowed_domains=self.allowed_domains
+        )
         backend = self._resolve_backend()
         # Lease a sandbox for the render and always tear it down — a browser
         # container is expensive and must not leak even if the render raises.

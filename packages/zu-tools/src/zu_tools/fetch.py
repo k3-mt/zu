@@ -44,6 +44,7 @@ class HttpFetch:
         max_redirects: int = 5,
         max_bytes: int = _DEFAULT_MAX_BYTES,
         transport: httpx.AsyncBaseTransport | None = None,
+        allowed_domains: list[str] | None = None,
     ) -> None:
         # allow_private None -> consult ZU_HTTP_ALLOW_PRIVATE (see net.check_url).
         self.allow_private = allow_private
@@ -51,6 +52,10 @@ class HttpFetch:
         self.max_bytes = max_bytes
         # transport is a testability seam (httpx.MockTransport); None -> real net.
         self._transport = transport
+        # The per-agent positive navigation allowlist (issue #74): None ⇒ unset
+        # (the SSRF backstop alone governs). Enforced on the initial URL AND every
+        # redirect hop via check_url, in addition to the pre-exec gate.
+        self.allowed_domains = allowed_domains
 
     def _contained(self) -> bool:
         """Inside the Zu sandbox the egress proxy on the internal (default-DROP)
@@ -70,6 +75,15 @@ class HttpFetch:
         """Contained path: a plain proxy-respecting client. The proxy enforces the
         egress allowlist (a refused host fails the connection / returns non-2xx)
         and re-checks each redirect hop by host, so no host-side guard is needed."""
+        # The positive navigation allowlist (issue #74) is a tool-level guarantee,
+        # independent of the proxy's SSRF egress scoping: enforce the initial host
+        # here too so a contained run honours allowed_domains identically.
+        if self.allowed_domains is not None:
+            from urllib.parse import urlsplit
+
+            from .net import _check_allowlist
+
+            _check_allowlist(urlsplit(url).hostname or "", self.allowed_domains)
         try:
             async with httpx.AsyncClient(
                 follow_redirects=True, timeout=20, trust_env=True,
@@ -89,7 +103,7 @@ class HttpFetch:
         # Uncontained (host) path. Validate the initial URL and every redirect hop:
         # a public URL that 302s to an internal address is the classic SSRF bypass,
         # so we follow redirects manually and re-check each Location before it.
-        check_url(url, allow_private=self.allow_private)
+        check_url(url, allow_private=self.allow_private, allowed_domains=self.allowed_domains)
         current = url
         # Default to the DNS-pinning transport: check_url is an early reject, but
         # the transport is what *closes* the rebind TOCTOU by connecting only to a
@@ -109,7 +123,10 @@ class HttpFetch:
                         # joined to ``r.url`` would carry the IP as host and the
                         # next TLS handshake would verify the cert against the IP.
                         nxt = urljoin(current, r.headers["location"])
-                        check_url(nxt, allow_private=self.allow_private)
+                        check_url(
+                            nxt, allow_private=self.allow_private,
+                            allowed_domains=self.allowed_domains,
+                        )
                         current = nxt
                         continue
                     html = await self._read_capped(r, current)
