@@ -16,6 +16,7 @@ visible to the loop and the CLI without any extra wiring. Pass an explicit
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable
 from importlib.metadata import entry_points
@@ -101,6 +102,47 @@ class IncompatibleInterfaceError(RuntimeError):
     isolated-and-recorded by ``discover`` (the entry-point door)."""
 
 
+# Sentinel distinct from any value a plugin could legitimately declare (notably
+# an explicit ``frozenset()``, which IS a valid least-privilege declaration). We
+# probe for *attribute presence*, never truthiness — an empty envelope is a
+# deliberate opt-in, the absence of the attribute is what we refuse.
+_MISSING_ENVELOPE_FIELD = object()
+
+# The envelope fields a tool declares: the capabilities it claims and the egress
+# it reaches. Both must be present (even if empty) for a tool to enter under
+# strict mode; their absence is what ``declared_envelope`` would silently read
+# as least privilege, the fail-OPEN this guard closes (#48).
+_ENVELOPE_FIELDS = ("capabilities", "egress")
+
+
+def _env_truthy(raw: str | None) -> bool:
+    """A permissive truthy reading of an env-var string (``1/true/yes/on``)."""
+    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+class MissingEnvelopeError(RuntimeError):
+    """A tool entered the registry without declaring its capability envelope.
+
+    ``declared_envelope`` reads a missing ``capabilities``/``egress`` as least
+    privilege (empty), so an undeclared off-box tool would read as host-safe and
+    slip past ``enforce_containment(policy='required', ...)`` to run in-process
+    UNGUARDED (fail-OPEN, #48). Strict mode refuses such a tool at registration
+    time — loud, not silent. To opt into least privilege deliberately, declare an
+    explicit ``frozenset()`` (an empty envelope is a declaration; its absence is
+    not). ``tool`` names the offender, ``missing`` the absent field(s)."""
+
+    def __init__(self, tool: str, missing: list[str]) -> None:
+        self.tool = tool
+        self.missing = missing
+        super().__init__(
+            f"tool {tool!r} does not declare its capability envelope: missing "
+            f"{', '.join(missing)}. A missing field reads as least privilege "
+            "(empty), so an off-box tool would run in-process UNGUARDED under "
+            "containment='required' (fail-OPEN). Declare each field explicitly — "
+            "an explicit frozenset() opts into least-privilege deliberately."
+        )
+
+
 def _declared_major(kind: str, obj: Any) -> int:
     """The interface major a plugin targets: its ``__zu_interface__`` attribute,
     or 1 (the original contract) when absent. Raises if it is present but not a
@@ -133,13 +175,22 @@ def check_interface(kind: str, obj: Any) -> int:
 
 
 class Registry:
-    def __init__(self, kinds: dict[str, KindSpec] | None = None) -> None:
+    def __init__(
+        self, kinds: dict[str, KindSpec] | None = None, *, strict_envelope: bool | None = None
+    ) -> None:
         # The live kind map (ZU-EXT-1). Seeded from the built-ins; a consumer
         # adds to it with ``register_kind`` without editing the core. ``GROUPS``
         # / ``INTERFACE_VERSION`` are only the defaults that seed this.
         self._kinds: dict[str, KindSpec] = dict(kinds or _BUILTIN_KINDS)
         self._items: dict[str, dict[str, Any]] = {k: {} for k in self._kinds}
         self.failures: list[LoadFailure] = []
+        # Strict envelope mode (#48): refuse a tool that omits its capability
+        # envelope rather than letting it read as least privilege and slip past
+        # containment. Resolution: explicit arg wins; else ``ZU_STRICT_ENVELOPE``
+        # (truthy ⇒ strict); else off (default — a warning, back-compat green).
+        if strict_envelope is None:
+            strict_envelope = _env_truthy(os.environ.get("ZU_STRICT_ENVELOPE"))
+        self._strict_envelope = strict_envelope
         # Guards mutation/iteration of the shared maps. ``REGISTRY`` is a
         # process-wide singleton that decorators, entry-point discovery, and
         # config assembly can all write — a plain ``threading.Lock`` keeps
@@ -231,6 +282,29 @@ class Registry:
         # incompatible major for this port, with a clear error, before it can
         # enter the registry and fail in confusing ways at call time.
         self._check_interface(kind, obj)
+        # The envelope-declaration gate (#48): a tool that OMITS its capability
+        # envelope reads as least privilege downstream, so an off-box tool would
+        # run in-process unguarded under containment='required'. We probe for
+        # attribute *presence* (an explicit ``frozenset()`` is a valid empty
+        # declaration), never truthiness. Strict mode refuses; otherwise we warn
+        # loudly. This runs on BOTH registration doors — entry-point ``discover``
+        # and the kind decorators both funnel through here.
+        if kind == "tools":
+            missing = [
+                a for a in _ENVELOPE_FIELDS
+                if getattr(obj, a, _MISSING_ENVELOPE_FIELD) is _MISSING_ENVELOPE_FIELD
+            ]
+            if missing:
+                if self._strict_envelope:
+                    raise MissingEnvelopeError(name, missing)
+                log.warning(
+                    "tool %r does not declare its capability envelope (missing %s); "
+                    "treating it as least-privilege — this is fail-OPEN under "
+                    "containment='required' and will become an error in strict mode "
+                    "(set ZU_STRICT_ENVELOPE=1 or Registry(strict_envelope=True)). "
+                    "Declare an explicit frozenset() to opt in deliberately.",
+                    name, ", ".join(missing),
+                )
         with self._lock:
             existing = self._items[kind].get(name)
             if existing is not None and existing is not obj:
