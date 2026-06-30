@@ -59,6 +59,31 @@ def test_candidate_is_frozen_and_hashable() -> None:
         raise AssertionError("Candidate should be frozen")
 
 
+def test_candidate_carries_a_typed_image_gallery() -> None:
+    # #86 — products are multi-image; a candidate carries the WHOLE gallery as a
+    # typed array, in page order, while ``image`` stays the single primary/thumbnail.
+    gallery = ("https://shop.com/hero.jpg", "https://shop.com/angle.jpg")
+    c = Candidate(
+        title="Red collar",
+        url="https://shop.com/c",
+        domain="shop.com",
+        image=gallery[0],  # primary == images[0] when a gallery is present
+        images=gallery,
+    )
+    assert c.images == gallery
+    assert c.image == c.images[0]
+    # A record's list coerces to the hashable tuple, so a gallery-carrying candidate
+    # still round-trips on the event log and dedupes by identity.
+    c2 = Candidate.model_validate(
+        {"title": "t", "url": "https://shop.com/x", "domain": "shop.com",
+         "images": ["https://shop.com/a.jpg"]}
+    )
+    assert c2.images == ("https://shop.com/a.jpg",)
+    assert c2 in {c2}  # still hashable with a gallery
+    # Additive + back-compat: absent gallery is the empty tuple, never None.
+    assert Candidate(title="t", url="https://shop.com/x", domain="shop.com").images == ()
+
+
 class _FakeSearch:
     """A web_search-shaped tool: returns canned {title,url} results, declares a
     scoped egress (its connector's host) just like zu_tools.search.WebSearch."""
