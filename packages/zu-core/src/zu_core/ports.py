@@ -200,7 +200,11 @@ class Candidate(BaseModel):
     price: int | None = None  # minor units (cents/pence); never a parsed-prose float
     currency: str | None = None
     in_stock: bool | None = None
-    image: str | None = None
+    image: str | None = None  # the PRIMARY/thumbnail (== images[0] when a gallery is present)
+    images: tuple[str, ...] = ()  # the full product image gallery, in page order — URLs are
+    # facts (same category as ``price``/``image``), so this keeps the content-free guarantee:
+    # the planning model still never ingests page content to use them. A tuple stays hashable,
+    # so a candidate carrying a gallery still round-trips on the event log and dedupes by identity.
     source: str = ""  # which provider/feed produced it (provenance)
 
 
