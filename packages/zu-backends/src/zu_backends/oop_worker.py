@@ -15,6 +15,12 @@ Configuration comes entirely from the environment the launcher sets:
   ZU_OOP_ARGS    JSON object of constructor kwargs (optional)
   ZU_OOP_UID     numeric uid to drop to before serving (optional; best-effort,
                  requires the worker to start privileged)
+  ZU_OOP_SECRET_KEYS  comma-separated names of the caller-supplied secret env vars
+                 (set by the launcher). After the privilege drop AND after the
+                 plugin has consumed them (its constructor reads them), the worker
+                 SCRUBS these from its own ``os.environ`` so the secret does not
+                 linger in ``/proc/self/environ`` (readable by a co-tenant on the
+                 dropped uid) or a core dump for the serving lifetime (issue #49).
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import asyncio
 import importlib
 import json
 import os
+from collections.abc import MutableMapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,6 +49,24 @@ def _maybe_drop_privilege() -> None:
     uid = os.environ.get("ZU_OOP_UID")
     if uid and hasattr(os, "setuid") and os.getuid() == 0:
         os.setuid(int(uid))  # best-effort hardening; the process boundary stands regardless
+
+
+def _scrub_secret_env(environ: MutableMapping[str, str] = os.environ) -> list[str]:
+    """Delete the caller-supplied secret env vars (the keys the launcher named in
+    ``ZU_OOP_SECRET_KEYS``) from this worker's environment, plus the marker var
+    itself. Called AFTER ``_maybe_drop_privilege`` and AFTER the plugin's
+    constructor has read the secret, so by the time the worker serves any plugin
+    code the credential is gone from ``/proc/self/environ`` and core dumps (issue
+    #49). ``setuid`` does not scrub the environ block; this does. Returns the keys
+    that were removed (for the test)."""
+    raw = environ.get("ZU_OOP_SECRET_KEYS", "")
+    keys = [k for k in raw.split(",") if k]
+    removed: list[str] = []
+    for key in (*keys, "ZU_OOP_SECRET_KEYS"):
+        if key in environ:
+            del environ[key]
+            removed.append(key)
+    return removed
 
 
 def _tool_spec(tool: Any) -> dict:
@@ -89,7 +114,14 @@ def main() -> None:
 
     _maybe_drop_privilege()
     target = _load(ref)
+    # Construct the plugin FIRST so its constructor reads the secret from the
+    # environment (e.g. CredentialBroker reads ZU_BROKER_SECRET into a local),
+    # THEN scrub the secret keys from our environ before serving ANY plugin code —
+    # so the credential lives only in the plugin's address space, never lingering in
+    # /proc/self/environ for the serving lifetime (issue #49). The drop already
+    # happened above; this closes the post-drop environ window.
     plugin = target(**ctor_args) if isinstance(target, type) else target
+    _scrub_secret_env()
     handler = _build_handler(kind, plugin)
     asyncio.run(serve(sock, handler))
 

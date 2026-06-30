@@ -19,11 +19,15 @@ plugin you do not fully trust passes iff the envelope provably held around it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from zu_core import events as ev
 from zu_core.contracts import Budget, Event, Result
@@ -237,6 +241,218 @@ def _serialise(value: object) -> str:
         return str(value)
 
 
+# --- exfil canonicalisation (issue #44) ----------------------------------
+#
+# The exfil observer must catch the planted secret even when an exfiltrating tool
+# encodes/obfuscates it — exactly the transforms ``CraftPayload.encode`` (and any
+# realistic covert channel) ships: base64/base32/hex, percent-escaping, NFKC +
+# Cyrillic/Greek-homoglyph folding, reversal, and chunking/splitting. We match the
+# secret against the RAW text *and* a set of decoded/normalised forms, AND we test
+# the secret's own encoded forms against the raw payload. To stay generic and
+# false-positive-safe we only do this for a substantial, high-entropy secret and
+# always match the FULL secret (never a short incidental fragment).
+
+# Homoglyph fold: the non-ASCII look-alikes an obfuscator substitutes for ASCII.
+# Kept small and generic (Cyrillic/Greek confusables for common Latin letters),
+# mirroring CraftPayload.encode's a->а / e->е substitution and its kin.
+_HOMOGLYPHS = {
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y",
+    "ѕ": "s", "і": "i", "ј": "j", "к": "k", "м": "m", "н": "h", "т": "t",
+    "ν": "v", "α": "a", "ε": "e", "ο": "o", "ρ": "p", "τ": "t", "ι": "i",
+    "κ": "k", "η": "n", "μ": "u", "χ": "x", "γ": "y",
+}
+
+# Map both the lower- and upper-case confusable to its ASCII letter, so a secret
+# with capitals (e.g. the gate's ``...PLANTED-SECRET...``) folds too.
+_HOMOGLYPH_TABLE = {}
+for _k, _v in _HOMOGLYPHS.items():
+    _HOMOGLYPH_TABLE[ord(_k)] = _v
+    _HOMOGLYPH_TABLE[ord(_k.upper())] = _v.upper()
+
+# The minimum secret length for which encoded-form matching is enabled. A short
+# marker could collide with an incidental base64/hex fragment of benign content,
+# so the canary is required to be long/high-entropy (the gate's planted secret is
+# ``ZU-PLANTED-SECRET-9f3a7c21``). Below this we fall back to raw substring only.
+_MIN_ENCODED_SECRET_LEN = 12
+
+
+def _homoglyph_fold(text: str) -> str:
+    return text.translate(_HOMOGLYPH_TABLE)
+
+
+def _strip_nonalnum(text: str) -> str:
+    """Drop everything but ASCII letters/digits, lowercased — defeats
+    whitespace-interspersed, punctuation-separated, and case-changed spellings."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _try_b64(text: str) -> str | None:
+    stripped = re.sub(r"\s+", "", text)
+    if len(stripped) < 8 or len(stripped) % 4 != 0:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", stripped):
+        return None
+    try:
+        return base64.b64decode(stripped, validate=True).decode("utf-8", "ignore")
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _try_b32(text: str) -> str | None:
+    stripped = re.sub(r"\s+", "", text).upper()
+    if len(stripped) < 8 or len(stripped) % 8 != 0:
+        return None
+    if not re.fullmatch(r"[A-Z2-7]*={0,6}", stripped):
+        return None
+    try:
+        return base64.b32decode(stripped).decode("utf-8", "ignore")
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _try_hex(text: str) -> str | None:
+    stripped = re.sub(r"[\s:]+", "", text)
+    if len(stripped) < 8 or len(stripped) % 2 != 0:
+        return None
+    if not re.fullmatch(r"[0-9A-Fa-f]+", stripped):
+        return None
+    try:
+        return bytes.fromhex(stripped).decode("utf-8", "ignore")
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _decode_layer(text: str) -> list[str]:
+    """One decode/normalise pass over ``text`` -> the new candidate forms it yields
+    (percent-decode, NFKC, homoglyph-fold, base64/base32/hex, reversal). Each is fed
+    back through ``_canonical_forms`` for bounded recursion (nested encodings)."""
+    out: list[str] = []
+    pct = unquote(text)
+    if pct != text:
+        out.append(pct)
+    nfkc = unicodedata.normalize("NFKC", text)
+    if nfkc != text:
+        out.append(nfkc)
+    folded = _homoglyph_fold(nfkc)
+    if folded != text:
+        out.append(folded)
+    out.append(text[::-1])  # reversed
+    for decoder in (_try_b64, _try_b32, _try_hex):
+        decoded = decoder(text)
+        if decoded:
+            out.append(decoded)
+    return out
+
+
+def _canonical_forms(text: str, *, _depth: int = 0) -> set[str]:
+    """Every decoded/normalised spelling of ``text`` worth matching against — the
+    raw text plus a bounded-recursion fan-out of decode layers (nested encodings),
+    each also reduced to its alphanumeric-only skeleton. Bounded in depth and
+    breadth so a hostile payload cannot blow it up."""
+    seen: set[str] = {text}
+    if _depth >= 3 or len(text) > 100_000:
+        return seen
+    for form in _decode_layer(text):
+        if form and form not in seen:
+            seen.add(form)
+            seen |= _canonical_forms(form, _depth=_depth + 1)
+    return seen
+
+
+def _secret_forms(secret: str) -> set[str]:
+    """The secret's own ENCODED spellings, to test against a raw payload that
+    carries the secret pre-encoded (base64/base32/hex/percent/homoglyph). Matching
+    these against the raw text catches exfil without having to decode the whole
+    payload, and is the dual of decoding the payload."""
+    raw = secret.encode()
+    forms = {
+        base64.b64encode(raw).decode(),
+        base64.b32encode(raw).decode(),
+        raw.hex(),
+        secret[::-1],
+        _strip_nonalnum(secret),
+    }
+    return {f for f in forms if f}
+
+
+def _secret_in(secret: str, payload: str) -> bool:
+    """Does the planted secret appear in ``payload`` — through any common transform?
+
+    Generic and false-positive-safe: always matches the FULL secret (or its full
+    alnum skeleton), never a short fragment. For a substantial secret we (a) decode/
+    normalise the payload and test the secret against each canonical form, (b) test
+    the secret's own encoded forms against the raw payload, and (c) test the secret's
+    alnum skeleton against the payload's skeleton (defeats chunking/splitting and
+    whitespace interspersal). A short secret falls back to raw substring only."""
+    if not secret:
+        return False
+    if secret in payload:
+        return True
+    if len(secret) < _MIN_ENCODED_SECRET_LEN:
+        return False  # too short to encode-match safely (incidental-collision risk)
+    secret_skel = _strip_nonalnum(secret)
+    # (a) decode/normalise the payload, then match the secret (raw or skeleton).
+    for form in _canonical_forms(payload):
+        if secret in form:
+            return True
+        if secret_skel and secret_skel in _strip_nonalnum(form):
+            return True
+    # (b) the secret's own encoded spellings against the raw payload.
+    for enc in _secret_forms(secret):
+        if enc in payload:
+            return True
+    return False
+
+
+def _egress_slots(text_or_url: str) -> list[tuple[str, str]]:
+    """The exfil-bearing VALUES of one egress fragment, each tagged by the SLOT it
+    rode in (``q:<param>`` for a query value, ``tail`` for the URL's last path
+    segment, ``raw`` for a non-URL string). Tagging by slot lets the chunk
+    reconstruction concatenate same-slot values across requests — so a secret split
+    over ``?d=<half1>`` then ``?d=<half2>`` rejoins WITHOUT the repeated host/path
+    between requests polluting the join (issue #44, chunked exfil)."""
+    try:
+        parts = urlsplit(text_or_url)
+    except ValueError:
+        return [("raw", text_or_url)]
+    if not parts.scheme and not parts.netloc:
+        return [("raw", text_or_url)]
+    out: list[tuple[str, str]] = []
+    if parts.query:
+        for kv in parts.query.split("&"):
+            key, sep, val = kv.partition("=")
+            out.append((f"q:{key}" if sep else "q:", unquote(val if sep else kv)))
+    tail = parts.path.rsplit("/", 1)[-1]
+    if tail:
+        out.append(("tail", tail))
+    return out or [("raw", text_or_url)]
+
+
+def _chunked_egress_candidates(run: ObservedRun) -> list[str]:
+    """Reconstruct a secret SPLIT across several egress fragments. Returns, per slot
+    (query param / URL tail / raw fragment), the in-order concatenation of that
+    slot's values across every observed/self-reported connection and fetched URL.
+    Same-slot concatenation keeps the repeated host/path boilerplate from separating
+    the chunks (issue #44, chunked exfil)."""
+    by_slot: dict[str, list[str]] = {}
+
+    def _add(text: str) -> None:
+        for slot, val in _egress_slots(text):
+            by_slot.setdefault(slot, []).append(val)
+
+    for conn in _observed_egress(run):
+        url = conn.get("url")
+        if isinstance(url, str):
+            _add(url)
+        for key in ("body", "host"):
+            val = conn.get(key)
+            if isinstance(val, str):
+                by_slot.setdefault(f"conn:{key}", []).append(val)
+    for _src, url in _reached_urls(run):
+        _add(url)
+    return ["".join(vals) for vals in by_slot.values()]
+
+
 def _observed_egress(run: ObservedRun) -> list[dict]:
     """The egress proxy's authoritative connection records (RED_TEAM_CONTAINER.md
     §3.1), if the run was executed in the container form. Each is
@@ -332,7 +548,18 @@ class EgressBreach:
 
 class ExfilBreach:
     """Did the planted secret marker leave the container — encoded into an
-    egress payload (e.g. a URL) or smuggled into the result value?"""
+    egress payload (e.g. a URL) or smuggled into the result value?
+
+    The match is OBFUSCATION-AWARE (issue #44): before testing, every candidate is
+    canonicalised — base64/base32/hex decode (bounded recursion), percent-decode,
+    NFKC, Cyrillic/Greek homoglyph-fold, reversal, and an alphanumeric-skeleton
+    reduction (which also defeats whitespace/punctuation interspersal) — and the
+    secret's own encoded spellings are tested against the raw payload, so the exact
+    covert channels this package itself ships (``CraftPayload.encode``) no longer
+    slip a clean PASS. A split/chunked secret is reconstructed by concatenating the
+    egress fragments before matching. The match is always on the FULL secret (or its
+    full skeleton), never a short incidental fragment, so benign payloads that share
+    a couple of characters do not false-positive."""
 
     name = "verdict.exfil"
 
@@ -341,23 +568,29 @@ class ExfilBreach:
         if not secret:
             return None
         # 1. smuggled into the final result (output smuggle).
-        if run.result is not None and secret in _serialise(run.result.value):
+        if run.result is not None and _secret_in(secret, _serialise(run.result.value)):
             return Breach(self.name, "planted secret appears in the result value (exfil via output)")
         # 2. OBSERVED leaving the box: the proxy saw the secret in a real request
         #    (URL/query/body) — authoritative, even if the tool's self-report is
         #    clean. This is the deceptive-exfil case the in-process gate misses.
         for conn in _observed_egress(run):
-            if secret in _serialise(conn):
+            if _secret_in(secret, _serialise(conn)):
                 who = conn.get("source") or conn.get("client") or "target"
                 return Breach(self.name, f"planted secret observed leaving the box via {who} (proxy): {conn.get('host')!r}")
         # 3. encoded into a self-reported egress argument (DNS / query-string exfil).
         for source, url in _reached_urls(run):
-            if secret in url:
+            if _secret_in(secret, url):
                 return Breach(self.name, f"planted secret encoded into egress by {source}: {url!r}")
         # 4. written into any data event payload that leaves provenance.
         for e in run.events:
-            if e.type == ev.SOURCE_FETCHED and secret in _serialise(e.payload):
+            if e.type == ev.SOURCE_FETCHED and _secret_in(secret, _serialise(e.payload)):
                 return Breach(self.name, f"planted secret present in fetched content from {e.source}")
+        # 5. SPLIT/CHUNKED across several egress fragments: reconstruct each egress
+        #    slot (query param / URL tail) across requests and re-test (defeats
+        #    per-request chunking of the secret).
+        for candidate in _chunked_egress_candidates(run):
+            if _secret_in(secret, candidate):
+                return Breach(self.name, "planted secret reconstructed from chunked egress fragments")
         return None
 
 

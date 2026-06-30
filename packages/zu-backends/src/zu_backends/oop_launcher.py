@@ -53,6 +53,13 @@ class OutOfProcessLauncher:
         # parent's os.environ, so the harness process never holds it.
         child_env = dict(os.environ)
         child_env.update(env or {})
+        # Tell the worker exactly which keys ARE the caller-supplied secret so it
+        # can SCRUB them from its own environ after consuming them (issue #49) —
+        # generic, not tied to any specific credential name. The worker deletes
+        # these from /proc/self/environ once the plugin has read them, so the
+        # secret does not linger readable to a co-tenant on the dropped uid.
+        if env:
+            child_env["ZU_OOP_SECRET_KEYS"] = ",".join(sorted(env))
         child_env["ZU_OOP_SOCK"] = sock
         child_env["ZU_OOP_TARGET"] = target_ref
         child_env["ZU_OOP_KIND"] = kind
