@@ -45,11 +45,22 @@ async def test_sandbox_is_destroyed_even_when_render_raises() -> None:
 
 
 async def test_render_requests_network_egress() -> None:
-    # Regression: the browser must be granted egress, or it cannot fetch the
-    # page it is asked to render. render_dom must request network in its spec.
+    # Regression: the browser must be granted egress, or it cannot fetch the page
+    # it is asked to render. In the CONTAINED configuration (the production path —
+    # an egress proxy + internal network provisioned for the run) the spec is the
+    # SCOPED isolated+proxy form (issue #54), NOT bare network:True: egress is
+    # granted, but routed through the allowlist proxy and scoped to the target.
     backend = _backend()
-    await RenderDom(backend=backend, allow_private=True).__call__(ctx=None, url="http://spa.test/")
-    assert backend.launched[0].get("network") is True
+    tool = RenderDom(
+        backend=backend, allow_private=True,
+        proxy={"host": "egress-proxy", "port": 8080}, network_name="zu-sandbox-net",
+    )
+    await tool.__call__(ctx=None, url="http://spa.test/")
+    spec = backend.launched[0]
+    assert spec["network"] == "isolated"
+    assert spec["network_name"] == "zu-sandbox-net"
+    assert spec["proxy"] == {"host": "egress-proxy", "port": 8080}
+    assert spec["allowlist"] == ["spa.test"]
 
 
 async def test_render_applies_ssrf_guard_before_leasing_a_sandbox() -> None:

@@ -9,11 +9,15 @@ results count as grounding provenance.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, cast
 
 import httpx
 import pytest
 
 from zu_tools.search import ExaConnector, WebSearch
+
+if TYPE_CHECKING:
+    from zu_tools.search import SearchConnector
 
 
 def _exa_transport(results: list[dict], *, capture: dict | None = None) -> httpx.MockTransport:
@@ -80,3 +84,60 @@ def test_missing_key_is_a_clear_error(monkeypatch) -> None:
 def test_unknown_connector_rejected() -> None:
     with pytest.raises(ValueError, match="unknown search connector"):
         WebSearch("bing")
+
+
+class _HostlessConnector:
+    """A custom connector that violates the SearchConnector Protocol's ``host: str``
+    contract by omitting ``host`` entirely. Protocols are not runtime-enforced, so the
+    old code defaulted this to the open-egress wildcard ``"*"`` (== EGRESS_OPEN)."""
+
+    async def search(self, query: str, num_results: int) -> list[dict[str, str]]:
+        return []
+
+
+class _StubConnector:
+    """A well-formed custom connector: a single API ``host`` scopes its egress."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+
+    async def search(self, query: str, num_results: int) -> list[dict[str, str]]:
+        return []
+
+
+def test_hostless_connector_fails_closed_not_wildcard() -> None:
+    # Issue #53: a custom connector with NO ``host`` attribute must FAIL CLOSED at
+    # construction — never silently yield ``frozenset({"*"})`` (EGRESS_OPEN). This
+    # asserts the wildcard fallback is gone (fails on the old getattr(..., "*")).
+    # ``cast`` feeds an object that violates the Protocol's ``host: str`` contract,
+    # exactly the runtime-only case the guard exists for (Protocols aren't enforced).
+    with pytest.raises(ValueError, match="non-empty 'host'"):
+        WebSearch(cast("SearchConnector", _HostlessConnector()))
+
+
+def test_empty_string_host_fails_closed() -> None:
+    # The attribute is present but falsy: not the wildcard, but a broken/empty
+    # allowlist all the same. Rejected by the same non-truthy-host guard.
+    with pytest.raises(ValueError, match="non-empty 'host'"):
+        WebSearch(_StubConnector(host=""))
+
+
+def test_none_host_fails_closed() -> None:
+    # ``host=None`` likewise violates ``host: str`` — fed via cast to exercise the
+    # runtime guard the type system cannot.
+    with pytest.raises(ValueError, match="non-empty 'host'"):
+        WebSearch(cast("SearchConnector", _StubConnector(host=cast("str", None))))
+
+
+def test_wellformed_custom_connector_yields_single_host_egress() -> None:
+    # A connector that honours the contract yields EXACTLY its single host — no
+    # broadening, no wildcard.
+    tool = WebSearch(_StubConnector(host="search.internal.example"))
+    assert tool.egress == frozenset({"search.internal.example"})
+
+
+def test_shipped_default_still_constructs_with_exa_host() -> None:
+    # The shipped default (and connector="exa") still constructs and reports the
+    # single Exa host — the fix does not regress the supported path.
+    assert WebSearch(api_key="k").egress == frozenset({"api.exa.ai"})
+    assert WebSearch(connector="exa", api_key="k").egress == frozenset({"api.exa.ai"})
