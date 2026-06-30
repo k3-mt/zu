@@ -107,8 +107,12 @@ Every tool depends only on the `HfClient` seam, so the same tool works:
   `router.huggingface.co`; `HF_TOKEN` is read from the environment inside the
   backend. `pip install 'zu-huggingface[hosted]'`.
 - **Local** — `PipelineBackend` wraps `transformers.pipeline` for the
-  air-gapped / on-prem case. Reaches no network. Every pipeline is built through
-  the supply-chain guards. `pip install 'zu-huggingface[local]'` (plus a
+  air-gapped / on-prem case. Reaches no network (fails closed on a cache miss;
+  populate the cache out of band): the file set is resolved from the local cache
+  via `snapshot_download(..., local_files_only=True)`, every pipeline is built
+  with `local_files_only=True` / `use_safetensors=True`, and the process runs
+  with `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`. Every pipeline is built
+  through the supply-chain guards. `pip install 'zu-huggingface[local]'` (plus a
   backend such as `torch`).
 
 ## The supply chain — safe by default (§8.3)
@@ -116,10 +120,14 @@ Every tool depends only on the `HfClient` seam, so the same tool works:
 Pulling a model from the Hub is a supply-chain surface. `supply_chain.py`
 enforces, by default:
 
-- **Pin + hash.** A `ModelPin` should carry a full commit-sha `revision`;
-  `verify_file_hash` checks a downloaded file's sha256.
+- **Pin + hash.** A `ModelPin` carries a full commit-sha `revision` and optional
+  `expected_hashes`; on the local path the `PipelineBackend` resolves the cached
+  snapshot offline and `verify_file_hash` checks each entry's sha256 against the
+  file on disk *before* the pipeline is constructed.
 - **safetensors, not pickle.** `verify_model_source` rejects `.bin`/`.pt`/`.ckpt`
-  checkpoints (which execute on deserialisation) unless explicitly allowed.
+  checkpoints (which execute on deserialisation) unless explicitly allowed — and
+  on the local path this runs against the **real** cached file set before load
+  (with `use_safetensors=True` as loader-level defence-in-depth).
 - **No remote code.** `safe_pipeline_kwargs` forces `trust_remote_code=False`;
   `assert_no_remote_code` raises if it is relaxed.
 

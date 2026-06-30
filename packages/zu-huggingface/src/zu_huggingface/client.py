@@ -29,7 +29,13 @@ import os
 import struct
 from typing import Any, Protocol, runtime_checkable
 
-from .supply_chain import ModelPin, SupplyChainPolicy, safe_pipeline_kwargs
+from .supply_chain import (
+    ModelPin,
+    SupplyChainPolicy,
+    resolve_cached_snapshot,
+    safe_pipeline_kwargs,
+    verify_file_hash,
+)
 
 # The Inference Providers router — the hosted default, OpenAI-compatible for
 # chat at /v1 but task-native through the InferenceClient methods.
@@ -357,17 +363,46 @@ class InferenceClientBackend:
 class PipelineBackend:
     """Local HuggingFace via ``transformers.pipeline`` (lazy import).
 
-    The only option for air-gapped / on-prem. Every pipeline is built through
-    :func:`safe_pipeline_kwargs` — a pinned revision and ``trust_remote_code``
-    forced off — so the §8.3 supply-chain rules hold by construction. Pipelines
-    are cached per (task, model).
+    The only option for air-gapped / on-prem, and it **reaches no network**: the
+    cache is populated out of band, and every pipeline is built offline. Each one
+    is built through the §8.3 supply-chain guards, in this order:
+
+    1. resolve the model's snapshot **from the local cache** via
+       :func:`resolve_cached_snapshot` (``snapshot_download(..., local_files_only=
+       True)`` — no egress; a cache miss raises, the correct fail-closed
+       behaviour);
+    2. run the pickle / ``.bin/.pt/.ckpt`` rejection over that **real** cached
+       file set, and hash-verify every ``pin.expected_hashes`` entry against the
+       file on disk — all *before* ``transformers.pipeline`` is constructed;
+    3. build with :func:`safe_pipeline_kwargs` (``trust_remote_code=False``,
+       ``local_files_only=True``, ``use_safetensors=True``, pinned revision).
+
+    The process env carries ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE`` too,
+    because transformers honours ``local_files_only`` inconsistently across tasks.
+    A :class:`ModelPin` (with a revision and optional ``expected_hashes``) may be
+    supplied per model id; otherwise one is synthesised from the model string and
+    the verification still runs against the cache. Pipelines are cached per
+    (task, model).
     """
 
     egress_host = ""  # local — no egress
 
-    def __init__(self, policy: SupplyChainPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: SupplyChainPolicy | None = None,
+        *,
+        pins: dict[str, ModelPin] | None = None,
+    ) -> None:
         self._policy = policy or SupplyChainPolicy()
         self._cache: dict[tuple[str, str], Any] = {}
+        # Optional real pins (revision + expected_hashes) keyed by repo id; a model
+        # without one falls back to a synthesised ModelPin(repo_id=model).
+        self._pins: dict[str, ModelPin] = dict(pins or {})
+
+    def _pin_for(self, model: str) -> ModelPin:
+        """The real :class:`ModelPin` for ``model`` (revision + expected_hashes)
+        when one was supplied, else a bare pin synthesised from the model id."""
+        return self._pins.get(model, ModelPin(repo_id=model))
 
     def _pipe(self, task: str, model: str) -> Any:
         key = (task, model)
@@ -379,7 +414,23 @@ class PipelineBackend:
                     "the local HuggingFace backend needs `transformers` "
                     "(install zu-huggingface[local])"
                 ) from e
-            kwargs = safe_pipeline_kwargs(ModelPin(repo_id=model), self._policy)
+            # Belt-and-suspenders zero-egress: transformers applies local_files_only
+            # inconsistently, so force the offline env flags too before any load.
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+            pin = self._pin_for(model)
+            # Resolve the file set FROM THE LOCAL CACHE (no network); a cache miss
+            # raises here — fail closed. This is also where require_pinned_revision
+            # is enforced before any cache lookup.
+            safe_pipeline_kwargs(pin, self._policy)  # cheap pin checks, may raise
+            snapshot, files = resolve_cached_snapshot(pin)
+            # The pickle/.bin/.pt/.ckpt rejection + per-file hash check run against
+            # the REAL cached files, before the pipeline is constructed.
+            kwargs = safe_pipeline_kwargs(pin, self._policy, files=files)
+            for filename, expected in pin.expected_hashes.items():
+                verify_file_hash(snapshot / filename, expected)
+
             self._cache[key] = pipeline(task, **kwargs)
         return self._cache[key]
 

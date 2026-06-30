@@ -102,14 +102,35 @@ def assert_no_remote_code(policy: SupplyChainPolicy | None = None) -> None:
         )
 
 
-def safe_pipeline_kwargs(pin: ModelPin, policy: SupplyChainPolicy | None = None) -> dict:
-    """Keyword arguments for ``transformers.pipeline`` that enforce the policy:
-    a pinned revision and ``trust_remote_code=False`` (always — there is no safe
-    default for executing repo code)."""
+def safe_pipeline_kwargs(
+    pin: ModelPin,
+    policy: SupplyChainPolicy | None = None,
+    *,
+    files: list[str] | None = None,
+) -> dict:
+    """Keyword arguments for ``transformers.pipeline`` that enforce the policy.
+
+    Always: ``trust_remote_code=False`` (there is no safe default for executing
+    repo code), ``local_files_only=True`` (zero-egress — the loader must serve
+    from the local cache and never reach the network), and ``use_safetensors=True``
+    (loader-level defence-in-depth so even a stray pickle is not preferred). The
+    revision is pinned. When ``files`` is given (the real cached file set), it is
+    run through :func:`verify_model_source` so the pickle/``.bin/.pt/.ckpt``
+    rejection fires against the artifact actually on disk.
+    """
     policy = policy or SupplyChainPolicy()
     assert_no_remote_code(policy)
-    verify_model_source(pin, policy)
-    kwargs: dict = {"model": pin.repo_id, "trust_remote_code": False}
+    verify_model_source(pin, policy, files=files)
+    kwargs: dict = {
+        "model": pin.repo_id,
+        "trust_remote_code": False,
+        # Zero-egress: serve from the local cache, never fetch. transformers
+        # applies this inconsistently across tasks, so the backend also sets the
+        # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE env flags (belt and suspenders).
+        "local_files_only": True,
+        # Defence-in-depth: prefer the safe weights format at load time.
+        "use_safetensors": True,
+    }
     if pin.revision:
         kwargs["revision"] = pin.revision
     return kwargs
@@ -133,3 +154,35 @@ def verify_file_hash(path: str | Path, expected_sha256: str) -> None:
         raise SupplyChainError(
             f"{path}: sha256 mismatch — expected {expected_sha256}, got {actual}"
         )
+
+
+def resolve_cached_snapshot(pin: ModelPin) -> tuple[Path, list[str]]:
+    """Resolve ``pin`` to its cached snapshot directory and file list **offline**.
+
+    Uses ``huggingface_hub.snapshot_download(..., local_files_only=True)``, which
+    serves entirely from the local cache and **never** reaches the network — a
+    cache miss raises (the correct fail-closed behaviour for an air-gapped
+    backend). Returns ``(snapshot_dir, relative_file_paths)`` so the caller can
+    run the pickle guard against the real file set and hash-verify each file —
+    all without egress.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:  # pragma: no cover - exercised only without the extra
+        raise RuntimeError(
+            "resolving a cached model snapshot needs `huggingface_hub` "
+            "(install zu-huggingface[local])"
+        ) from e
+
+    # local_files_only=True ⇒ no network; a cache miss raises here (fail closed).
+    snapshot = Path(
+        snapshot_download(
+            pin.repo_id,
+            revision=pin.revision,
+            local_files_only=True,
+        )
+    )
+    files = sorted(
+        str(p.relative_to(snapshot)) for p in snapshot.rglob("*") if p.is_file()
+    )
+    return snapshot, files

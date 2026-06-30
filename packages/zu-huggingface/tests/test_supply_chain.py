@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -133,10 +134,42 @@ def _install_transformers_spy(monkeypatch, spy: _PipelineSpy) -> None:
     monkeypatch.setitem(sys.modules, "transformers", mod)
 
 
+def _install_hub_snapshot(monkeypatch, tmp_path, *, files, miss: bool = False) -> Path:
+    """Fake ``huggingface_hub.snapshot_download`` so the offline cache resolve
+    returns a snapshot dir populated with ``files`` (each filename → its content).
+
+    ``files`` is a mapping ``filename -> bytes`` (so a test can control the on-disk
+    bytes for hash verification). When ``miss`` is set, the faked
+    ``snapshot_download`` raises — emulating a cache miss with ``local_files_only=
+    True`` (no network), which the backend must surface as a fail-closed error.
+    Nothing here touches the network.
+    """
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir(exist_ok=True)
+    for name, content in files.items():
+        (snapshot / name).write_bytes(content)
+
+    def _snapshot_download(repo_id, *, revision=None, local_files_only=False, **kw):
+        # The backend MUST resolve offline — assert that here.
+        assert local_files_only is True, "cache resolve must be offline (no network)"
+        if miss:
+            raise FileNotFoundError(
+                f"{repo_id}: not in the local cache (local_files_only=True)"
+            )
+        return str(snapshot)
+
+    mod = types.ModuleType("huggingface_hub")
+    mod.snapshot_download = _snapshot_download  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", mod)
+    return snapshot
+
+
 @pytest.mark.parametrize("expected_task,drive", _NEW_LOCAL_TASKS)
-def test_new_local_tools_build_pipeline_through_the_guard(monkeypatch, expected_task, drive):
+def test_new_local_tools_build_pipeline_through_the_guard(monkeypatch, tmp_path, expected_task, drive):
     spy = _PipelineSpy()
     _install_transformers_spy(monkeypatch, spy)
+    # A safetensors-only cached snapshot so the offline resolve + pickle guard pass.
+    _install_hub_snapshot(monkeypatch, tmp_path, files={"model.safetensors": b"w"})
     backend = PipelineBackend()
     # The backend builds ModelPin(repo_id=model) with no revision, which the guard
     # would reject — relax require_pinned_revision here to reach the *kwargs* path
@@ -150,6 +183,8 @@ def test_new_local_tools_build_pipeline_through_the_guard(monkeypatch, expected_
     assert task == expected_task
     assert built["trust_remote_code"] is False  # the guard's invariant, every new task
     assert built["model"] == "acme/m"
+    assert built["local_files_only"] is True  # zero-egress (#55)
+    assert built["use_safetensors"] is True  # loader-level defence-in-depth (#47)
 
 
 def test_new_local_tool_refuses_unpinned_and_pickle(monkeypatch):
@@ -165,3 +200,96 @@ def test_new_local_tool_refuses_unpinned_and_pickle(monkeypatch):
     # pickle rejection is the same guard, proven directly:
     with pytest.raises(SupplyChainError, match="pickle"):
         verify_model_source(ModelPin(repo_id="acme/m", revision=_SHA), files=["model.bin"])
+
+
+# --- #55 / #47 / #58: the production _pipe path is zero-egress, rejects pickle,
+# and hash-verifies against the REAL cached file set — all offline ($0). --------
+
+
+def test_pipe_cache_miss_fails_closed_no_download(monkeypatch, tmp_path):
+    # #55: a model NOT in the local cache must FAIL CLOSED (the offline resolve
+    # raises), never fetch — and the offline env flags are set before the load.
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+    spy = _PipelineSpy()
+    _install_transformers_spy(monkeypatch, spy)
+    _install_hub_snapshot(monkeypatch, tmp_path, files={}, miss=True)
+    backend = PipelineBackend(pins={"acme/m": ModelPin(repo_id="acme/m", revision=_SHA)})
+
+    with pytest.raises(FileNotFoundError, match="local cache"):
+        backend.text_classification("hi", "acme/m")
+    assert not spy.calls  # no pipeline was built on a cache miss
+    # belt-and-suspenders offline flags were set in the process env
+    import os
+
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+
+
+def test_pipe_passes_offline_kwargs_to_pipeline(monkeypatch, tmp_path):
+    # #55: local_files_only=True reaches the pipeline kwargs on the production path.
+    spy = _PipelineSpy()
+    _install_transformers_spy(monkeypatch, spy)
+    _install_hub_snapshot(monkeypatch, tmp_path, files={"model.safetensors": b"w"})
+    backend = PipelineBackend(pins={"acme/m": ModelPin(repo_id="acme/m", revision=_SHA)})
+
+    backend.text_classification("hi", "acme/m")
+
+    assert spy.calls
+    _, built = spy.calls[0]
+    assert built["local_files_only"] is True
+    assert built["use_safetensors"] is True
+    assert built["trust_remote_code"] is False
+    assert built["revision"] == _SHA
+
+
+def test_pipe_rejects_pickle_in_cached_set_before_pipeline(monkeypatch, tmp_path):
+    # #47: a cached file set that is pickle-only is rejected BEFORE pipeline is
+    # built — via the live _pipe path (not a direct verify_model_source call).
+    spy = _PipelineSpy()
+    _install_transformers_spy(monkeypatch, spy)
+    _install_hub_snapshot(monkeypatch, tmp_path, files={"model.bin": b"w"})
+    backend = PipelineBackend(pins={"acme/m": ModelPin(repo_id="acme/m", revision=_SHA)})
+
+    with pytest.raises(SupplyChainError, match="pickle"):
+        backend.text_classification("hi", "acme/m")
+    assert not spy.calls  # rejected before any pipeline was built
+
+
+def test_pipe_hash_mismatch_fails_matching_passes(monkeypatch, tmp_path):
+    # #58: a ModelPin with a MISMATCHED expected_hashes entry raises before the
+    # pipeline; a MATCHING hash passes — both on the live _pipe path.
+    content = b"safetensors-weights"
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    (snapshot_dir / "model.safetensors").write_bytes(content)
+    good = file_sha256(snapshot_dir / "model.safetensors")
+
+    spy = _PipelineSpy()
+    _install_transformers_spy(monkeypatch, spy)
+    _install_hub_snapshot(monkeypatch, tmp_path, files={"model.safetensors": content})
+
+    bad_backend = PipelineBackend(
+        pins={
+            "acme/m": ModelPin(
+                repo_id="acme/m",
+                revision=_SHA,
+                expected_hashes={"model.safetensors": "0" * 64},
+            )
+        }
+    )
+    with pytest.raises(SupplyChainError, match="sha256 mismatch"):
+        bad_backend.text_classification("hi", "acme/m")
+    assert not spy.calls
+
+    ok_backend = PipelineBackend(
+        pins={
+            "acme/m": ModelPin(
+                repo_id="acme/m",
+                revision=_SHA,
+                expected_hashes={"model.safetensors": good},
+            )
+        }
+    )
+    ok_backend.text_classification("hi", "acme/m")
+    assert spy.calls  # the matching hash let the pipeline build
