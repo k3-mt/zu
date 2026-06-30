@@ -36,32 +36,32 @@ dependencies = [
 web = ["zu-tools==0.8.0"]
 demo = ["zu-tools==0.8.0"]
 # Real model SDKs (the adapters ship in the base; these add the vendor client).
-anthropic = ["zu-providers[anthropic]==0.2.4"]
-openai = ["zu-providers[openai]==0.2.4"]
+anthropic = ["zu-providers[anthropic]==0.8.0"]
+openai = ["zu-providers[openai]==0.8.0"]
 # The HTTP server (`zu serve`) and the Docker sandbox client (tier-2 browser).
-serve = ["zu-cli[serve]==0.2.4"]
-docker = ["zu-backends[docker]==0.2.4"]
+serve = ["zu-cli[serve]==0.8.0"]
+docker = ["zu-backends[docker]==0.8.0"]
 # The MCP server (`zu mcp`) — integrate with coding agents (Claude Code, Cursor).
-mcp = ["zu-cli[mcp]==0.2.4"]
+mcp = ["zu-cli[mcp]==0.8.0"]
 # The plugin-test gate + adversarial red team (`zu test-plugin`) — a contributor
 # / CI tool for proving a plugin cooperates and withstands attack.
-test = ["zu-cli[test]==0.2.4"]
+test = ["zu-cli[test]==0.8.0"]
 # HuggingFace task models as typed tools/detectors/validators (behind the
 # supply-chain guards). [huggingface] pulls the hosted Inference Providers
 # router; for local pipelines install `zu-huggingface[local]` (transformers + a
 # backend) directly.
-huggingface = ["zu-huggingface[hosted]==0.2.4"]
+huggingface = ["zu-huggingface[hosted]==0.8.0"]
 # Everything: web tools, both model SDKs, the server, the Docker sandbox, MCP,
 # the test gate, and the HuggingFace adapter.
 all = [
     "zu-tools==0.8.0",
-    "zu-providers[anthropic]==0.2.4",
-    "zu-providers[openai]==0.2.4",
-    "zu-cli[serve]==0.2.4",
-    "zu-cli[mcp]==0.2.4",
-    "zu-cli[test]==0.2.4",
-    "zu-backends[docker]==0.2.4",
-    "zu-huggingface[hosted]==0.2.4",
+    "zu-providers[anthropic]==0.8.0",
+    "zu-providers[openai]==0.8.0",
+    "zu-cli[serve]==0.8.0",
+    "zu-cli[mcp]==0.8.0",
+    "zu-cli[test]==0.8.0",
+    "zu-backends[docker]==0.8.0",
+    "zu-huggingface[hosted]==0.8.0",
 ]
 
 [project.urls]
