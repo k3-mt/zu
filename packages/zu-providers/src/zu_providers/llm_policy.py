@@ -9,10 +9,17 @@ the available :class:`ToolSpec`\\s into a :class:`ModelRequest`, calls
 ``complete``, and maps the response back to a typed :class:`Action` — a tool
 call if the model chose one, else a final text answer.
 
-It carries the typed multimodal content through: text parts become the user
-message; image parts are passed as base64 image blocks for a vision-capable
-provider. Conversation history across turns stays the loop's job — this adapter
-is the per-decision bridge, deliberately stateless.
+It carries the typed multimodal content through in a **provider-neutral** form:
+text parts become the user message; image parts ride along as neutral image
+blocks (``{"type": "image", "mime": ..., "data": <base64>}``) that each provider
+adapter translates to its own wire shape (OpenAI ``image_url``; Anthropic an
+``image``/``source`` block) at the adapter boundary. The vendor wire-format never
+leaks into this policy-neutral layer. Conversation history across turns stays the
+loop's job — this adapter is the per-decision bridge, deliberately stateless.
+
+Image content is gated on the provider's advertised ``capabilities.vision``: a
+vision-incapable provider raises a clear local error here rather than shipping
+image blocks it cannot encode (which would surface as an opaque remote 400).
 """
 
 from __future__ import annotations
@@ -40,17 +47,31 @@ class LlmPolicy:
 
     def _messages(self, observation: Observation) -> list[dict]:
         # Build one user turn from the observation's typed content. Text is the
-        # message body; images ride along as base64 blocks (used by a
-        # vision-capable provider, ignored by a text-only one).
+        # message body; images ride along as NEUTRAL image blocks — base64 data +
+        # mime, no vendor wire-format. Each provider adapter translates this
+        # neutral block into its own shape (OpenAI image_url; Anthropic
+        # image/source) at the adapter boundary, so this policy-neutral layer
+        # stays provider-agnostic.
+        has_image = any(isinstance(p, Image) for p in observation.content)
+        if has_image and not self._provider.capabilities.vision:
+            # Gate before building the request: a provider that advertises no
+            # vision must never receive image blocks it cannot encode (which
+            # would surface deep at the API as an opaque 400). Fail locally and
+            # clearly at the seam that knows the provider can't take images.
+            raise ValueError(
+                "observation carries image content but the provider does not "
+                "advertise vision (capabilities.vision is False); route images "
+                "to a vision-capable provider or drop them before this policy."
+            )
         content: list[dict] = []
         for part in observation.content:
             if isinstance(part, Text):
                 content.append({"type": "text", "text": part.text})
             elif isinstance(part, Image):
-                b64 = base64.b64encode(part.data).decode()
                 content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{part.mime};base64,{b64}"},
+                    "type": "image",
+                    "mime": part.mime,
+                    "data": base64.b64encode(part.data).decode(),
                 })
         # Collapse to a plain string when it is text-only — the shape every
         # provider accepts, vision or not.

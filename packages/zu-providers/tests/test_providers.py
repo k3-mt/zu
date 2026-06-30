@@ -9,6 +9,7 @@ live call against each API is opt-in (env-gated) so it never blocks CI.
 
 from __future__ import annotations
 
+import base64 as _base64
 import json
 import os
 
@@ -17,6 +18,13 @@ import httpx
 import openai
 import pytest
 
+from zu_core.errors import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimited,
+    ProviderTimeout,
+    ProviderUnavailable,
+)
 from zu_core.ports import Finish, ModelRequest
 from zu_providers._messages import to_anthropic_messages, to_openai_messages
 from zu_providers.anthropic import AnthropicProvider
@@ -349,6 +357,154 @@ async def test_anthropic_adapter_drives_the_loop() -> None:
     assert result.status == Status.SUCCESS
     assert result.value == {"price": "$9.00"}
     assert turn["n"] == 2  # the loop drove two model turns through the adapter
+
+
+# --- #59: neutral image block -> per-provider wire shape at the adapter --------
+
+_IMG_RAW = b"\x89PNG"
+_IMG_B64 = _base64.b64encode(_IMG_RAW).decode()
+# One neutral user turn carrying a neutral image block (what LlmPolicy emits).
+_IMAGE_HISTORY: list[dict] = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image", "mime": "image/png", "data": _IMG_B64},
+        ],
+    }
+]
+
+
+def test_anthropic_translates_neutral_image_to_source_block() -> None:
+    # The Anthropic adapter translates the neutral image block into Anthropic's
+    # {"type":"image","source":{"type":"base64",...}} wire shape — no OpenAI
+    # image_url anywhere.
+    _, out = to_anthropic_messages(_IMAGE_HISTORY)
+    content = out[0]["content"]
+    assert content[0] == {"type": "text", "text": "what is this?"}
+    assert content[1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": _IMG_B64},
+    }
+    assert "image_url" not in content[1]
+
+
+def test_openai_translates_neutral_image_to_image_url_block() -> None:
+    # The OpenAI-compatible adapter translates the neutral image block into the
+    # existing image_url data-URL shape.
+    out = to_openai_messages(_IMAGE_HISTORY)
+    content = out[0]["content"]
+    assert content[0] == {"type": "text", "text": "what is this?"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{_IMG_B64}"},
+    }
+
+
+# --- #60: SDK exceptions translated to neutral zu_core errors at the port ------
+
+
+class _Boom:
+    """A stub client whose create() raises a preset SDK exception — proves the
+    adapter translates at the port boundary with no network."""
+
+    def __init__(self, exc: Exception, *, anthropic_shape: bool) -> None:
+        self._exc = exc
+        if anthropic_shape:
+            self.messages = _RaiseOn(exc, "create")
+        else:
+            self.chat = _Chat(exc)
+
+
+class _RaiseOn:
+    def __init__(self, exc: Exception, attr: str) -> None:
+        self._exc = exc
+        setattr(self, attr, self._raise)
+
+    async def _raise(self, **kwargs):  # noqa: ANN003
+        raise self._exc
+
+
+class _Chat:
+    def __init__(self, exc: Exception) -> None:
+        self.completions = _RaiseOn(exc, "create")
+
+
+def _anthropic_exc(name: str) -> Exception:
+    """Construct a representative anthropic SDK exception of the given class."""
+    import httpx
+
+    req = httpx.Request("POST", "http://test.local/")
+    if name == "auth":
+        return anthropic.AuthenticationError(
+            "bad key", response=httpx.Response(401, request=req), body=None
+        )
+    if name == "rate":
+        return anthropic.RateLimitError(
+            "slow down", response=httpx.Response(429, request=req), body=None
+        )
+    if name == "timeout":
+        return anthropic.APITimeoutError(request=req)
+    if name == "connection":
+        return anthropic.APIConnectionError(message="no route", request=req)
+    return RuntimeError("something unexpected")  # unknown -> base ProviderError
+
+
+def _openai_exc(name: str) -> Exception:
+    import httpx
+
+    req = httpx.Request("POST", "http://test.local/")
+    if name == "auth":
+        return openai.AuthenticationError(
+            "bad key", response=httpx.Response(401, request=req), body=None
+        )
+    if name == "rate":
+        return openai.RateLimitError(
+            "slow down", response=httpx.Response(429, request=req), body=None
+        )
+    if name == "timeout":
+        return openai.APITimeoutError(request=req)
+    if name == "connection":
+        return openai.APIConnectionError(message="no route", request=req)
+    return RuntimeError("something unexpected")
+
+
+def _make_anthropic_raising(exc: Exception) -> AnthropicProvider:
+    return AnthropicProvider(client=_Boom(exc, anthropic_shape=True))
+
+
+def _make_openai_raising(exc: Exception) -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(model="gpt-x", client=_Boom(exc, anthropic_shape=False))
+
+
+# (vendor exception kind -> expected neutral type), proven identical for both ports.
+_ERROR_CASES = [
+    pytest.param("auth", ProviderAuthError, id="auth"),
+    pytest.param("rate", ProviderRateLimited, id="rate-limit"),
+    pytest.param("timeout", ProviderTimeout, id="timeout"),
+    pytest.param("connection", ProviderUnavailable, id="connection"),
+    pytest.param("unknown", ProviderError, id="unknown-base"),
+]
+
+_ERROR_PROVIDERS = [
+    pytest.param(_make_anthropic_raising, _anthropic_exc, id="anthropic"),
+    pytest.param(_make_openai_raising, _openai_exc, id="openai-compatible"),
+]
+
+
+@pytest.mark.parametrize("make_raising, make_exc", _ERROR_PROVIDERS)
+@pytest.mark.parametrize("kind, neutral", _ERROR_CASES)
+async def test_sdk_exception_translated_to_neutral_error(
+    make_raising, make_exc, kind, neutral
+) -> None:
+    sdk_exc = make_exc(kind)
+    provider = make_raising(sdk_exc)
+    with pytest.raises(neutral) as ei:
+        await provider.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    # the neutral error is raised, and the raw SDK cause is chained for diagnostics
+    assert ei.value.__cause__ is sdk_exc
+    # nothing vendor-specific escapes the port: every neutral type IS a ProviderError
+    assert isinstance(ei.value, ProviderError)
 
 
 # --- opt-in live calls (@pytest.mark.live + a real key; run with --run-live) ---
