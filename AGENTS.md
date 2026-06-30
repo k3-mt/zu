@@ -171,6 +171,13 @@ shape it expects.
   see is what runs.
 - **Fail loudly, not silently.** Validate inputs and outputs; surface errors
   (log or an error observation), never swallow them into a misleading success.
+- **Pin what CI executes.** Every `uses:` in `.github/workflows/` that names a
+  non-local action is pinned to a full 40-char commit SHA (with a trailing
+  `# vX` comment); no floating tag/branch ref. Any binary CI downloads is a
+  fixed release + verified checksum, never a remote script piped into a shell.
+  Dependabot (`.github/dependabot.yml`) keeps the SHAs current, and
+  `packages/zu-core/tests/test_workflow_hardening.py` fails CI if the discipline
+  regresses.
 
 ## The plugin test gate
 

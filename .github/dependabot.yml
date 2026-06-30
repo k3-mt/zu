@@ -1,0 +1,17 @@
+# Keep the SHA-pinned GitHub Actions current. Workflows pin every third-party
+# action to a full commit SHA (see AGENTS.md › design invariants and
+# packages/zu-core/tests/test_workflow_hardening.py); Dependabot bumps those
+# pins — and their trailing `# vX` comments — so pinning stays a maintenance
+# convenience, not a freeze.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
