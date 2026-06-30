@@ -6,8 +6,21 @@ logging it. Both are the ground truth the verdict observers read."""
 from __future__ import annotations
 
 import asyncio
+import socket
 
+import zu_backends.egress_proxy as egress_proxy
 from zu_backends.egress_proxy import LocalEgressProxy
+
+
+def _fake_getaddrinfo(ip: str):
+    """A stub getaddrinfo that resolves ANY name to ``ip`` — a fake resolver so the
+    DNS-rebind path is exercised over loopback with no real network (issue #50)."""
+
+    def _resolve(host, port, *args, **kwargs):
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))]
+
+    return _resolve
 
 
 def _reader_of(data: bytes) -> asyncio.StreamReader:
@@ -77,6 +90,74 @@ async def test_refuses_internal_host_even_if_allowlisted() -> None:
         assert proxy.connections(handle)[0]["allowed"] is False
     finally:
         await proxy.close(handle)
+
+
+async def test_allowlisted_name_that_rebinds_to_metadata_is_refused(monkeypatch) -> None:
+    # Issue #50: the proxy validated the CONNECT host NAME but re-resolved it at
+    # dial time. An allowlisted name whose DNS rebinds to 169.254.169.254 must be
+    # REFUSED on the resolved IP (not a magic constant — link-local detection),
+    # logged allowed:false, and the entry must record the resolved IP it caught.
+    monkeypatch.setattr(egress_proxy.socket, "getaddrinfo",
+                        _fake_getaddrinfo("169.254.169.254"))
+    proxy = LocalEgressProxy()  # block_internal=True (default)
+    handle = await proxy.launch({"allowlist": ["data.partner.example"]})
+    try:
+        status, writer = await _connect_request(
+            handle.host, handle.port, b"CONNECT data.partner.example:443 HTTP/1.1")
+        assert b"403" in status  # refused on the RESOLVED IP, not the benign name
+        writer.close()
+        await asyncio.sleep(0.05)
+        conn = proxy.connections(handle)[0]
+        assert conn["host"] == "data.partner.example"
+        assert conn["allowed"] is False
+        assert conn["ip"] == "169.254.169.254"  # audit records what it actually caught
+    finally:
+        await proxy.close(handle)
+
+
+async def test_allowlisted_name_resolving_to_public_ip_still_connects(monkeypatch) -> None:
+    # The happy path must not break: an allowlisted name that resolves to a PUBLIC
+    # IP still tunnels. We fake the resolver to point at a loopback echo upstream
+    # (a stand-in for "public") and tell the guard it is a public address.
+    echo_seen: list[bytes] = []
+
+    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        data = await reader.read(1024)
+        echo_seen.append(data)
+        writer.write(b"PONG:" + data)
+        await writer.drain()
+        writer.close()
+
+    upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+    up_port = upstream.sockets[0].getsockname()[1]
+    # Resolve the allowlisted name to the loopback upstream's address, but report it
+    # to the guard as a public IP so block_internal does not (correctly) refuse it.
+    monkeypatch.setattr(egress_proxy.socket, "getaddrinfo",
+                        _fake_getaddrinfo("127.0.0.1"))
+    monkeypatch.setattr(egress_proxy, "is_internal_ip", lambda ip: False)
+
+    proxy = LocalEgressProxy()  # block_internal=True
+    handle = await proxy.launch({"allowlist": ["data.partner.example"]})
+    try:
+        reader, writer = await asyncio.open_connection(handle.host, handle.port)
+        writer.write(f"CONNECT data.partner.example:{up_port} HTTP/1.1\r\n\r\n".encode())
+        await writer.drain()
+        established = await asyncio.wait_for(reader.readline(), 5)
+        assert b"200" in established  # tunnel established to the validated IP
+        await reader.readline()
+        writer.write(b"PING")
+        await writer.drain()
+        echoed = await asyncio.wait_for(reader.read(64), 5)
+        assert b"PONG:PING" in echoed
+        writer.close()
+        await asyncio.sleep(0.05)
+        conn = proxy.connections(handle)[0]
+        assert conn["allowed"] is True
+        assert conn["host"] == "data.partner.example"
+        assert conn["ip"] == "127.0.0.1"  # the pinned, validated IP it dialed
+    finally:
+        await proxy.close(handle)
+        upstream.close()
 
 
 async def test_tunnels_an_allowed_host_and_logs_bytes() -> None:

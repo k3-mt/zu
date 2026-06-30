@@ -99,20 +99,108 @@ def _host_of(url: str) -> str | None:
         return None
 
 
+def _canonical_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse ``host`` as an IP, canonicalising the encoded IPv4 forms libc accepts
+    but ``ipaddress.ip_address`` rejects (issue #51): a single decimal integer
+    (``2130706433``), ``0x``-hex (``0x7f000001``), octal dotted-quad
+    (``0177.0.0.1``), and mixed-radix dotted forms. Returns ``None`` for a real
+    DNS name.
+
+    NOTE: this is a deliberate, stdlib-only duplicate of
+    ``zu_backends.net_guard.canonical_ip`` — zu-redteam does not depend on
+    zu-backends, so the SSRF guard is shared by *contract* (a parity test pins the
+    two copies together) rather than by an import that would add a cross-package
+    dependency edge to the always-imported verdict path."""
+    text = (host or "").strip()
+    if not text:
+        return None
+    try:
+        return ipaddress.ip_address(text)
+    except ValueError:
+        pass
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            return ipaddress.ip_address(text[1:-1])
+        except ValueError:
+            return None
+    parts = text.split(".")
+    try:
+        if len(parts) == 1:
+            value = _parse_int_octet(parts[0])
+            if value is None or value > 0xFFFFFFFF:
+                return None
+            return ipaddress.IPv4Address(value)
+        if len(parts) == 4:
+            octets = [_parse_int_octet(p) for p in parts]
+            if any(o is None or o > 0xFF for o in octets):
+                return None
+            value = 0
+            for o in octets:
+                value = (value << 8) | o  # type: ignore[operator]
+            return ipaddress.IPv4Address(value)
+    except (ValueError, ipaddress.AddressValueError):
+        return None
+    return None
+
+
+def _parse_int_octet(token: str) -> int | None:
+    """One IPv4 octet/integer in decimal, ``0x``-hex, or leading-zero octal — the
+    radixes ``inet_aton`` honours. ``None`` on anything non-numeric."""
+    token = token.strip()
+    if not token:
+        return None
+    try:
+        if token.lower().startswith("0x"):
+            return int(token, 16)
+        if token.startswith("0") and token != "0":
+            return int(token, 8)
+        return int(token, 10)
+    except ValueError:
+        return None
+
+
+# Well-known internal *names* no plugin may reach (cloud-metadata / localhost
+# spellings). The load-bearing check is structural IP classification below, so
+# 169.254.169.254 is caught by link-local detection — these only cover the name
+# forms a self-reported URL may carry directly.
+_INTERNAL_NAMES = frozenset(
+    {
+        "localhost",
+        "metadata",
+        "metadata.google.internal",
+        "metadata.goog",
+        "metadata.azure.com",
+        "instance-data",
+        "instance-data.ec2.internal",
+    }
+)
+
+
 def is_internal_host(host: str) -> bool:
     """A host that must never be reached: loopback / private / link-local
-    (cloud metadata 169.254.169.254) — the SSRF targets from PHILOSOPHY.md §4.
-    A literal internal IP is decided structurally; a name is decided by the
-    well-known metadata/localhost spellings (we do not resolve at verdict time)."""
-    lowered = host.lower()
-    if lowered in {"localhost", "metadata.google.internal"}:
+    (cloud metadata 169.254.169.254) / unique-local / reserved — the SSRF targets
+    from PHILOSOPHY.md §4. We do not resolve at verdict time, but every *encoded*
+    spelling of an internal IP (decimal/hex/octal, issue #51) is normalised
+    structurally, and a single trailing dot is stripped before the name comparison
+    so ``metadata.google.internal.`` is treated like ``metadata.google.internal``."""
+    lowered = (host or "").strip().lower()
+    if lowered.endswith(".") and not lowered.endswith(".."):
+        lowered = lowered[:-1]  # strip a single trailing (root) dot
+    if lowered in _INTERNAL_NAMES:
         return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
+    ip = _canonical_ip(lowered)
+    if ip is None:
         return False
-    return (
-        ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+    if isinstance(ip, ipaddress.IPv6Address):
+        inner = ip.ipv4_mapped or ip.sixtofour
+        if inner is not None:
+            ip = inner
+    return bool(
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_reserved
+        or ip.is_unspecified
     )
 
 

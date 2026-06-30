@@ -27,10 +27,13 @@ bypass is *prevented*. Both are needed; this is the former.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
+import socket
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+
+from .net_guard import canonical_ip, is_internal_ip
+from .net_guard import is_internal_host as _is_internal_host
 
 # The egress allowlist sentinel (mirrors zu_core.ports.EGRESS_OPEN). Kept as a
 # literal so this stdlib-only module needs no import for one constant.
@@ -39,19 +42,48 @@ _PROXY_ERROR_CODES = {"refused": b"HTTP/1.1 403 Forbidden\r\n\r\n",
                       "upstream": b"HTTP/1.1 502 Bad Gateway\r\n\r\n"}
 
 
-def _is_internal_host(host: str) -> bool:
-    """A host no plugin may ever reach: loopback / private / link-local (cloud
-    metadata 169.254.169.254) or the well-known internal names. A literal IP is
-    decided structurally; a name only by the known internal spellings (we do not
-    resolve names here — that is the DNS-pin's job in the backend)."""
-    lowered = (host or "").lower()
-    if lowered in {"localhost", "metadata.google.internal"}:
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+class _InternalAddressRefused(PermissionError):
+    """A resolved address is internal/metadata — a policy refusal (403), distinct
+    from a mere resolution/connect failure (502). Carries the offending IP so the
+    audit entry can record what the name actually rebound to."""
+
+    def __init__(self, host: str, addr: str) -> None:
+        super().__init__(f"refusing to dial {host!r} -> {addr} (internal/metadata address)")
+        self.addr = addr
+
+
+def _resolve_validated_ip(host: str, port: int, block_internal: bool) -> str:
+    """Resolve ``host`` ONCE and return a single dial-able IP.
+
+    This is the load-bearing addition (issue #50): the proxy validated the CONNECT
+    host *name* but ``asyncio.open_connection(host, port)`` RE-RESOLVED it at dial
+    time, so an allowlisted name whose A-record rebinds to ``169.254.169.254`` was
+    dialed despite the guard. By resolving here and classifying the RESOLVED IP, the
+    validated host and the dialed host become the same object. Default-deny: one
+    poisoned answer fails the whole connection.
+
+    Raises :class:`_InternalAddressRefused` (a policy 403) if ``block_internal`` and
+    ANY resolved address is internal/metadata; ``OSError``/``socket.gaierror`` (a
+    502) if the name does not resolve. The caller dials the returned IP (pinned)
+    while keeping ``server_hostname=host`` for TLS SNI/cert validation.
+
+    ``block_internal=False`` (loopback tests) still resolves+pins but skips the
+    internal-address refusal, so a loopback upstream is reachable in tests."""
+    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)  # raises gaierror -> 502
+    # sockaddr[0] is the numeric address (a str for IP families); normalise to str.
+    addrs = [str(info[4][0]) for info in infos]
+    if block_internal:
+        for addr in addrs:
+            ip = canonical_ip(addr)
+            if ip is not None and is_internal_ip(ip):
+                raise _InternalAddressRefused(host, addr)
+    if not addrs:
+        raise OSError(f"no address for host {host!r}")
+    # Prefer an IPv4 address for the pin (broadest reachability), else the first.
+    for addr in addrs:
+        if ":" not in addr:
+            return addr
+    return addrs[0]
 
 
 @dataclass
@@ -151,11 +183,26 @@ class LocalEgressProxy:
                 writer.write(_PROXY_ERROR_CODES["refused"])
                 await writer.drain()
                 return
-            entry["allowed"] = True
+            entry["allowed"] = True  # name-policy passed
+            # Resolve ONCE and validate the RESOLVED IP (issue #50): the name-based
+            # guard above is defence in depth, but the load-bearing check is here —
+            # an allowlisted name whose DNS rebinds to an internal/metadata address
+            # is refused with a clean 403 + allowed:false, and the dialed IP is
+            # pinned and logged so the audit record matches what was actually dialed.
+            try:
+                ip = await asyncio.get_running_loop().run_in_executor(
+                    None, _resolve_validated_ip, host, port, self.block_internal)
+            except _InternalAddressRefused as refused:
+                entry["ip"] = refused.addr  # log what the name actually rebound to
+                entry["allowed"] = False
+                writer.write(_PROXY_ERROR_CODES["refused"])
+                await writer.drain()
+                return
+            entry["ip"] = ip  # the address actually dialed (audit fidelity)
             if method == "CONNECT" and self.mitm is not None:
-                await self._mitm_forward(reader, writer, host, port, entry)
+                await self._mitm_forward(reader, writer, host, ip, port, entry)
             else:
-                await self._forward(reader, writer, host, port, method, target,
+                await self._forward(reader, writer, host, ip, port, method, target,
                                     header_block, request_line, entry)
         except Exception:  # noqa: BLE001 - a proxy hiccup is an observation, not a crash
             try:
@@ -193,11 +240,12 @@ class LocalEgressProxy:
 
     async def _forward(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-        host: str, port: int, method: str, target: str,
+        host: str, ip: str, port: int, method: str, target: str,
         header_block: bytes, request_line: bytes, entry: dict,
     ) -> None:
+        # Dial the validated, PINNED IP (issue #50) — never re-resolve the name.
         up_reader, up_writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), self.io_timeout_s)
+            asyncio.open_connection(ip, port), self.io_timeout_s)
         try:
             if method == "CONNECT":
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -289,7 +337,7 @@ class LocalEgressProxy:
 
     async def _mitm_forward(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-        host: str, port: int, entry: dict,
+        host: str, ip: str, port: int, entry: dict,
     ) -> None:
         """TLS MITM (P2): become the client's TLS server with a minted leaf, read
         the decrypted request (recording its URL/body into the connection log for
@@ -311,8 +359,11 @@ class LocalEgressProxy:
             entry["body"] = decoded_body.decode("latin1", "replace")[: self.body_cap]
         entry["bytes_out"] += len(header_block) + len(raw_body)
         # Re-originate TLS upstream and pump the response (re-encrypted to client).
+        # Dial the validated, PINNED IP (issue #50) — never re-resolve the name —
+        # while keeping server_hostname=host so TLS SNI/cert validation still
+        # targets the intended name.
         up_reader, up_writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=self._upstream_ssl(), server_hostname=host),
+            asyncio.open_connection(ip, port, ssl=self._upstream_ssl(), server_hostname=host),
             self.io_timeout_s)
         try:
             up_writer.write(header_block + raw_body)
