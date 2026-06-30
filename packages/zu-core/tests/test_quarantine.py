@@ -11,10 +11,15 @@ behaviour mechanically), not by convention.
 
 from __future__ import annotations
 
+import pytest
+
 from zu_core import events as ev
 from zu_core.bus import EventBus
 from zu_core.contracts import Status, TaskSpec
+from zu_core.grants import InMemoryGrantStore
+from zu_core.ledger import InMemoryExecutionLedger
 from zu_core.loop import run_task
+from zu_core.ports import CAP_NET, EGRESS_OPEN
 from zu_core.registry import Registry
 from zu_providers.scripted import ScriptedProvider
 
@@ -113,3 +118,68 @@ async def test_quarantined_run_with_no_tool_calls_is_clean() -> None:
     types = [e.type for e in await bus.query()]
     assert ev.QUARANTINE_ESCAPE_ATTEMPT not in types
     assert ev.TAINT_RAISED not in types
+
+
+class NetTool:
+    """A tier-1 tool that declares off-box reach (net + open egress). Under a
+    ``containment="required"`` posture this is exactly the kind of tool that, if
+    REACHABLE, would refuse a non-sandboxed run. A quarantined reader never offers
+    it, so the effective tool set is empty and containment is a no-op."""
+
+    name = "fetch"
+    tier = 1
+    schema = {"name": "fetch", "parameters": {"type": "object", "properties": {}}}
+    prompt_fragment = "fetch()"
+    capabilities: frozenset[str] = frozenset({CAP_NET})
+    egress: frozenset[str] = frozenset({EGRESS_OPEN})
+
+    async def __call__(self, ctx, **kw) -> dict:
+        return {"content": "secret page body"}
+
+
+async def test_quarantine_denies_egress_and_isolates_state() -> None:
+    # (a) A net/egress tool under containment="required" does NOT refuse a
+    # quarantined run (the effective tool set is empty), and the declared envelope
+    # reports zero egress + the additive quarantined marker — NOT the net tool's
+    # egress. On the OLD code, enforce_containment over the full set raises, and the
+    # envelope lists fetch's open egress: this proof fails on current behaviour.
+    reg = Registry()
+    reg.register("tools", "fetch", NetTool())
+    provider = ScriptedProvider.from_moves([{"text": '{"read": true}', "finish": "stop"}])
+    bus = EventBus()
+
+    # No ContainmentRequired is raised even though containment="required" and the
+    # registered tool declares off-box reach: the quarantined reader offers it none.
+    result = await run_task(
+        TaskSpec(query="read the page", quarantined=True),
+        provider, reg, bus, containment="required",
+    )
+    assert result.status == Status.SUCCESS
+
+    declared = next(e for e in await bus.query() if e.type == ev.ENVELOPE_DECLARED)
+    # The audit log states ZERO egress: the effective tool set is empty and the
+    # additive marker records WHY (a structurally tool-less run).
+    assert declared.payload["tools"] == {}
+    assert declared.payload["quarantined"] is True
+
+    # (b) Memory/store isolation is asserted, not assumed: pairing quarantined=True
+    # with a shared grant store (or ledger) fails loud. On the OLD code this is
+    # silently accepted — the reader would share durable state across the trust
+    # boundary.
+    with pytest.raises(ValueError, match="isolation is part of the contract"):
+        await run_task(
+            TaskSpec(query="read the page", quarantined=True),
+            ScriptedProvider.from_moves([{"text": "{}", "finish": "stop"}]),
+            Registry(),
+            EventBus(),
+            grants=InMemoryGrantStore(),
+        )
+
+    with pytest.raises(ValueError, match="isolation is part of the contract"):
+        await run_task(
+            TaskSpec(query="read the page", quarantined=True),
+            ScriptedProvider.from_moves([{"text": "{}", "finish": "stop"}]),
+            Registry(),
+            EventBus(),
+            ledger=InMemoryExecutionLedger(),
+        )

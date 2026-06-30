@@ -22,6 +22,10 @@ MATRIX: dict[str, tuple[str, str | None]] = {
     # #48 — a tool must DECLARE its capability envelope; an undeclared off-box
     # tool must not slip past containment by reading as least privilege.
     "ZU-CORE-5": ("packages/zu-core/tests/test_envelope_declaration.py", "test_strict_mode_rejects_undeclared_envelope_and_admits_explicit_empty"),
+    # #83 — a quarantined reader denies egress (empty effective tool set ⇒ declares
+    # zero egress and never breaches a "required" posture) and isolates its state
+    # (sharing a grant store / execution ledger fails loud).
+    "ZU-CORE-6": ("packages/zu-core/tests/test_quarantine.py", "test_quarantine_denies_egress_and_isolates_state"),
     "ZU-NET-1": ("packages/zu-backends/tests/test_egress_enforce.py", "test_mechanism_is_swappable_without_core_change"),
     "ZU-NET-2": ("packages/zu-backends/tests/test_oop_channel.py", "test_channel_returns_derived_token_not_secret"),
     "ZU-NET-3": ("packages/zu-backends/tests/test_oop_channel.py", "test_broker_secret_never_in_harness_memory"),

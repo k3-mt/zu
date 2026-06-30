@@ -1148,6 +1148,18 @@ async def _run_task(
     by_tier: Mapping[int, ModelProvider] = providers or {}
     registry = registry if registry is not None else REGISTRY
     bus = bus or EventBus()
+    # Memory/store isolation is part of the quarantine contract (#83): a quarantined
+    # reader handles untrusted content, so it must NOT share a grant store or an
+    # execution ledger with the surrounding (privileged) run — a shared store would
+    # let poisoned facts leak across the trust boundary or let a refused escape leave
+    # durable state. Fail loud rather than silently isolate: a caller pairing
+    # ``quarantined=True`` with a shared store has a contract bug. A quarantined run
+    # always uses fresh in-memory stores (grants=ledger=None -> the defaults).
+    if bool(getattr(spec, "quarantined", False)) and (grants is not None or ledger is not None):
+        raise ValueError(
+            "a quarantined reader must not share a grant store / execution ledger — "
+            "isolation is part of the contract"
+        )
     run = _Run(spec, bus, trace_id=trace_id, grants=grants, ledger=ledger)
     # At maturity a matching track makes the run a deterministic replay: apply the
     # tight replay budget (a broken track then fails fast, not at full pathfinding
@@ -1172,7 +1184,10 @@ async def _run_task(
     # Fail-closed containment floor: refuse before anything runs if a tool needs a
     # sandbox we're not inside. Raised (not a Result) — a misconfigured posture is
     # an operator error, surfaced loudly like a bad config, not a task outcome.
-    enforce_containment(containment, tools)
+    # Under quarantine (#83) the effective tool set is EMPTY (the ladder offers no
+    # tools and ``_invoke`` refuses any call), so containment is evaluated over {}:
+    # a structurally tool-less reader can never breach a ``required`` posture.
+    enforce_containment(containment, {} if run.quarantined else tools)
 
     # The tier ladder gates which tools the model sees; the run starts at tier 1.
     ladder = _Ladder(tools, spec.max_tier, quarantined=run.quarantined)
@@ -1197,15 +1212,24 @@ async def _run_task(
         # Record each tool's declared capability envelope onto the log at run
         # start, so the out-of-band verdict observers (the gate, and the always-on
         # runtime checks) can judge observed behaviour against what each plugin
-        # declared.
+        # declared. Under quarantine (#83) the EFFECTIVE tool set is empty — the
+        # reader is offered no tools — so the declared egress is {} and the payload
+        # carries an additive ``"quarantined": true`` marker: the audit log then
+        # states zero egress for a structurally tool-less run, instead of declaring
+        # the egress of tools that can never be reached. The non-quarantined payload
+        # is unchanged (the marker is additive, present only under quarantine).
+        effective_tools = {} if run.quarantined else tools
+        envelope_payload: dict[str, Any] = {
+            "tools": {
+                name: {"tier": _tier_of(t), **declared_envelope(t)}
+                for name, t in effective_tools.items()
+            }
+        }
+        if run.quarantined:
+            envelope_payload["quarantined"] = True
         await run.emit(
             ev.ENVELOPE_DECLARED,
-            {
-                "tools": {
-                    name: {"tier": _tier_of(t), **declared_envelope(t)}
-                    for name, t in tools.items()
-                }
-            },
+            envelope_payload,
             parent=run.root,
         )
         messages = _initial_messages(spec, ladder.active().values())
