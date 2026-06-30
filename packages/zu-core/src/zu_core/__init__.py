@@ -31,6 +31,7 @@ from .content_view import (
     project,
 )
 from .contracts import Budget, Event, Result, Status, TaskSpec
+from .effect import is_noop, surface_diff
 from .escalation import ProblemContext, Repair
 from .events import (
     CHECKPOINT_MARKED,
@@ -47,6 +48,7 @@ from .eventstore import (
     validate_filter,
 )
 from .loop import last_known_good, mark_checkpoint, rollback_and_replan
+from .monitors import evaluate_invariants, run_monitors
 from .ports import (
     CAP_FS_READ,
     CAP_FS_WRITE,
@@ -195,6 +197,11 @@ __all__ = [
     "rollback_and_replan",
     "CHECKPOINT_MARKED",
     "RUN_ROLLED_BACK",
+    # standalone monitor folding (#38) + handle-free no-op oracle
+    "run_monitors",
+    "evaluate_invariants",
+    "is_noop",
+    "surface_diff",
     # content_view + escalation event taxonomy (Issue #41)
     "CONTENT_CAPTURED",
     "STEP_ESCALATED",

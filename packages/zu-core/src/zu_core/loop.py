@@ -41,12 +41,12 @@ from .contracts import Budget, Event, Result, Status, TaskSpec
 from .effect import verify_effect
 from .grants import InMemoryGrantStore
 from .ledger import InMemoryExecutionLedger
+from .monitors import fold_monitors, worst_verdict
 from .ports import (
     Finish,
     ModelProvider,
     ModelRequest,
     MonitorState,
-    MonitorVerdict,
     ReplayDecision,
     RunContext,
     Scope,
@@ -571,22 +571,6 @@ def _safe_inspect(detector: Any, ctx: RunContext) -> Verdict | None:
         log.warning(
             "detector %r raised %s: %s — skipping it",
             getattr(detector, "name", detector), type(exc).__name__, exc,
-        )
-        return None
-
-
-def _safe_evaluate(monitor: Any, ctx: RunContext) -> MonitorVerdict | None:
-    """Run a Monitor in isolation (ZU-RAIL-5): a raising third-party monitor is
-    logged and skipped, never allowed to crash the run — the same isolation
-    ``_safe_inspect`` gives detectors. A Monitor is pure, but a buggy one must not
-    halt the loop."""
-    try:
-        verdict: MonitorVerdict | None = monitor.evaluate(ctx)
-        return verdict
-    except Exception as exc:  # noqa: BLE001 - a broken monitor must not halt the run
-        log.warning(
-            "monitor %r raised %s: %s — skipping it",
-            getattr(monitor, "name", monitor), type(exc).__name__, exc,
         )
         return None
 
@@ -1805,21 +1789,25 @@ async def _monitor_checkpoint(
     if not monitors:
         return None
     ctx = run.ctx(observation)
-    verdicts: list[Verdict] = []
-    for m in monitors:
-        mv = _safe_evaluate(m, ctx)
-        if mv is None or mv.state == MonitorState.OK:
-            continue
+    # The "evaluate each monitor + pick the worst MonitorVerdict" fold is the ONE pure
+    # implementation in ``zu_core.monitors`` (``fold_monitors`` + ``worst_verdict``,
+    # which ``run_monitors`` also drives). Emission of ``harness.monitor.fired`` per
+    # fired verdict and the VIOLATION→TERMINAL bridge stay HERE: the loop owns what a
+    # verdict MEANS for the run; the helper owns only evaluation and ranking.
+    fired = fold_monitors(monitors, ctx)
+    for mv in fired:
         await run.emit(
             ev.MONITOR_FIRED,
             {"monitor": mv.monitor, "state": mv.state.value, "detail": mv.detail, "step": mv.step},
             parent=turn,
             source=mv.monitor,
         )
-        severity = _MONITOR_SEVERITY[mv.state]
-        verdicts.append(Verdict(severity=severity, detector=mv.monitor, detail=mv.detail))
-    worst = _worst(verdicts)
-    if worst is not None and worst.severity in (Severity.ESCALATE, Severity.TERMINAL):
+    worst_mv = worst_verdict(fired)
+    if worst_mv is None:
+        return None
+    severity = _MONITOR_SEVERITY[worst_mv.state]
+    worst = Verdict(severity=severity, detector=worst_mv.monitor, detail=worst_mv.detail)
+    if worst.severity in (Severity.ESCALATE, Severity.TERMINAL):
         return worst
     return None
 

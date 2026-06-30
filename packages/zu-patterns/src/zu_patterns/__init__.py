@@ -7,6 +7,9 @@ committing classifier, and the offline guided search over the Phase-1 FSM.
 
 from __future__ import annotations
 
+from zu_core.effect import is_noop, surface_diff
+from zu_core.monitors import evaluate_invariants, run_monitors
+
 from .contact_form import ContactForm
 from .newsletter_signup import NewsletterSignup
 from .progress import GoalContext, goal_progress, is_relevant_blocker, is_side_quest
@@ -63,4 +66,9 @@ __all__ = [
     "fsm_from_shadow",
     "fsm_from_shadow_events",
     "merge_transition_models",
+    # standalone monitor folding + handle-free no-op oracle re-exported from zu-core (#38)
+    "run_monitors",
+    "evaluate_invariants",
+    "is_noop",
+    "surface_diff",
 ]
