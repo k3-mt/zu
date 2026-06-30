@@ -80,6 +80,12 @@ class TaskSpec(BaseModel):
     # taint), so injection in the content cannot become an ACTION — it is contained
     # to the typed facts the reader returns. The keystone of the dual-LLM
     # "quarantined reader / privileged planner" pattern, as a provable mode.
+    #
+    # Quarantine is ORTHOGONAL to output typing: it does NOT imply (and does not
+    # hard-require) ``output_schema``. It composes with the already-registered
+    # schema validator — set ``output_schema`` to additionally constrain the typed
+    # facts a quarantined reader returns; enforcement stays the validator's job,
+    # unchanged. Quarantine guarantees no ACTION; the schema (opt-in) bounds the DATA.
     quarantined: bool = False
 
 

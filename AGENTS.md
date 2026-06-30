@@ -118,7 +118,10 @@ injected instructions), and the **quarantined run-mode** (#83, `TaskSpec(...,
 quarantined=True)`) is a provable tool-less/egress-free reader — the loop offers an
 empty tool set and refuses any tool call as a high-signal escape attempt, so
 injection in untrusted content is contained to a data-integrity problem, never an
-action.
+action. Quarantine is structural, not by convention: the effective tool set is
+empty, so the run declares zero egress and can never breach a `containment="required"`
+posture, and it must not share a grant store / execution ledger (sharing fails loud).
+The named backstop is `packages/zu-core/tests/test_quarantine.py` (ZU-CORE-6).
 
 Plugins are discovered three ways, all resolving into one registry: installed
 packages via entry points (`pyproject.toml`), the in-process decorators

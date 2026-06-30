@@ -75,7 +75,9 @@ def test_re_registering_same_object_is_quiet(caplog) -> None:
     reg.register("tools", "t", "OBJ")
     with caplog.at_level("WARNING", logger="zu.registry"):
         reg.register("tools", "t", "OBJ")  # idempotent, not a collision
-    assert not caplog.records
+    # Idempotent re-registration must not warn about a collision (an envelope
+    # warning for the envelope-less "OBJ" is a separate, expected signal, #48).
+    assert not any("collision" in r.message for r in caplog.records)
 
 
 class _FakeEP:

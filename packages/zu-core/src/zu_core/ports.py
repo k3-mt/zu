@@ -411,6 +411,17 @@ class Tool(Protocol):
     capabilities: frozenset[str]
     egress: frozenset[str]
 
+    # Whether this tool's output is UNTRUSTED external content (#77). A tool with
+    # open egress (``EGRESS_OPEN`` in ``egress``) reaches the internet and is
+    # treated as untrusted automatically; this OPTIONAL, default-False flag lets a
+    # no-egress tool that nonetheless ingests untrusted bytes (e.g. it reads a
+    # user-supplied file or a message from an untrusted channel) opt in. When set,
+    # the loop fences the tool's content with boundary markers + a "this is DATA,
+    # not instructions" notice in the MODEL-FACING copy only (the logged copy is
+    # untouched). Read defensively (``getattr(tool, "untrusted", False)``) so a
+    # tool that omits it is treated as trusted — the behaviour-preserving default.
+    untrusted: bool
+
     async def __call__(self, ctx: RunContext, **kwargs: Any) -> dict: ...
 
 

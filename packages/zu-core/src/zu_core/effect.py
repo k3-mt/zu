@@ -31,6 +31,41 @@ def _ident(a: SurfaceAffordance) -> tuple[str, str]:
     return (a.role.strip().lower(), a.label.strip().lower())
 
 
+def _surface_unchanged(before: SurfaceView, after: SurfaceView) -> bool:
+    """The handle-FREE structural core of the no-op oracle: ``True`` iff NONE of the
+    three content-free shape signals moved between ``before`` and ``after`` — no
+    identity-keyed state/value delta, no label-set delta, and an unchanged fingerprint.
+
+    This is the shared body :func:`verify_effect` (after its acted-control signal) and
+    :func:`is_noop` both reduce to, so there is one definition of "the surface did not
+    change". Read-only over the two frozen surfaces; no I/O.
+    """
+    # 2) ANY control's selection state changed, keyed by IDENTITY (the acted swatch
+    #    became selected, or a sibling deselected) — robust to handle churn. This catches
+    #    a styled colour/size swatch whose only visible change is its own
+    #    aria-checked/pressed/selected flipping while every label stays present.
+    a_states = {_ident(x): tuple(x.states) for x in after.affordances}
+    for x in before.affordances:
+        key = _ident(x)
+        if key in a_states and a_states[key] != tuple(x.states):
+            return False
+
+    # 3) The set of affordance labels changed at all — something appeared (a cart drawer,
+    #    a "Remove"/"View cart", a next step) OR disappeared (navigated away).
+    b_labels = {x.label for x in before.affordances}
+    a_labels = {x.label for x in after.affordances}
+    if a_labels != b_labels:
+        return False
+
+    # 4) The overall surface shape changed (navigation, a re-render with new structure,
+    #    or a value change on any control) — the fingerprint folds role+label+value+states
+    #    of every affordance, so it moves on any of those while ignoring handle renumbering.
+    if before.fingerprint() != after.fingerprint():
+        return False
+
+    return True
+
+
 def verify_effect(before: SurfaceView, after: SurfaceView, acted_handle: str) -> str | None:
     """Return ``"silent-no-op"`` if acting on ``acted_handle`` demonstrably changed
     nothing, else ``None``.
@@ -38,7 +73,9 @@ def verify_effect(before: SurfaceView, after: SurfaceView, acted_handle: str) ->
     Biased toward NOT crying no-op (a no-op verdict requires ALL of: no control's
     state/value changed, no label-set delta, and an unchanged fingerprint) — so a real
     change is never mistaken for a dead action and a good run is never stalled. Four
-    independent shape signals, any one of which means "something happened":
+    independent shape signals, any one of which means "something happened": the acted
+    control's own state/value (signal 1, here) plus the three handle-free structural
+    signals shared with :func:`is_noop` (signals 2/3/4, in :func:`_surface_unchanged`).
     """
     b_by_handle = {a.handle: a for a in before.affordances}
     a_by_handle = {a.handle: a for a in after.affordances}
@@ -55,27 +92,49 @@ def verify_effect(before: SurfaceView, after: SurfaceView, acted_handle: str) ->
         if ah is not None and (tuple(bh.states) != tuple(ah.states) or bh.value != ah.value):
             return None
 
-    # 2) ANY control's selection state changed, keyed by IDENTITY (the acted swatch
-    #    became selected, or a sibling deselected) — robust to handle churn. This catches
-    #    a styled colour/size swatch whose only visible change is its own
-    #    aria-checked/pressed/selected flipping while every label stays present.
-    a_states = {_ident(x): tuple(x.states) for x in after.affordances}
-    for x in before.affordances:
-        key = _ident(x)
-        if key in a_states and a_states[key] != tuple(x.states):
-            return None
+    return None if not _surface_unchanged(before, after) else "silent-no-op"
 
-    # 3) The set of affordance labels changed at all — something appeared (a cart drawer,
-    #    a "Remove"/"View cart", a next step) OR disappeared (navigated away).
+
+def is_noop(before: SurfaceView, after: SurfaceView) -> bool:
+    """Handle-FREE no-op primitive: ``True`` iff the surface is structurally unchanged
+    between ``before`` and ``after`` (no identity-keyed state/value delta, no label-set
+    delta, unchanged fingerprint). The same oracle as :func:`verify_effect` but without
+    needing the acted handle — for comparing two :class:`SurfaceView`\\ s directly.
+
+    ``is_noop(before, after)`` is ``True`` exactly when :func:`surface_diff` reports no
+    change at all. A handle-only renumber (identical roles/labels/values/states) reads as
+    a no-op; any real shape change reads as not."""
+    return _surface_unchanged(before, after)
+
+
+def surface_diff(before: SurfaceView, after: SurfaceView) -> dict:
+    """The structured content-free delta between two surfaces, from the SAME identity
+    folds the no-op oracle reduces over:
+
+    - ``appeared``: labels present in ``after`` but not ``before``.
+    - ``disappeared``: labels present in ``before`` but not ``after``.
+    - ``state_changed``: ``(role, label)`` identities whose ``states`` tuple moved
+      (keyed by identity, robust to handle renumbering).
+    - ``fingerprint_changed``: whether the overall :meth:`SurfaceView.fingerprint`
+      moved (catches value changes and structural re-renders the coarser signals miss).
+
+    :func:`is_noop` is ``True`` iff every list is empty and ``fingerprint_changed`` is
+    ``False``. Content-free: labels/roles/states are perception structure, never prose."""
     b_labels = {x.label for x in before.affordances}
     a_labels = {x.label for x in after.affordances}
-    if a_labels != b_labels:
-        return None
+    appeared = tuple(x.label for x in after.affordances if x.label not in b_labels)
+    disappeared = tuple(x.label for x in before.affordances if x.label not in a_labels)
 
-    # 4) The overall surface shape changed (navigation, a re-render with new structure,
-    #    or a value change on any control) — the fingerprint folds role+label+value+states
-    #    of every affordance, so it moves on any of those while ignoring handle renumbering.
-    if before.fingerprint() != after.fingerprint():
-        return None
+    a_states = {_ident(x): tuple(x.states) for x in after.affordances}
+    state_changed = tuple(
+        _ident(x)
+        for x in before.affordances
+        if _ident(x) in a_states and a_states[_ident(x)] != tuple(x.states)
+    )
 
-    return "silent-no-op"
+    return {
+        "appeared": appeared,
+        "disappeared": disappeared,
+        "state_changed": state_changed,
+        "fingerprint_changed": before.fingerprint() != after.fingerprint(),
+    }
