@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle, SessionBackend
 
 from ._session import close_run, get_or_open, run_key
+from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
 from .settle import settle, settle_budget_ms
 
@@ -75,13 +76,16 @@ class Browser:
             "required": ["op"],
         },
     }
+    capabilities = frozenset({CAP_NET, CAP_SANDBOX})
+    egress = frozenset({EGRESS_OPEN})
+    # The model-facing prompt DISCLOSES the egress posture, derived from ``egress``
+    # (issue #54) — not a hardcoded literal.
     prompt_fragment = (
         "browser(op=open|act|read|close, url?, actions?, capture_network?): a PERSISTENT "
         "headless browser. Open a url, then act/read step by step (state is kept) to drive "
-        "a multi-step widget to the data you need; capture_network grabs the JSON it fetches."
+        "a multi-step widget to the data you need; capture_network grabs the JSON it fetches. "
+        + egress_caveat(egress)
     )
-    capabilities = frozenset({CAP_NET, CAP_SANDBOX})
-    egress = frozenset({EGRESS_OPEN})
 
     def __init__(
         self,
@@ -89,10 +93,18 @@ class Browser:
         image: str = _DEFAULT_IMAGE,
         *,
         allow_private: bool | None = None,
+        proxy: dict | None = None,
+        network_name: str | None = None,
+        egress_dns: object | None = None,
     ) -> None:
         self._backend = backend
         self.image = image
         self.allow_private = allow_private
+        # Egress-enforcement wiring (issue #54): a provisioned proxy + internal
+        # network scopes in-browser egress to the validated target set.
+        self._proxy = proxy
+        self._network_name = network_name
+        self._egress_dns = egress_dns
         self._session: BrowserSessionHandle | None = None  # held across calls within a run
 
     def _resolve_backend(self) -> SessionBackend:
@@ -101,6 +113,14 @@ class Browser:
 
             self._backend = LocalDockerBackend()
         return self._backend
+
+    def _egress_config(self) -> tuple[dict | None, str | None]:
+        """(proxy, network_name) governing this launch: explicit constructor config
+        wins; else the contained run's env-derived proxy, so the production-contained
+        path emits the isolated+proxy spec instead of bare network."""
+        if self._proxy is not None and self._network_name is not None:
+            return self._proxy, self._network_name
+        return contained_egress_config()
 
     async def __call__(
         self, ctx: Any, op: str, url: str | None = None, actions: list | None = None,
@@ -111,9 +131,16 @@ class Browser:
             if not url:
                 return {"error": "op=open requires a url"}
             # Same SSRF backstop + DNS pin as render_dom, before leasing a browser.
+            # The spec also carries the validated target as the egress allowlist
+            # (issue #54): in-browser subresources/redirects are scoped to it.
             pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
-            spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
             host = urlsplit(url).hostname
+            proxy, network_name = self._egress_config()
+            spec: dict[str, Any] = {"image": self.image, "tier": self.tier}
+            spec.update(browser_egress_spec(
+                {host} if host else set(),
+                proxy=proxy, network_name=network_name, dns=self._egress_dns,
+            ))
             if pinned_ip is not None and host:
                 spec["extra_hosts"] = {host: pinned_ip}
             # Open via the SHARED run-scoped registry: the run's session is shared with

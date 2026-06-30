@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, SandboxBackend, ToolCall
 
+from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
 
 # Default browser viewport. Chromium otherwise falls back to Playwright's
@@ -91,18 +92,22 @@ class RenderDom:
             "required": ["url"],
         },
     }
-    prompt_fragment = (
-        "render_dom(url, [wait_until|wait_for|wait_ms|actions]): render a page in a "
-        "real browser (JS executed). Use when a page needs JavaScript; pass wait_for/"
-        "wait_until or read-surfacing actions (click/select to expand, load-more, pick "
-        "a tab) when content loads after the page or behind a control."
-    )
     # Provisions a sandbox (CAP_SANDBOX) and renders a model-chosen URL inside
     # it, so it declares open egress (the browser must reach the page). The
     # sandbox is where that egress is *enforced* and where scoping it to the
     # target is the deferred egress-policy work — but the declaration lives here.
     capabilities = frozenset({CAP_NET, CAP_SANDBOX})
     egress = frozenset({EGRESS_OPEN})
+    # The model-facing prompt now DISCLOSES the egress posture, derived from the
+    # ``egress`` capability set (issue #54) — not a hardcoded literal — so the model
+    # knows rendering a page permits unvalidated in-browser egress.
+    prompt_fragment = (
+        "render_dom(url, [wait_until|wait_for|wait_ms|actions]): render a page in a "
+        "real browser (JS executed). Use when a page needs JavaScript; pass wait_for/"
+        "wait_until or read-surfacing actions (click/select to expand, load-more, pick "
+        "a tab) when content loads after the page or behind a control. "
+        + egress_caveat(egress)
+    )
 
     def __init__(
         self,
@@ -110,6 +115,9 @@ class RenderDom:
         image: str = _DEFAULT_IMAGE,
         *,
         allow_private: bool | None = None,
+        proxy: dict | None = None,
+        network_name: str | None = None,
+        egress_dns: object | None = None,
     ) -> None:
         # backend None -> the local-docker default, imported lazily so this
         # module (and tier-1-only deployments) need not pull in the backend
@@ -119,6 +127,14 @@ class RenderDom:
         # Mirrors HttpFetch: None consults ZU_HTTP_ALLOW_PRIVATE; True skips the
         # SSRF DNS check for local dev (and lets tests use a non-resolvable host).
         self.allow_private = allow_private
+        # Egress-enforcement wiring (issue #54): when the run provisions an egress
+        # proxy ({host, port}) on an internal docker network (network_name), the
+        # render launches in the isolated, default-DROP mode whose only route
+        # off-box is the allowlist-checking proxy — so in-browser subresources to
+        # hosts outside the validated target set are refused, not just declared.
+        self._proxy = proxy
+        self._network_name = network_name
+        self._egress_dns = egress_dns
 
     def _resolve_backend(self) -> SandboxBackend:
         if self._backend is None:
@@ -126,6 +142,14 @@ class RenderDom:
 
             self._backend = LocalDockerBackend()
         return self._backend
+
+    def _egress_config(self) -> tuple[dict | None, str | None]:
+        """The (proxy, network_name) governing this launch: an explicit constructor
+        config wins; otherwise the contained run's env-derived proxy is used, so the
+        production-contained path emits the isolated+proxy spec, not bare network."""
+        if self._proxy is not None and self._network_name is not None:
+            return self._proxy, self._network_name
+        return contained_egress_config()
 
     async def __call__(
         self, ctx: Any, url: str, width: int | None = None, height: int | None = None,
@@ -143,23 +167,28 @@ class RenderDom:
         # opened. Raises BlockedURLError (a SecurityBlock) → the loop records a
         # harness.defense.blocked event and surfaces it as an error observation.
         #
-        # Scope: this is the per-target rebind backstop, identical in strength to
-        # tier 1. It does NOT scope the *sandbox's* egress — a page's in-browser
-        # redirects and subresources can still reach other hosts unvalidated.
-        # Full egress allowlisting (blocking those) needs a firewall-capable
-        # SandboxBackend and remains deferred; the loud declaration is EGRESS_OPEN.
+        # Scope (issue #54): the per-target rebind backstop above is identical in
+        # strength to tier 1, but the launch spec now ALSO carries the validated
+        # target host as the egress ``allowlist`` (and, when a proxy is provisioned,
+        # routes the container through the isolated default-DROP network) — so the
+        # sandbox's in-browser egress is scoped to the target, not bare/open. Absent
+        # a provisioned proxy the declaration stays the honest EGRESS_OPEN, but the
+        # allowlist is attached for a firewall-capable backend to enforce.
         pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
         backend = self._resolve_backend()
         # Lease a sandbox for the render and always tear it down — a browser
         # container is expensive and must not leak even if the render raises.
-        # ``network`` is required: a browser with egress disabled cannot fetch
-        # the page it is asked to render.
-        spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
+        host = urlsplit(url).hostname
+        proxy, network_name = self._egress_config()
+        spec: dict[str, Any] = {"image": self.image, "tier": self.tier}
+        spec.update(browser_egress_spec(
+            {host} if host else set(),
+            proxy=proxy, network_name=network_name, dns=self._egress_dns,
+        ))
         # Pin the container's DNS for the target host to the validated IP, so the
         # browser cannot be DNS-rebound to an internal address at connect time —
         # the tier-2 analogue of tier-1's PinnedTransport. ``pinned_ip`` is None
         # only when allow_private skips pinning (local dev).
-        host = urlsplit(url).hostname
         if pinned_ip is not None and host:
             spec["extra_hosts"] = {host: pinned_ip}
         sandbox = await backend.launch(spec)
@@ -202,4 +231,10 @@ class RenderDom:
             out["network"] = obs["network"]
         if obs.get("action_error"):
             out["action_error"] = obs["action_error"]
+        # Surface any in-browser egress the sandbox proxy REFUSED (issue #54): a
+        # subresource/redirect to a host outside the validated allowlist (or to an
+        # internal/metadata address) is a contained attempt the model and detectors
+        # should see, not a silent drop.
+        if obs.get("blocked_egress"):
+            out["blocked_egress"] = obs["blocked_egress"]
         return out

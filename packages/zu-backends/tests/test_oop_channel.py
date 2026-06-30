@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import gc
 import os
+import sys
+import textwrap
 
 from zu_backends.broker import CredentialBroker
 from zu_backends.oop_launcher import OutOfProcessLauncher
+from zu_backends.oop_worker import _scrub_secret_env
 from zu_core.ports import ChannelRequest
 
 
@@ -65,3 +68,79 @@ async def test_broker_secret_never_in_harness_memory() -> None:
         assert SECRET not in "".join(os.environ.values())
     finally:
         await launcher.aclose()
+
+
+def test_scrub_secret_env_pops_caller_keys_after_consumption() -> None:
+    # Issue #49: the consume-then-scrub primitive. The launcher names the
+    # caller-supplied secret keys in ZU_OOP_SECRET_KEYS; after the plugin's
+    # constructor has read them, the worker deletes exactly those keys (and the
+    # marker itself) from its environ, so they do not linger in /proc/self/environ.
+    fake_env = {
+        "PATH": "/usr/bin",
+        "ZU_OOP_SOCK": "/tmp/x.sock",
+        "ZU_BROKER_SECRET": "card-4242-4242-4242",
+        "MY_OTHER_TOKEN": "tok-abc",
+        "ZU_OOP_SECRET_KEYS": "ZU_BROKER_SECRET,MY_OTHER_TOKEN",
+    }
+    # The secret WAS available before scrubbing (so the handshake/constructor could
+    # read it) ...
+    assert fake_env["ZU_BROKER_SECRET"] == "card-4242-4242-4242"
+    removed = _scrub_secret_env(fake_env)
+    # ... and is gone afterwards, along with the marker, leaving the rest intact.
+    assert "ZU_BROKER_SECRET" not in fake_env
+    assert "MY_OTHER_TOKEN" not in fake_env
+    assert "ZU_OOP_SECRET_KEYS" not in fake_env
+    assert fake_env == {"PATH": "/usr/bin", "ZU_OOP_SOCK": "/tmp/x.sock"}
+    assert set(removed) == {"ZU_BROKER_SECRET", "MY_OTHER_TOKEN", "ZU_OOP_SECRET_KEYS"}
+    # Idempotent / safe when there is nothing to scrub.
+    assert _scrub_secret_env({"PATH": "/usr/bin"}) == []
+
+
+async def test_worker_environ_scrubbed_of_secret_after_construction(tmp_path, monkeypatch) -> None:
+    # Issue #49 (end-to-end, $0, no network/Docker): launch a real OOP worker whose
+    # plugin snapshots dict(os.environ) at CONSTRUCTION time and serves it back over
+    # the RPC channel. The secret must be ABSENT from that worker-side snapshot — the
+    # worker scrubs it right after the plugin consumed it, before serving any code.
+    SECRET = "WORKER-SCRUB-SECRET-4242"
+    probe = tmp_path / "env_probe.py"
+    probe.write_text(textwrap.dedent('''
+        import os
+        from zu_core.ports import ChannelRequest, ChannelResponse
+
+        class EnvProbe:
+            endpoint = "env-probe"
+            def __init__(self, secret_env: str = "ZU_BROKER_SECRET") -> None:
+                # Read the secret at construction (like CredentialBroker) so the
+                # worker can scrub it from the environ immediately afterwards.
+                self._secret = os.environ.get(secret_env, "")
+            async def call(self, req: ChannelRequest) -> ChannelResponse:
+                if req.op == "environ":
+                    return ChannelResponse(ok=True, data={
+                        "has_secret_local": bool(self._secret),
+                        "env_values": "".join(os.environ.values()),
+                        "secret_key_present": "ZU_BROKER_SECRET" in os.environ,
+                        "marker_present": "ZU_OOP_SECRET_KEYS" in os.environ,
+                    })
+                return ChannelResponse(ok=False, error="unknown op")
+    '''))
+    # Make the probe importable by the child via inherited PYTHONPATH.
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    assert SECRET not in "".join(os.environ.values())  # not in the parent either
+
+    launcher = OutOfProcessLauncher()
+    try:
+        probe_ch = await launcher.launch_channel(
+            "env_probe:EnvProbe", endpoint="env-probe",
+            env={"ZU_BROKER_SECRET": SECRET},
+        )
+        resp = await probe_ch.call(ChannelRequest(op="environ", args={}))
+        assert resp.ok
+        # The plugin DID consume the secret into its own address space at construction...
+        assert resp.data["has_secret_local"] is True
+        # ...but the worker's live environ no longer carries it (the scrub ran).
+        assert SECRET not in resp.data["env_values"]
+        assert resp.data["secret_key_present"] is False
+        assert resp.data["marker_present"] is False
+    finally:
+        await launcher.aclose()
+        sys.modules.pop("env_probe", None)

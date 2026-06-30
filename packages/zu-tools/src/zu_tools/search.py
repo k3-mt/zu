@@ -139,7 +139,22 @@ class WebSearch:
         self._connector = conn
         self.num_results = num_results
         # Egress reflects the connector's single API host — set per instance.
-        self.egress = frozenset({getattr(conn, "host", "*")})
+        # FAIL CLOSED (issue #53): a connector that omits ``host`` (or sets it to
+        # ``""``/``None``) must NOT default to the open-egress wildcard. ``"*"`` is
+        # exactly EGRESS_OPEN, so the old ``getattr(conn, "host", "*")`` fallback
+        # silently turned the tightest-egress tool into an open-egress one when a
+        # custom connector violated the Protocol's ``host: str`` contract (Protocols
+        # are not runtime-enforced). Reject any non-truthy host here — the one
+        # runtime boundary that can enforce the contract — so a malformed connector
+        # can never widen the reviewed egress envelope to the whole internet.
+        host = getattr(conn, "host", None)
+        if not host:
+            raise ValueError(
+                "search connector must expose a non-empty 'host' (the single API "
+                "endpoint that scopes this tool's egress); got "
+                f"{host!r} from {type(conn).__name__}"
+            )
+        self.egress = frozenset({host})
 
     async def __call__(self, ctx: Any, query: str, num_results: int | None = None) -> dict:
         results = await self._connector.search(query, num_results or self.num_results)

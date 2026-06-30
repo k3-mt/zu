@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle, SessionBackend
 
 from ._session import get_or_open, put_handle_map, resolve_handle, run_key
+from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
 
 _DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
@@ -312,13 +313,16 @@ class ActionSurface:
             "required": ["op"],
         },
     }
+    capabilities = frozenset({CAP_NET, CAP_SANDBOX})
+    egress = frozenset({EGRESS_OPEN})
+    # The model-facing prompt DISCLOSES the egress posture, derived from ``egress``
+    # (issue #54) — not a hardcoded literal. Only op=open reaches the network.
     prompt_fragment = (
         "action_surface(op=open, url): reduce a page to a short list of affordances "
         "(handles a1,a2,… with labels) instead of reading the whole DOM. Pick a handle "
-        "to act on; resolve(handle) gives its locator. 'blind' means escalate to vision."
+        "to act on; resolve(handle) gives its locator. 'blind' means escalate to vision. "
+        + egress_caveat(egress)
     )
-    capabilities = frozenset({CAP_NET, CAP_SANDBOX})
-    egress = frozenset({EGRESS_OPEN})
 
     def __init__(
         self,
@@ -327,11 +331,19 @@ class ActionSurface:
         *,
         allow_private: bool | None = None,
         unlabeled_ratio: float = 0.5,
+        proxy: dict | None = None,
+        network_name: str | None = None,
+        egress_dns: object | None = None,
     ) -> None:
         self._backend = backend
         self.image = image
         self.allow_private = allow_private
         self.unlabeled_ratio = unlabeled_ratio
+        # Egress-enforcement wiring (issue #54): a provisioned proxy + internal
+        # network scopes in-browser egress to the validated target set.
+        self._proxy = proxy
+        self._network_name = network_name
+        self._egress_dns = egress_dns
         self._handle_map: dict[str, dict] = {}
         self._session: BrowserSessionHandle | None = None
 
@@ -341,6 +353,14 @@ class ActionSurface:
 
             self._backend = LocalDockerBackend()
         return self._backend
+
+    def _egress_config(self) -> tuple[dict | None, str | None]:
+        """(proxy, network_name) governing this launch: explicit constructor config
+        wins; else the contained run's env-derived proxy, so the production-contained
+        path emits the isolated+proxy spec instead of bare network."""
+        if self._proxy is not None and self._network_name is not None:
+            return self._proxy, self._network_name
+        return contained_egress_config()
 
     async def __call__(
         self,
@@ -387,8 +407,15 @@ class ActionSurface:
 
     async def _open_op(self, ctx: Any, url: str, title: str) -> dict:
         pinned_ip = validate_and_pin(url, allow_private=self.allow_private)
-        spec: dict[str, Any] = {"image": self.image, "tier": self.tier, "network": True}
         host = urlsplit(url).hostname
+        # The spec carries the validated target as the egress allowlist (issue #54):
+        # in-browser subresources/redirects are scoped to it, not bare/open.
+        proxy, network_name = self._egress_config()
+        spec: dict[str, Any] = {"image": self.image, "tier": self.tier}
+        spec.update(browser_egress_spec(
+            {host} if host else set(),
+            proxy=proxy, network_name=network_name, dns=self._egress_dns,
+        ))
         if pinned_ip is not None and host:
             spec["extra_hosts"] = {host: pinned_ip}
         # Open via the SHARED run-scoped registry: the run's session is opened ONCE

@@ -257,6 +257,11 @@ class SandboxLauncher:
                 "HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url,
                 "http_proxy": proxy_url, "https_proxy": proxy_url,
                 "NO_PROXY": "localhost,127.0.0.1",
+                # The internal network name, so a NESTED browser sandbox (render_dom /
+                # browser / action_surface) launched inside this run joins the SAME
+                # default-DROP network and routes its in-browser egress through this
+                # allowlist proxy — never bare network:True (issue #54).
+                "ZU_SANDBOX_NETWORK": self.network_name,
             }
             if bundle_dir is not None:
                 # Put the mounted bundle on the path so its tools/ import-refs resolve.
