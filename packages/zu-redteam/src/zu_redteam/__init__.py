@@ -36,7 +36,7 @@ from .container import (
 from .contract import ContractFinding, check_plugin
 from .corpus import CORPUS_OBJECTIVES, CorpusCase, build_corpus
 from .defense import DefenseMonitor, monitor_defenses
-from .gate import AttackFinding, GateReport, GateResult, run_gate
+from .gate import AttackFinding, GateReport, GateResult, GateSecrets, run_gate
 from .harness import Scenario, run_scenario
 from .sidecar import SidecarContainerGate, parse_proxy_log
 from .verdict import (
@@ -44,6 +44,7 @@ from .verdict import (
     EgressBreach,
     ExfilBreach,
     GateVerdict,
+    InjectionReachBreach,
     NeighbourHealth,
     ObservedRun,
     ProvenanceBreach,
@@ -58,6 +59,7 @@ __all__ = [
     "run_gate",
     "GateReport",
     "GateResult",
+    "GateSecrets",
     "AttackFinding",
     # container form (out-of-band enforcement, RED_TEAM_CONTAINER.md)
     "ContainerGate",
@@ -76,6 +78,7 @@ __all__ = [
     "render_verdict",
     "default_observers",
     "EgressBreach",
+    "InjectionReachBreach",
     "ExfilBreach",
     "ProvenanceBreach",
     "ResourceBreach",
