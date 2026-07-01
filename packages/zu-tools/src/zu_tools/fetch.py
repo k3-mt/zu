@@ -10,12 +10,14 @@ import httpx
 from zu_core.ports import CAP_NET, EGRESS_OPEN
 from zu_core.security import SANDBOX_ENV
 
+from .limits import MAX_DOCUMENT_BYTES
 from .net import BlockedURLError, PinnedTransport, check_url
 
 # Default cap on a single fetched body (decompressed). Untrusted pages can be
 # arbitrarily large, and httpx transparently decompresses, so a small gzip can
 # expand to gigabytes — cap the bytes we read, not just the bytes on the wire.
-_DEFAULT_MAX_BYTES = 5_000_000
+# Single-sourced with html_parse's cap (issue #65 O12) in ``.limits``.
+_DEFAULT_MAX_BYTES = MAX_DOCUMENT_BYTES
 
 
 class HttpFetch:
