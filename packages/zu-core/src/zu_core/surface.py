@@ -53,6 +53,15 @@ class SurfaceAffordance(BaseModel):
     input_type: str | None = None       # the raw <input type=…> (password/text/tel/…)
     autocomplete: str | None = None      # the autocomplete token (cc-number/cc-csc/current-password/…)
     submits: bool = False                # a submit/commit control (button[type=submit], form submit)
+    # An opaque, content-free GROUP id shared by the options of ONE single-choice
+    # group — a product-variant swatch/radio group (colour vs size), a tablist, a
+    # listbox — derived from the enclosing accessibility group container, NEVER from
+    # the option labels. It is what lets a consumer tell 'these three swatches are
+    # colour, those three are size' and satisfy EACH group (a flat list cannot, #120);
+    # ``None`` when the producer could not resolve a group. Deliberately OUT of
+    # ``fingerprint`` — it is stable structure, not a selection effect — so existing
+    # fixtures/digests are unaffected (it is purely additive).
+    group: str | None = None
 
 
 class SurfaceView(BaseModel):
