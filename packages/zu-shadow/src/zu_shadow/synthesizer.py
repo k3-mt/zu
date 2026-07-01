@@ -85,22 +85,57 @@ def _host_of(url: str) -> str:
     return host or ""
 
 
+def _registrable(host: str) -> str:
+    """A generic, PSL-free approximation of a host's registrable domain (eTLD+1): its
+    last two dot-separated labels (``api.vets.example.com`` → ``example.com``). This is
+    the FIRST-PARTY key — two hosts sharing it are the same site. It intentionally does
+    NOT special-case multi-label public suffixes (``co.uk``): erring toward a BROADER
+    first-party grouping only ever KEEPS a same-org host, never widens the allowlist to a
+    third-party tracker on a different registrable domain (the failure mode F8 fixes)."""
+    labels = [x for x in host.split(".") if x]
+    if len(labels) <= 2:
+        return host
+    return ".".join(labels[-2:])
+
+
 def induce_egress(events: list[object]) -> list[str]:
-    """THE EGRESS ALLOWLIST WRITES ITSELF — the sorted, de-duplicated set of hosts the
-    recorded ``data.shadow.network.response`` events touched (plus the hosts of the
-    navigations). Deterministic; derived from the log, never from the model."""
-    hosts: set[str] = set()
+    """THE EGRESS ALLOWLIST WRITES ITSELF — but SCOPED to the hosts the recorded ACTIONS
+    actually needed, not every incidental subresource the page fetched (F8).
+
+    The scoping signal is FIRST-PARTY-ness, derived structurally from the log: the hosts
+    the human NAVIGATED to define the first-party registrable domain(s) of the task; a
+    recorded ``network.response`` host is admitted only when it shares one of those
+    registrable domains. So a page's own API/CDN subdomains (``api.``/``cdn.`` of the
+    navigated site) are KEPT — the actions genuinely needed them — while a third-party
+    tracker/analytics/ad host on a DIFFERENT registrable domain
+    (``google-analytics.com``, a CDN on another org's domain) is DROPPED, instead of the
+    allowlist absorbing every beacon and defeating its own purpose. Deterministic; derived
+    from the log, never from the model. A recording with no navigation host (nothing to
+    anchor first-partyness to) falls back to admitting the observed hosts, so an
+    action-only recording is never left with an empty allowlist."""
+    nav_hosts: set[str] = set()
+    resp_hosts: set[str] = set()
     for e in events:
         t = getattr(e, "type", "")
         p = _payload(e)
-        if t == ev.SHADOW_NETWORK_RESPONSE:
-            host = p.get("host") or _host_of(p.get("url", ""))
-            if host:
-                hosts.add(host)
-        elif t == ev.SHADOW_USER_NAVIGATE:
+        if t == ev.SHADOW_USER_NAVIGATE:
             host = _host_of(p.get("url", ""))
             if host:
-                hosts.add(host)
+                nav_hosts.add(host)
+        elif t == ev.SHADOW_NETWORK_RESPONSE:
+            host = p.get("host") or _host_of(p.get("url", ""))
+            if host:
+                resp_hosts.add(host)
+    # The navigation hosts are always in-scope (the human went there deliberately).
+    hosts: set[str] = set(nav_hosts)
+    first_party = {_registrable(h) for h in nav_hosts}
+    if first_party:
+        # Admit only subresource hosts on a navigated site's registrable domain.
+        hosts.update(h for h in resp_hosts if _registrable(h) in first_party)
+    else:
+        # No navigation to anchor first-partyness — fall back to the observed hosts so an
+        # action-only recording still writes a (conservative) allowlist rather than none.
+        hosts.update(resp_hosts)
     return sorted(hosts)
 
 
@@ -178,15 +213,41 @@ def _clean_step_labels(labels: list[str]) -> list[str]:
     return out
 
 
-def induce_invariants(events: list[object], egress: list[str], goal: str) -> list[Invariant]:
+def _derive_success_token(events: list[object]) -> str | None:
+    """DERIVE the success signal from OBSERVED STRUCTURE, not a model string (F12).
+
+    The recorded surface state that means "the task reached its end" is the control the
+    human's LAST action operated — the terminal click/type target's cleaned accessible
+    name (a real string the recording contains, e.g. "Confirm booking"). The success rail
+    then asserts that same label re-appears on the live SurfaceView, so the criterion is
+    grounded in the recording's structure rather than a free-text goal the model invented.
+    Returns ``None`` when the recording has no named action target to key on (the caller
+    then omits the outcome rail rather than inventing one)."""
+    last_name = ""
+    for e in events:
+        t = getattr(e, "type", "")
+        if t in (ev.SHADOW_USER_CLICK, ev.SHADOW_USER_TYPE):
+            tgt = _payload(e).get("target", {})
+            name = _clean_name(tgt.get("name") or tgt.get("label") or "")
+            if name:
+                last_name = name
+    return last_name or None
+
+
+def induce_invariants(events: list[object], egress: list[str],
+                      success_token: str | None = None) -> list[Invariant]:
     """Induce rail invariants as CORE ``Invariant`` objects (no new type):
 
       * a ``DOMAIN_ALLOWLIST`` over the induced egress — the agent must not reach a
         host the human's session never touched (defense in depth on top of the
         capability envelope); and
-      * an ``EVENTUALLY`` success criterion — the recorded outcome must be reproduced
-        by the run's deadline (the liveness reading; ``require_present`` so a run that
-        never reaches the goal VIOLATES rather than passing vacuously).
+      * an ``EVENTUALLY`` success criterion whose expected token is DERIVED from the
+        recorded structure — the label of the human's terminal action's target
+        (``_derive_success_token``), NOT a free-text goal the model invented (F12). The
+        rail asserts that observed label re-appears on the live SurfaceView by the
+        deadline (``require_present`` so a run that never reaches it VIOLATES rather than
+        passing vacuously). When the recording carries no named terminal target, the
+        outcome rail is OMITTED rather than keyed on an invented string.
     """
     invs: list[Invariant] = []
     if egress:
@@ -199,15 +260,17 @@ def induce_invariants(events: list[object], egress: list[str], goal: str) -> lis
                         "allow": list(egress)},
             ),
         ))
-    invs.append(Invariant(
-        name="reproduce-recorded-outcome",
-        kind=InvariantKind.EVENTUALLY,
-        predicate=Predicate(
-            kind=PredicateKind.SURFACE_CONTAINS,
-            params={"event_type": ev.SURFACE_CAPTURED, "label": goal or "goal",
-                    "require_present": True},
-        ),
-    ))
+    token = success_token if success_token is not None else _derive_success_token(events)
+    if token:
+        invs.append(Invariant(
+            name="reproduce-recorded-outcome",
+            kind=InvariantKind.EVENTUALLY,
+            predicate=Predicate(
+                kind=PredicateKind.SURFACE_CONTAINS,
+                params={"event_type": ev.SURFACE_CAPTURED, "label": token,
+                        "require_present": True},
+            ),
+        ))
     return invs
 
 
@@ -274,7 +337,11 @@ class Synthesizer:
         policy_prompt, goal = _parse_model(resp.text, instruction)
 
         fsm = induce_fsm(events)
-        invariants = induce_invariants(events, egress, goal)
+        # The success rail's expected token is DERIVED from the recorded structure (the
+        # terminal action's target label), NOT the model-produced ``goal`` — the goal
+        # remains the human-readable label in the spec/task, but the VERIFIABLE success
+        # criterion must be derived-not-invented (F12).
+        invariants = induce_invariants(events, egress)
         needs_browser = any(
             getattr(e, "type", "") in (ev.SHADOW_USER_CLICK, ev.SHADOW_USER_TYPE)
             for e in events

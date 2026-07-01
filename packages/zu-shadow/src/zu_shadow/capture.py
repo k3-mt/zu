@@ -34,14 +34,22 @@ _CREDENTIAL_AUTOCOMPLETE: frozenset[str] = frozenset({
 # field whose structure the harness could not resolve (no input type / autocomplete
 # threaded through). It is locale-specific and so silently misses on a non-English site
 # — never rely on it as the sole signal.
-_CREDENTIAL_TARGET_HINTS: tuple[str, ...] = ("password", "passwd", "secret", "token",
-                                             "api key", "api_key", "apikey", "otp",
-                                             "cvv", "cvc", "pin", "security code",
-                                             # payment-card secrets — the agent must NEVER hold
-                                             # these; a real payment goes through the §8 broker.
-                                             "card number", "cardnumber", "card no",
-                                             "credit card", "debit card", "expiration", "expiry",
-                                             "iban", "sort code", "account number")
+#
+# THIS IS THE SINGLE SOURCE OF TRUTH for the credential/secret field-name fallback
+# (F10): the capture-time detector (``_is_credential_target`` below) AND the
+# redaction-time blanking (``zu_shadow.redaction._is_credential_field``, which imports
+# this exact tuple) share it, so a card/IBAN value cannot slip through a NON-capture
+# path that redaction's list didn't know about. Add a name here and both paths learn it.
+CREDENTIAL_FIELD_NAMES: tuple[str, ...] = ("password", "passwd", "secret", "token",
+                                           "api key", "api_key", "apikey", "otp",
+                                           "cvv", "cvc", "pin", "security code",
+                                           # payment-card secrets — the agent must NEVER hold
+                                           # these; a real payment goes through the §8 broker.
+                                           "card number", "cardnumber", "card no",
+                                           "credit card", "debit card", "expiration", "expiry",
+                                           "iban", "sort code", "account number")
+# Back-compat alias for the original name used inside this module.
+_CREDENTIAL_TARGET_HINTS = CREDENTIAL_FIELD_NAMES
 
 
 def _is_cc_autocomplete(token: str | None) -> bool:

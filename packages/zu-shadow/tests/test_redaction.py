@@ -98,6 +98,33 @@ def test_payment_card_fields_are_credential_fields() -> None:
     assert not _is_credential_target(SemanticTarget(role="combobox", name="Address", label="Address"))
 
 
+def test_redaction_and_capture_share_one_credential_field_source() -> None:
+    # F10: redaction's credential field-name list must be the SAME source of truth capture
+    # detects on — no divergent duplicate. A card/IBAN value arriving under a NON-capture
+    # key (a key literally named "iban"/"card number" that capture never marked) must be
+    # blanked by redaction too. On the OLD code redaction's list lacked "iban"/card names,
+    # so these values leaked; now both import zu_shadow.capture.CREDENTIAL_FIELD_NAMES.
+    from zu_shadow.capture import CREDENTIAL_FIELD_NAMES
+    from zu_shadow.redaction import _CREDENTIAL_FIELD_HINTS
+
+    assert _CREDENTIAL_FIELD_HINTS is CREDENTIAL_FIELD_NAMES  # literally one source
+
+    from zu_shadow.redaction import REDACTED, redact_payload
+
+    IBAN = "GB29NWBK60161331926819"
+    ACCT = "not-a-luhn-pan-but-secret"
+    # A payload that reached redaction via a NON-capture path — keys the capture detector
+    # never routed under "password", but which name credential fields.
+    payload = {"iban": IBAN, "account number": ACCT, "security code": "123",
+               "note": "harmless text"}
+    red = redact_payload(payload)
+    blob = json.dumps(red)
+    assert IBAN not in blob and ACCT not in blob  # the card/IBAN value did NOT reach the log
+    assert red["iban"] == REDACTED and red["account number"] == REDACTED
+    assert red["security code"] == REDACTED
+    assert red["note"] == "harmless text"  # a non-credential field is untouched
+
+
 def test_luhn_valid_pan_is_swept_but_a_long_id_is_not() -> None:
     # A real (Luhn-valid) card number pasted into free text is redacted...
     assert "4242 4242 4242 4242" not in redact_text("paid with 4242 4242 4242 4242 today")

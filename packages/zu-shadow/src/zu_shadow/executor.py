@@ -290,27 +290,51 @@ def _resolve_exact(step: Step, surface: SurfaceView,
     return None, "", value
 
 
-async def _model_choose(step: Step, surface: SurfaceView, model: ModelProvider) -> str | None:
-    """GENERALISE: the demonstrated control is gone, so the model picks the handle that best
-    continues the task — bounded to the CURRENT affordances (it emits a handle, never a
-    selector). A reply that names no real handle resolves to None → escalate, never guess."""
+# The model-choose seam, factored into two pure/deterministic halves so the ASYNC
+# executor and the SYNC live drive share ONE implementation (F13): building the bounded
+# request from the current affordances, and parsing the reply back to a real handle.
+_CHOOSE_SYSTEM = ("You drive a web agent following a known task on a live "
+                  "site. The demonstrated control is not on this page. Pick the SINGLE affordance "
+                  "handle that best continues the task. Reply with ONLY the handle (e.g. a3).")
+
+
+def _choose_handle_request(step: Step, surface: SurfaceView) -> tuple[ModelRequest, set[str]] | None:
+    """Build the bounded model request for GENERALISE and return it with the set of REAL
+    handles the reply must name. ``None`` when there is no clickable affordance to choose
+    from (nothing to pick → the caller escalates, never guesses). Shared by the async and
+    sync choose paths so the prompt and the affordance bounding are defined exactly once."""
     clickable = [a for a in surface.affordances if a.role in _CLICKABLE]
     if not clickable:
         return None
     listing = "\n".join(f'{a.handle}: {a.role} "{a.label}"' for a in clickable)
     goal = step.intent or f"{step.kind} {step.name}".strip()
     req = ModelRequest(messages=[
-        {"role": "system", "content": "You drive a web agent following a known task on a live "
-         "site. The demonstrated control is not on this page. Pick the SINGLE affordance handle "
-         "that best continues the task. Reply with ONLY the handle (e.g. a3)."},
+        {"role": "system", "content": _CHOOSE_SYSTEM},
         {"role": "user", "content": f"Step to continue: {goal}\nAffordances:\n{listing}\n\nHandle:"},
     ])
-    resp = await model.complete(req)
-    handles = {a.handle for a in clickable}
-    for tok in re.findall(r"[A-Za-z]+\w*", resp.text or ""):
+    return req, {a.handle for a in clickable}
+
+
+def _pick_handle(text: str | None, handles: set[str]) -> str | None:
+    """Parse a model reply back to a REAL handle bounded by ``handles`` — the first token
+    that names one, else None (a reply that names no real handle → escalate, never guess).
+    Shared by the async and sync choose paths."""
+    for tok in re.findall(r"[A-Za-z]+\w*", text or ""):
         if tok in handles:
             return tok
     return None
+
+
+async def _model_choose(step: Step, surface: SurfaceView, model: ModelProvider) -> str | None:
+    """GENERALISE: the demonstrated control is gone, so the model picks the handle that best
+    continues the task — bounded to the CURRENT affordances (it emits a handle, never a
+    selector). A reply that names no real handle resolves to None → escalate, never guess."""
+    built = _choose_handle_request(step, surface)
+    if built is None:
+        return None
+    req, handles = built
+    resp = await model.complete(req)
+    return _pick_handle(resp.text, handles)
 
 
 async def execute(
