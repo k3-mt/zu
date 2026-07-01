@@ -95,6 +95,12 @@ class AxNode(BaseModel):
     visible: bool = True
     ignored: bool = False
     bounds: list[float] | None = None
+    # The opaque, content-free GROUP id of the single-choice group this node belongs
+    # to (a swatch/radio group, a listbox, a tablist), or ``None``. Populated by
+    # :func:`normalize_axtree` from the enclosing accessibility group container in
+    # document order — never from labels (#120). Threaded onto the affordance so a
+    # consumer can satisfy EACH variant group; additive, ``None`` by default.
+    group: str | None = None
     # The CDP ``backendDOMNodeId`` for this AX node, when the tree carried one.
     # It is GLOBAL to the target — stable across shadow-root and (same-process)
     # frame boundaries — so a consumer bound to an external CDP endpoint
@@ -114,6 +120,7 @@ class Affordance(BaseModel):
     label: str
     value: str | None = None
     states: list[str] = Field(default_factory=list)
+    group: str | None = None  # the single-choice group this option belongs to (#120), or None
 
 
 class Surface(BaseModel):
@@ -223,6 +230,7 @@ def reduce_surface(
                     label=label,
                     value=node.value,
                     states=list(node.states),
+                    group=node.group,
                 )
             )
             # The durable locator the model never sees (role + accessible name),
@@ -264,6 +272,43 @@ def _ax_string(field: Any) -> str:
     return ""
 
 
+# Accessibility container roles whose descendants form ONE single-choice group —
+# a swatch/radio group, a listbox, a set of tabs, a menu (#120). The nearest such
+# ancestor's id is the option's content-free group id.
+GROUP_CONTAINER_ROLES: frozenset[str] = frozenset({
+    "radiogroup", "group", "listbox", "tablist", "menu", "menubar",
+})
+
+
+def _group_ancestors(cdp_nodes: list[dict]) -> dict[str, str]:
+    """Map each AX ``nodeId`` to the id of its nearest enclosing GROUP-container
+    (``g:<containerId>``), or omit it when there is none. Parentage is rebuilt from
+    each node's ``childIds`` (which CDP ``getFullAXTree`` always supplies), so the
+    grouping is TREE-structural, not order-dependent."""
+    by_id: dict[str, dict] = {}
+    parent: dict[str, str] = {}
+    for n in cdp_nodes:
+        nid = n.get("nodeId")
+        if not isinstance(nid, str):
+            continue
+        by_id[nid] = n
+        for child in n.get("childIds", []) or []:
+            if isinstance(child, str):
+                parent[child] = nid
+    groups: dict[str, str] = {}
+    for nid in by_id:
+        cur = parent.get(nid)
+        seen: set[str] = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            role = _ax_string(by_id.get(cur, {}).get("role")).lower()
+            if role in GROUP_CONTAINER_ROLES:
+                groups[nid] = f"g:{cur}"
+                break
+            cur = parent.get(cur)
+    return groups
+
+
 def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
     """Normalise the raw CDP ``Accessibility.getFullAXTree`` node list into
     :class:`AxNode` records, in document (pre-order) order as CDP returns them.
@@ -271,9 +316,12 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
     CDP shape per node: ``role``/``name`` are ``{type,value}`` objects;
     ``properties`` is a list of ``{name, value:{value}}``; ``ignored`` is a bool.
     States we surface: disabled, checked, expanded, required, focused, selected,
-    invalid. Placeholder/description/value are read from their AX properties.
+    invalid. Placeholder/description/value are read from their AX properties. Each
+    node is stamped with the id of its enclosing single-choice group container, when
+    one is present (``group``, #120).
     """
     out: list[AxNode] = []
+    group_of = _group_ancestors(cdp_nodes)
     state_props = {"disabled", "checked", "expanded", "required", "focused", "selected", "invalid"}
     for n in cdp_nodes:
         role = _ax_string(n.get("role"))
@@ -284,6 +332,8 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
         # handle across shadow/frame boundaries. Absent on older/partial trees.
         raw_node_id = n.get("backendDOMNodeId")
         node_id = raw_node_id if isinstance(raw_node_id, int) else None
+        nid = n.get("nodeId")
+        group = group_of.get(nid) if isinstance(nid, str) else None
         states: list[str] = []
         for sp in sorted(state_props):
             val = props.get(sp, {})
@@ -304,6 +354,7 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
                 visible=not bool(props.get("hidden", {}).get("value", False))
                 if isinstance(props.get("hidden"), dict) else True,
                 node_id=node_id,
+                group=group,
             )
         )
     return out

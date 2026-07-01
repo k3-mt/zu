@@ -312,3 +312,35 @@ def test_unnamed_select_dropped_by_default_kept_via_keep_unnamed_roles() -> None
     assert combos[0].label == "Choose an option"           # fell back to its value
     assert kept.handle_map[combos[0].handle]["node_id"] == 7  # still addressable by node id
     assert not kept.blind                                    # a kept select is not blindness
+
+
+def _ax(node_id: str, role: str, name: str = "", *, children: list[str] | None = None,
+        backend: int | None = None) -> dict:
+    n: dict = {"nodeId": node_id, "role": {"value": role}, "name": {"value": name},
+               "childIds": children or []}
+    if backend is not None:
+        n["backendDOMNodeId"] = backend
+    return n
+
+
+def test_normalize_stamps_group_id_from_the_enclosing_container() -> None:
+    # Two radiogroups (colour, size); each option gets its container's group id, so a
+    # flat list can tell colour swatches from size swatches (#120).
+    nodes = [
+        _ax("root", "RootWebArea", children=["cg", "sg"]),
+        _ax("cg", "radiogroup", children=["c1", "c2"]),
+        _ax("c1", "radio", "Red", backend=11),
+        _ax("c2", "radio", "Green", backend=12),
+        _ax("sg", "radiogroup", children=["s1", "s2"]),
+        _ax("s1", "radio", "Small", backend=21),
+        _ax("s2", "radio", "Large", backend=22),
+    ]
+    surface = reduce_surface(normalize_axtree(nodes))
+    groups = {a.label: a.group for a in surface.affordances}
+    assert groups == {"Red": "g:cg", "Green": "g:cg", "Small": "g:sg", "Large": "g:sg"}
+
+
+def test_normalize_group_is_none_without_a_container() -> None:
+    nodes = [_ax("root", "RootWebArea", children=["r1"]), _ax("r1", "radio", "Lonely", backend=1)]
+    surface = reduce_surface(normalize_axtree(nodes))
+    assert surface.affordances[0].group is None

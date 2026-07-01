@@ -15,7 +15,7 @@ from typing import Any
 
 from zu_core.ports import SelectionSatisfier, SurfaceAction
 from zu_core.surface import SurfaceAffordance, SurfaceView
-from zu_tools.selection import FirstOptionSelectionSatisfier, _is_candidate, _took
+from zu_tools.selection import FirstOptionSelectionSatisfier, _is_select_candidate, _took
 
 
 class VariantSurface:
@@ -146,12 +146,12 @@ def _aff(role: str, *, states: tuple[str, ...] = (), value: str | None = None) -
     return SurfaceAffordance(handle="h", role=role, label="Colour", value=value, states=states)
 
 
-def test_is_candidate_is_any_enabled_native_select_not_gated_on_required() -> None:
-    assert _is_candidate(_aff("combobox"))                     # #110: no `required` needed
-    assert _is_candidate(_aff("combobox", states=("required",)))
-    assert not _is_candidate(_aff("textbox"))                  # wrong role
-    assert not _is_candidate(_aff("listbox"))                  # ARIA listbox: follow-up
-    assert not _is_candidate(_aff("combobox", states=("disabled",)))
+def test_is_select_candidate_is_any_enabled_native_select_not_gated_on_required() -> None:
+    assert _is_select_candidate(_aff("combobox"))                     # #110: no `required` needed
+    assert _is_select_candidate(_aff("combobox", states=("required",)))
+    assert not _is_select_candidate(_aff("textbox"))                  # wrong role
+    assert not _is_select_candidate(_aff("listbox"))                  # ARIA listbox: follow-up
+    assert not _is_select_candidate(_aff("combobox", states=("disabled",)))
 
 
 def test_took_is_a_nonempty_changed_value() -> None:
@@ -159,3 +159,154 @@ def test_took_is_a_nonempty_changed_value() -> None:
     assert _took(before, _aff("combobox", value="Red"))          # placeholder -> option
     assert not _took(before, _aff("combobox", value="Choose an option"))  # unchanged
     assert not _took(before, _aff("combobox", value=""))         # empty is not a real choice
+
+
+# --- #120: custom swatch / radio-group pickers ------------------------------
+
+class SwatchSurface:
+    """In-memory ConnectedSurface over swatch/radio groups. A ``click`` selects the
+    option and deselects its GROUP siblings (single-choice). Options are dicts:
+    {handle, role, label, group, selected?, disabled?}."""
+
+    def __init__(self, options: list[dict[str, Any]], *, renumber: bool = False) -> None:
+        self._options = options
+        self._renumber = renumber
+        self.clicks: list[str] = []
+        self._extra = False  # a control that appears after the first click (forces renumber)
+
+    async def perceive(self) -> SurfaceView:
+        affs = [
+            SurfaceAffordance(
+                handle=o["handle"], role=o["role"], label=o["label"], group=o.get("group"),
+                states=tuple((["selected"] if o.get("selected") else [])
+                             + (["disabled"] if o.get("disabled") else [])),
+            )
+            for o in self._options
+        ]
+        if self._renumber and self._extra:
+            affs.insert(0, SurfaceAffordance(handle="_", role="button", label="Add to basket"))
+            affs = [a.model_copy(update={"handle": f"h{i + 1}"}) for i, a in enumerate(affs)]
+        return SurfaceView(affordances=tuple(affs))
+
+    async def act(self, action: SurfaceAction) -> SurfaceView:
+        if action.kind == "click":
+            self.clicks.append(action.handle)
+            view = await self.perceive()
+            target = next((a for a in view.affordances if a.handle == action.handle), None)
+            if target is not None and "disabled" not in target.states:
+                for o in self._options:
+                    if o.get("group") == target.group:
+                        o["selected"] = o["label"] == target.label
+                self._extra = True
+        return await self.perceive()
+
+
+class NoOpSwatchSurface(SwatchSurface):
+    """A broken swatch: the click is accepted but nothing becomes selected — the
+    silent no-op #39 must catch (and #120 must NOT report as success)."""
+
+    async def act(self, action: SurfaceAction) -> SurfaceView:
+        self.clicks.append(action.handle)
+        return await self.perceive()
+
+
+def swatch(handle: str, label: str, group: str, *, selected: bool = False,
+           disabled: bool = False, role: str = "radio") -> dict[str, Any]:
+    return {"handle": handle, "role": role, "label": label, "group": group,
+            "selected": selected, "disabled": disabled}
+
+
+async def test_sets_two_swatch_groups_separated_only_by_group_id() -> None:
+    # colour and size are BOTH role=radio and contiguous — a flat list can't tell
+    # them apart. The group id does; both groups must be satisfied.
+    surface = SwatchSurface([
+        swatch("a1", "Red", "g:colour"), swatch("a2", "Green", "g:colour"),
+        swatch("a3", "Small", "g:size"), swatch("a4", "Large", "g:size"),
+    ])
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+    assert [r.chosen_label for r in results] == ["Red", "Small"]  # first enabled of each group
+
+
+async def test_skips_a_group_that_already_has_a_selection() -> None:
+    surface = SwatchSurface([
+        swatch("a1", "Red", "g:colour", selected=True), swatch("a2", "Green", "g:colour"),
+        swatch("a3", "Small", "g:size"), swatch("a4", "Large", "g:size"),
+    ])
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+    assert [r.chosen_label for r in results] == ["Small"]   # colour already chosen
+    assert "a2" not in surface.clicks                        # colour group untouched
+
+
+async def test_picks_first_enabled_option_skipping_disabled() -> None:
+    surface = SwatchSurface([
+        swatch("a1", "Red", "g:colour", disabled=True),
+        swatch("a2", "Green", "g:colour"),
+    ])
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+    assert [r.chosen_label for r in results] == ["Green"]
+    assert "a1" not in surface.clicks
+
+
+async def test_silent_no_op_swatch_is_not_reported_as_success() -> None:
+    surface = NoOpSwatchSurface([swatch("a1", "Red", "g:colour"), swatch("a2", "Green", "g:colour")])
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+    assert results == []            # click accepted, nothing selected -> not a success
+    assert surface.clicks == ["a1"]  # it did try once
+
+
+async def test_group_selection_survives_handle_renumbering() -> None:
+    surface = SwatchSurface(
+        [swatch("a1", "Red", "g:colour"), swatch("a2", "Small", "g:size")],
+        renumber=True,
+    )
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+    assert sorted(r.chosen_label for r in results) == ["Red", "Small"]
+
+
+async def test_native_selects_and_swatch_groups_both_satisfied_in_one_pass() -> None:
+    # A product with a native <select> AND a swatch group — one call sets both.
+    class Combined(SwatchSurface):
+        def __init__(self) -> None:
+            super().__init__([swatch("a2", "Red", "g:colour"), swatch("a3", "Blue", "g:colour")])
+            self._sel_unset = True
+
+        async def perceive(self) -> SurfaceView:
+            base = await super().perceive()
+            select = SurfaceAffordance(
+                handle="a1", role="combobox", label="Size",
+                value="Choose an option" if self._sel_unset else "Medium",
+            )
+            return SurfaceView(affordances=(select, *base.affordances))
+
+        async def act(self, action: SurfaceAction) -> SurfaceView:
+            if action.kind == "select" and self._sel_unset:
+                self._sel_unset = False
+                return await self.perceive()
+            return await super().act(action)
+
+    results = await FirstOptionSelectionSatisfier().satisfy_required(Combined())
+    labels = {r.chosen_label for r in results}
+    assert "Medium" in labels and "Red" in labels  # select + swatch group both set
+
+
+# --- grouping + vocabulary, directly ----------------------------------------
+
+def test_groups_partitions_by_group_id_then_contiguous_run() -> None:
+    from zu_tools.selection import _groups
+
+    v = SurfaceView(affordances=(
+        SurfaceAffordance(handle="a1", role="radio", label="Red", group="g:colour"),
+        SurfaceAffordance(handle="a2", role="radio", label="Blue", group="g:colour"),
+        SurfaceAffordance(handle="a3", role="option", label="S"),   # ungrouped run
+        SurfaceAffordance(handle="a4", role="option", label="M"),
+    ))
+    groups = _groups(v)
+    assert {tuple(a.label for a in g) for g in groups} == {("Red", "Blue"), ("S", "M")}
+
+
+def test_selection_vocab_is_single_sourced_with_zu_patterns() -> None:
+    from zu_patterns._match import SELECTABLE_ROLES, SELECTED_STATES
+    from zu_tools.selection import _SELECTABLE_ROLES, _SELECTED_STATES
+
+    assert _SELECTED_STATES == set(SELECTED_STATES)         # the 'selected' vocabulary agrees
+    assert _SELECTABLE_ROLES <= set(SELECTABLE_ROLES)       # no roles zu_patterns doesn't know

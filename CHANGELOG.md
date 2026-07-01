@@ -7,6 +7,22 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — SelectionSatisfier extends to custom swatch/radio-group variant pickers (#120)
+`FirstOptionSelectionSatisfier` satisfied native `<select>` only (#95/#110); a large fraction of shops
+use custom swatch / radio-group pickers, which it left untouched (add-to-cart stayed disabled). The
+hard, framework-worthy part is GROUPING — which swatches are colour vs size — which a flat surface
+could not express. Proven offline (no browser).
+- **A content-free `group` primitive** on `SurfaceAffordance` (additive; kept out of `fingerprint`):
+  the reducer stamps each option with its enclosing accessibility group-container id
+  (`radiogroup`/`listbox`/`tablist`/…), rebuilt from the AX tree's `childIds` — never from labels. This
+  is what lets a consumer tell one variant group from another; it also benefits `VariantPicker` (#39).
+- **The satisfier now sets swatch/radio groups too**: for each group with NO selected option it clicks
+  the first enabled option and confirms it reached a SELECTED state (the #39 invariant). A silent no-op
+  (click accepted, nothing selected) is a liveness violation — NOT reported, so the host sees the group
+  as still unsatisfied rather than a false success. Ungrouped options fall back to contiguous same-role
+  runs. Returns the same `list[RequiredSelection]`. Native `<select>` + swatch groups are satisfied in
+  one pass. Selectable-role / selected-state vocabulary is single-sourced against `zu_patterns` by a test.
+
 ### Added — a CheckoutProceeder port: advance add-to-cart → checkout, short of the commit boundary (#117)
 The connected-surface family clears consent (#94) and satisfies variant selects (#95/#110) — the
 pre-add steps. The step right after add-to-cart (the mini-cart drawer's 'Checkout') was still left
