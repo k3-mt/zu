@@ -45,8 +45,14 @@ from zu_core.ports import ModelProvider, ModelRequest, RecognitionResult
 from zu_core.reachability import Fsm, FsmEdge, co_reachable, trap_states
 from zu_core.surface import SurfaceAffordance, SurfaceView
 
+from .confidence import MIN_CONFIDENCE
 from .recognizer import recognize
-from .reversibility import Commitment, classify_action
+from .reversibility import (
+    _COMMITTING_OPS,
+    _REVERSIBLE_OPS,
+    Commitment,
+    classify_action,
+)
 
 # --- (A) the empirical transition-model builder ---------------------------
 
@@ -303,6 +309,12 @@ class Candidate:
     op: str | None = None
     role: str | None = None
     http_method: str | None = None
+    # The locale-independent STRUCTURAL commit signal of the acted affordance
+    # (``SurfaceAffordance.submits`` — a button[type=submit]/form-submit). The
+    # commit-boundary classifier reads this as the PRIMARY irreversibility tell,
+    # so a submit control (even one rendered as a link) STOPS the live loop without
+    # any commerce-verb keyword (#65 F16/F18).
+    submits: bool = False
 
 
 @dataclass(frozen=True)
@@ -401,7 +413,7 @@ async def live_mpc_step(
     depth: int = 2,
     surface_to_state: SurfaceToState | None = None,
     priors: Sequence[Any] = (),
-    min_confidence: float = 0.6,
+    min_confidence: float = MIN_CONFIDENCE,
     dead_edges: frozenset[DeadEdge] = frozenset(),
     exclude: frozenset[str] = frozenset(),
 ) -> MpcDecision:
@@ -494,7 +506,8 @@ async def live_mpc_step(
     # DISPOSE — SAFETY: re-classify the chosen candidate at the COMMIT BOUNDARY.
     # default-to-committing: an uncertain/side-effecting move STOPS the live loop.
     commitment = classify_action(
-        http_method=best.http_method, role=best.role, op=best.op, priors=priors
+        http_method=best.http_method, role=best.role, op=best.op,
+        submits=best.submits, priors=priors,
     )
     if commitment is Commitment.COMMITTING:
         return MpcDecision(
@@ -546,6 +559,11 @@ async def _propose_candidates(
         aff = _aff(surface, handle if isinstance(handle, str) else None)
         op = args.get("op") or (call.name if call.name in _OP_NAMES else None)
         role = args.get("role") or (aff.role if aff is not None else None)
+        # STRUCTURAL commit signal: an explicit ``submits`` arg, else the acted
+        # affordance's own ``submits`` (#65 F16). No commerce-verb keyword needed.
+        submits = args.get("submits")
+        if submits is None and aff is not None:
+            submits = aff.submits
         out.append(
             Candidate(
                 label=label,
@@ -555,17 +573,20 @@ async def _propose_candidates(
                 http_method=(
                     str(args["http_method"]) if args.get("http_method") else None
                 ),
+                submits=bool(submits),
             )
         )
     return out
 
 
-# Generic interaction verbs a tool name may itself be (so a bare ``fill``/``submit``
-# tool call carries an op signal to the classifier without explicit args).
-_OP_NAMES = frozenset(
-    {"fill", "read", "open", "select", "expand", "focus",
-     "submit", "confirm", "purchase", "pay", "checkout", "delete", "click"}
-)
+# Generic INTERACTION-primitive tool names a bare tool call may itself be (so a
+# bare ``fill``/``submit`` tool call carries an op signal to the classifier without
+# explicit args). This is the SAME primitive alphabet the classifier speaks — NO
+# commerce vocabulary (``pay``/``checkout``/``purchase``): a checkout's commit
+# boundary is declared by the cart pattern's contributed prior, not a duplicated
+# verb blocklist here (#65 F16). The classifier's own ``_COMMITTING_OPS`` /
+# ``_REVERSIBLE_OPS`` are the single source of what each primitive MEANS.
+_OP_NAMES = frozenset(_REVERSIBLE_OPS | _COMMITTING_OPS | {"click"})
 
 
 def _proposal_request(
@@ -671,7 +692,7 @@ async def mpc_run(
     max_steps: int = 25,
     surface_to_state: SurfaceToState | None = None,
     priors: Sequence[Any] = (),
-    min_confidence: float = 0.6,
+    min_confidence: float = MIN_CONFIDENCE,
     dead_edges: frozenset[DeadEdge] = frozenset(),
     replan_budget: int = 0,
     on_rollback: Callable[[str, Candidate], Awaitable[None]] | None = None,

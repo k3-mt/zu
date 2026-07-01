@@ -148,6 +148,52 @@ async def test_mpc_stops_at_commit_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mpc_stops_at_structural_submit_link_no_commerce_verb() -> None:
+    # #65 F16/F18: a committing NAVIGATION — a control rendered as a LINK that
+    # STRUCTURALLY submits (button[type=submit]/form-submit, ``submits=True``) — is
+    # the commit boundary by SHAPE, with NO commerce/logout/delete keyword anywhere.
+    # The affordance's structural ``submits`` flows into the Candidate and the
+    # classifier withholds the link's reversible role signal (F18), so the live loop
+    # STOPS. On the OLD code (no ``submits`` plumbing, link ⇒ reversible) this move
+    # would have EXECUTED — the exact bug F18 fixes.
+    surface = SurfaceView(
+        title="here",
+        url="https://x/here",
+        affordances=(
+            SurfaceAffordance(handle="a1", role="link", label="reach", submits=True),
+            SurfaceAffordance(handle="a2", role="link", label="wander"),
+        ),
+    )
+    model = ScriptedProvider(
+        [
+            ModelResponse(
+                # a plain navigational "click" — NO ``op``, NO commerce verb; only the
+                # affordance's structural ``submits`` carries the commit signal.
+                tool_calls=[ToolCall(name="click", args={"label": "reach", "handle": "a1"})],
+                finish=Finish.TOOL_CALLS,
+            )
+        ]
+    )
+    decision = await live_mpc_step(surface, model, _branch_fsm(), surface_to_state=_state_of)
+    assert decision.escalate is True
+    assert decision.committing is True
+    assert decision.action is not None and decision.action.label == "reach"
+    assert decision.action.submits is True  # the structural signal was threaded
+
+
+def test_op_names_carry_no_commerce_verb_blocklist() -> None:
+    # #65 F16: the duplicated commerce-verb blocklist is gone from search.py too —
+    # ``_OP_NAMES`` is now derived from the classifier's own primitive alphabet, so
+    # ``pay``/``checkout``/``place_order``/``purchase`` are NOT tool-name op-signals.
+    from zu_patterns.search import _OP_NAMES
+
+    for verb in ("pay", "checkout", "place_order", "purchase"):
+        assert verb not in _OP_NAMES
+    # the generic interaction primitives ARE present (the single shared source).
+    assert {"fill", "submit", "confirm", "delete"} <= _OP_NAMES
+
+
+@pytest.mark.asyncio
 async def test_mpc_no_proposals_escalates() -> None:
     model = ScriptedProvider([ModelResponse(text="nothing", finish=Finish.STOP)])
     decision = await live_mpc_step(

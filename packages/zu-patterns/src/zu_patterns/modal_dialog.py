@@ -11,6 +11,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import GOOD, LOW
 from .rail import surface_shows
 
 _DIALOG_CONTEXT = ("dialog", "modal", "are you sure", "please confirm")
@@ -40,7 +41,7 @@ class ModalDialog:
         assert chosen is not None
         # Prefer the reversible close step in the proposed script.
         op = "click" if chosen is close else "confirm"
-        confidence = 0.8 if dialogish else 0.6
+        confidence = GOOD if dialogish else LOW
         return RecognitionResult(
             archetype=self.archetype,
             confidence=confidence,

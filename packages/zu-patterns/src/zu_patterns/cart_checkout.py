@@ -15,6 +15,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import LOW, STRONG
 from .rail import surface_shows
 from .reversibility import ActionPrior, Commitment
 
@@ -54,7 +55,7 @@ class CartCheckout:
         line_ctx = m.context_has(surface, _LINE_ITEM_CONTEXT)
         # Confidence: a cart/checkout button WITH line-item context is strong.
         present = [x for x in (add, checkout, place) if x is not None]
-        confidence = 0.85 if (line_ctx and present) else 0.6
+        confidence = STRONG if (line_ctx and present) else LOW
         # The proposed script advances toward — but STOPS BEFORE — the committing
         # place-order/pay step. We propose the safe step (add / go to checkout) and
         # mark the committing step with an ``expect`` (a boundary marker), never a

@@ -14,6 +14,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import CORROBORATION_BONUS, DOMINANT, WEAK
 from .rail import surface_shows
 
 _CONSENT_CONTEXT = ("cookie", "consent", "gdpr", "privacy", "tracking")
@@ -43,9 +44,9 @@ class CookieBanner:
             if a.handle != accept.handle
             and not m.label_has(a, m.ACCEPT_TOKENS + m.REJECT_TOKENS + m.CLOSE_TOKENS)
         ]
-        confidence = 0.9 if len(non_consent) <= 1 else 0.65
+        confidence = DOMINANT if len(non_consent) <= 1 else WEAK
         if consent_ctx and consent_label:
-            confidence = min(1.0, confidence + 0.05)
+            confidence = min(1.0, confidence + CORROBORATION_BONUS)
         return RecognitionResult(
             archetype=self.archetype,
             confidence=confidence,
