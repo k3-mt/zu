@@ -2312,8 +2312,8 @@ test = [
 requires-dist = [
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.110" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
-    { name = "pyyaml" },
-    { name = "typer" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.27" },
     { name = "zu-core", editable = "packages/zu-core" },
     { name = "zu-redteam", marker = "extra == 'test'", editable = "packages/zu-redteam" },
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8" },
     { name = "zu-core", editable = "packages/zu-core" },
 ]
@@ -2543,7 +2543,7 @@ pdf = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=6" },
     { name = "selectolax" },
     { name = "zu-backends", editable = "packages/zu-backends" },

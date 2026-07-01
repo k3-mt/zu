@@ -98,7 +98,10 @@ def test_bad_task_is_422_not_a_crash():
     c = _client(_cfg({"name": "A", "price": "$1"}))
     resp = c.post("/run", json={"task": {"no_query": True}})
     assert resp.status_code == 422
-    assert "invalid task" in resp.json()["detail"]
+    # O4: the actionable message names the offending field (the missing `query`)
+    # rather than dumping a raw pydantic blob.
+    detail = resp.json()["detail"]
+    assert "query" in detail and "missing" in detail.lower()
 
 
 def test_run_stream_emits_live_sse_frames():

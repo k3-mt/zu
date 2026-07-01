@@ -18,7 +18,7 @@ classifiers = [
 # zu-backends supplies render_dom's default sandbox (local-docker); it is
 # imported lazily, so a tier-1-only run never touches it, but the default
 # tier-2 render works out of the box once installed.
-dependencies = ["zu-core==0.8.0", "httpx", "selectolax", "zu-backends==0.8.0"]
+dependencies = ["zu-core==0.8.0", "httpx>=0.27", "selectolax", "zu-backends==0.8.0"]
 
 [project.optional-dependencies]
 # pdf_extract reads PDF content streams with pypdf — a PURE PARSER with no JS

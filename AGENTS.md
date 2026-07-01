@@ -30,6 +30,8 @@ zu/
     zu-checks/              # detectors (empty, error, js-shell, bot-wall, action-surface-blind) + validators (schema, grounding)
     zu-backends/            # local-docker sandbox + sqlite/jsonl event sinks + triggers (webhook/queue/schedule/object-store)
     zu-huggingface/         # HuggingFace task models as typed tools/detectors/validators + supply-chain guards
+    zu-patterns/            # the policy-prior / guided-search layer: Pattern recognizers + FSM site-map + MPC (§5)
+    zu-shadow/              # author an agent by demonstration: record a human session -> synthesize agent + rail (§2.8)
     zu-redteam/             # the plugin-test gate + adversarial red-team agent
     zu-cli/                 # the `zu` command, HTTP server, MCP server
     zu/                     # the `import zu` embed facade (published as zu-runtime)
@@ -79,6 +81,7 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 | a sandbox backend           | `zu-backends`    | `zu.backends`     | `SandboxBackend`|
 | an event sink (storage)     | `zu-backends`    | `zu.sinks`        | `EventSink`     |
 | a policy (the decision-maker) | `zu-providers` | `zu.policies`     | `Policy`        |
+| a surface recognizer (policy prior) | `zu-patterns` | `zu.patterns`   | `Pattern`       |
 | typed vendor/product discovery | `zu-providers` | `zu.retrieval_providers` | `RetrievalProvider` |
 | a computed merchant-trust score | `zu-providers` | `zu.reputation_providers` | `ReputationProvider` |
 | a trigger (inbound event)   | `zu-backends`    | `zu.triggers`     | `Trigger`       |
@@ -108,6 +111,14 @@ embodied controller implements it directly; `Trigger` (`listen()`) is the
 inbound mirror of `EventSink`, carrying **untrusted** payloads. Both the
 observation and the action are typed multimodal `Content` (`Text`/`Image`/
 `Audio`) in `zu_core.content`.
+
+`Policy` is a **code-level** seam, not an `agent.yaml` block: there is no
+`policy:` key. `agent.yaml` names the model (`provider:`), which the loop wraps in
+the default `LlmPolicy` — so swapping the model is config, but swapping the
+*decision-maker itself* (a world-model or embodied controller in place of an LLM)
+is done in code by constructing the loop with a different `Policy`. The table row
+above is where a `Policy` implementation is registered (`zu.policies`), not a
+per-run config toggle.
 
 The **open-web research** seams (the vendor-research capability set, #81–84) are the
 discovery siblings of `ModelProvider`: `RetrievalProvider` (`search(query) ->

@@ -24,6 +24,7 @@ from .fixtures import (  # noqa: F401
     fake_sink,
     make_fetch_tool,
     make_sandbox_backend,
+    make_search_tool,
 )
 
 _MARKERS = {

@@ -5,36 +5,11 @@ from __future__ import annotations
 from zu_core.ports import RunContext, Scope, Severity, Verdict
 
 from . import _contains_any, _html_of
+from ._markers import CLOUDFLARE_FINGERPRINTS, STRONG_MARKERS, WEAK_MARKERS
 
-# Strong markers: phrasing characteristic of an anti-bot interstitial, specific
-# enough that their presence is treated as the signal on its own. This is a
-# deterministic heuristic, not a proof: a page that *discusses* CAPTCHAs (a news
-# story, this very comment) can contain "captcha" and would escalate — the cost
-# is a wasted tier-2 render, not a wrong answer, and escalating a borderline page
-# is the safer failure. ``cf-browser-verification`` is unambiguous; the natural-
-# language phrases are the ones with residual false-positive surface.
-_STRONG_MARKERS = (
-    "captcha",
-    "are you a robot",
-    "verify you are human",
-    "cf-browser-verification",
-)
-
-# Weak markers: real Cloudflare wall phrasing, but common-enough English that a
-# substring match alone false-positives (an article titled "Just a Moment in
-# History", a banner reading "Attention required"). They fire ONLY when a
-# Cloudflare fingerprint is also present, so a normal page is never escalated.
-_WEAK_MARKERS = (
-    "attention required",
-    "just a moment",
-)
-_CLOUDFLARE_FINGERPRINTS = (
-    "cloudflare",
-    "cf-ray",
-    "cf-browser-verification",
-    "__cf",
-    "/cdn-cgi/",
-)
+# The wall marker sets are the ONE source of truth in ``._markers`` — a neutral
+# module ``bot-wall`` and ``captcha`` both import, so neither detector depends on
+# the other. See ``._markers`` for the strong/weak/fingerprint semantics.
 
 
 class BotWallDetector:
@@ -43,8 +18,8 @@ class BotWallDetector:
 
     def inspect(self, ctx: RunContext) -> Verdict | None:
         html = _html_of(ctx)
-        strong = _contains_any(html, _STRONG_MARKERS)
-        weak = _contains_any(html, _WEAK_MARKERS) and _contains_any(html, _CLOUDFLARE_FINGERPRINTS)
+        strong = _contains_any(html, STRONG_MARKERS)
+        weak = _contains_any(html, WEAK_MARKERS) and _contains_any(html, CLOUDFLARE_FINGERPRINTS)
         if strong or weak:
             return Verdict(
                 severity=Severity.ESCALATE,

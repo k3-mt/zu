@@ -43,12 +43,15 @@ def fetch_tool(*, text: str = "", status: int = 200, allow_private: bool = True)
 def search_tool(results: list[dict] | None = None) -> Any:
     """The real ``web_search`` tool served canned results off a mock transport — its
     connector/result-parsing/grounding-content logic runs for real, only the search
-    API is faked. ``results`` is a list of ``{"title", "url"}`` (defaults to one)."""
+    API is faked (the parallel to ``fetch_tool``, which fakes ``http_fetch``).
+    ``results`` is a list of ``{"title", "url"}`` (defaults to one whose ``url`` is
+    a valid absolute URL, so a downstream fetch of the result doesn't trip URL
+    validation)."""
     import httpx
 
     from zu_tools.search import WebSearch
 
-    items = results if results is not None else [{"title": "Result", "url": "https://example/"}]
+    items = results if results is not None else [{"title": "Result", "url": "https://example.com/"}]
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"results": items})

@@ -21,8 +21,12 @@ classifiers = [
 # is installed at runtime, so it never forces a plugin (or its deps) on a user.
 dependencies = [
     "zu-core==0.8.0",
-    "typer",
-    "pyyaml",
+    # Lower bounds only (generic, not over-pinned): a floor stops a floating dep
+    # from silently resolving to an incompatible OLD release, without pinning a
+    # major (a stale upper bound is its own install hazard). Floors track what's
+    # tested/installed.
+    "typer>=0.12",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]

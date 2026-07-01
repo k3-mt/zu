@@ -23,6 +23,18 @@ from .config import ConfigError, assemble, load_agent, load_config
 
 app = typer.Typer(help="Zu — Agent Production Runtime", no_args_is_help=True)
 
+
+def _fail_offline(exc: Exception) -> typer.Exit:
+    """Print a missing/malformed-fixtures failure as its OWN offline error and exit.
+
+    An ``OfflineError`` (no ``fixtures/capture.json``, a malformed bundle) is NOT a
+    config error — the ``agent.yaml`` is fine, the run just has no captured fixtures
+    to replay yet. Reporting it as ``config error`` sent the user hunting the wrong
+    file. Surfacing it as ``offline error`` with the fix (run ``zu capture`` once)
+    points at the real gap. Returns the Exit for the caller to ``raise ... from None``."""
+    typer.echo(f"offline error: {exc}", err=True)
+    return typer.Exit(code=2)
+
 # `zu shadow` — author an agent by demonstration (§2.8). The implementation lives in
 # the zu-shadow package; this sub-app imports it lazily so zu-cli never hard-depends
 # on zu-shadow (the dependency runs the other way), and a missing install fails with
@@ -271,14 +283,15 @@ def shadow_scale(
     p = Path(agent)
     agent_dir = p if p.is_dir() else p.parent
 
+    from .offline import OfflineError
+
     async def _run_one(query: str, row: dict):
         if offline:
-            from .offline import Bundle, OfflineError, bundle_path, replay_offline
+            from .offline import Bundle, bundle_path, replay_offline
 
-            try:
-                bundle = Bundle.load(bundle_path(agent_dir))
-            except OfflineError as exc:
-                raise ConfigError(str(exc)) from None
+            # Let an OfflineError (no fixtures/capture.json) propagate as its own
+            # offline error rather than masquerading as a config error.
+            bundle = Bundle.load(bundle_path(agent_dir))
             row_spec = spec.model_copy(update={"query": query})
             result, _ = await replay_offline(row_spec, cfg, bundle)
             return result
@@ -289,6 +302,8 @@ def shadow_scale(
 
     try:
         report = asyncio.run(run_scale(spec.query, var, data, _run_one))
+    except OfflineError as exc:
+        raise _fail_offline(exc) from None
     except (ConfigError, NotImplementedError) as exc:
         typer.echo(f"config error: {exc}", err=True)
         raise typer.Exit(code=2) from None
@@ -444,12 +459,12 @@ def _execute_once(
     # network, ~$0. Everything downstream (the loop, track recording, cost telemetry) is
     # unchanged, so an offline run still records track.json and proves ~$0 in cost.jsonl.
     if offline:
-        from .offline import Bundle, OfflineError, bundle_path, rebind_offline
+        from .offline import Bundle, bundle_path, rebind_offline
 
-        try:
-            bundle = Bundle.load(bundle_path(agent_dir))
-        except OfflineError as exc:
-            raise ConfigError(str(exc)) from None
+        # An OfflineError here (no fixtures/capture.json, malformed bundle) is its
+        # OWN failure, not a config error — let it propagate so the CLI reports it
+        # as an offline/fixture error (see _fail_offline), pointing at `zu capture`.
+        bundle = Bundle.load(bundle_path(agent_dir))
         provider = rebind_offline(registry, bundle)
         providers = {}  # no per-tier LIVE overrides offline; the script drives every tier
         typer.echo(f"zu run --offline: replaying {len(bundle.moves)} captured moves "
@@ -699,12 +714,16 @@ def run(
         raise typer.Exit(code=2) from None
     # One-shot: run, exit non-zero on a non-success result so it composes in a
     # shell. Scheduled: loop and keep going regardless of any single outcome.
+    from .offline import OfflineError
+
     if not every:
         try:
             result = (
                 _execute_sandboxed(agent) if sandboxed
                 else _execute_once(agent, stream=stream, use_track=track, offline=offline)
             )
+        except OfflineError as exc:
+            raise _fail_offline(exc) from None
         except ConfigError as exc:
             typer.echo(f"config error: {exc}", err=True)
             raise typer.Exit(code=2) from None
@@ -726,6 +745,10 @@ def run(
         typer.echo(f"--- run {n} ---")
         try:
             _execute_once(agent, stream=stream, use_track=track, offline=offline)
+        except OfflineError as exc:
+            # A missing/malformed fixtures bundle is fatal even in a loop — it won't
+            # fix itself; surface it as an offline error, not a config error.
+            raise _fail_offline(exc) from None
         except ConfigError as exc:
             # A bad config is fatal even in a loop — it won't fix itself.
             typer.echo(f"config error: {exc}", err=True)
@@ -890,8 +913,7 @@ def harden(
     try:
         bundle = Bundle.load(bundle_path(p if p.is_dir() else p.parent))
     except OfflineError as exc:
-        typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        raise _fail_offline(exc) from None
 
     typer.echo(f"zu harden: {agent} (offline — no model, no network)")
     report = asyncio.run(run_harden(spec, cfg, bundle))
@@ -965,8 +987,7 @@ def build(
     try:
         bundle = Bundle.load(bundle_path(agent_dir))
     except OfflineError as exc:
-        typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        raise _fail_offline(exc) from None
 
     typer.echo(f"zu build: {agent} (offline spine — no model, no network)")
     report = asyncio.run(build_offline(spec, cfg, agent_dir, bundle, min_score=min_score))
@@ -1032,8 +1053,7 @@ def construct(
     try:
         bundle = Bundle.load(bundle_path(agent_dir))
     except OfflineError as exc:
-        typer.echo(f"config error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        raise _fail_offline(exc) from None
 
     if check:
         typer.echo(f"zu construct --check: {agent} (offline readiness gate — no model)")
@@ -1049,6 +1069,8 @@ def construct(
             typer.echo(f"  ✗ guardrails: {len(guards.violations)} violation(s)")
             for v in guards.violations:
                 typer.echo(f"      · [{v.rule}] {v.detail}")
+        # Provenance: bind the score to the exact fixture it was computed over.
+        typer.echo(f"    provenance: {guards.provenance} (fixture {guards.fixture_hash})")
         if build.ok and guards.passed:
             typer.echo("construct: ready for review (build clean + guardrails passed).")
             return
