@@ -14,6 +14,8 @@ from . import _match as m
 from .rail import surface_shows
 
 _DIALOG_CONTEXT = ("dialog", "modal", "are you sure", "please confirm")
+# Dialog failure vocabulary — an any-of set (#46), not the single literal "error".
+_ERROR_TOKENS = ("error", "failed", "something went wrong", "try again")
 
 
 class ModalDialog:
@@ -61,4 +63,6 @@ class ModalDialog:
         # Failure CONTEXT = an error appears inside/after the dialog. Safety shape:
         # THROUGHOUT NOT contains(error) — fires the instant it lands. (The
         # "persists" mode is the success liveness deadline-violation, not duplicated.)
-        return [surface_shows(self.archetype, "dialog_error", label="error", negate=True)]
+        return [
+            surface_shows(self.archetype, "dialog_error", labels=_ERROR_TOKENS, negate=True)
+        ]

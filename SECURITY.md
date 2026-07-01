@@ -66,6 +66,27 @@ The event log can hold untrusted web content and extracted PII. Encryption is a
   plaintext and encrypted rows and still read back — encryption can be turned
   on for an existing log without rewriting history.
 
+### Captured fixtures
+
+`zu capture` records a real run — tool observations (page content), model moves —
+which can carry PII and secrets, into `fixtures/capture.json`. This is the only
+at-rest artifact that holds real captured data, so it can be encrypted with the
+same codec stack:
+
+- **Opt-in via a key in the environment.** Set `ZU_FIXTURE_KEY` (fixture-scoped)
+  or the shared `ZU_EVENT_KEY` (32-byte hex/base64). When a key is present, a
+  fresh capture is written as a **version-tagged, AAD-bound AES-256-GCM
+  ciphertext** blob at rest (via `ManagedAesGcmCodec`, so KMS-backed key rotation
+  is available); the secure path is the default whenever a key exists.
+- **Backward-compatible plaintext by default.** With no key set, the capture is
+  written byte-for-byte as the current plaintext JSON — the `$0` offline
+  ergonomics default is unchanged.
+- **Transparent decrypt on replay.** `zu run --offline` (and every `Bundle.load`
+  path) auto-detects the leading version byte: a plaintext JSON object opens with
+  `{`/whitespace; any other leading byte is a codec tag, decrypted via the codec
+  registry. Tampering with the ciphertext or its bound AAD fails decryption
+  loudly.
+
 **Not yet provided (future stage):** managed keys. The current codec takes a
 32-byte key from the environment, which suits a single-tenant/local deployment.
 KMS-backed envelope encryption, per-tenant data keys, and key rotation are the

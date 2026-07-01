@@ -68,6 +68,75 @@ def test_required_field_presence() -> None:
     assert predicate_holds(pred, missing) is False
 
 
+def test_surface_contains_any_of_labels_normalized_word_boundary() -> None:
+    """SURFACE_CONTAINS accepts an any-of ``labels`` set (#46) and matches on
+    normalized WORD BOUNDARIES (#57): ANY equivalent marker satisfies, casing does
+    not matter, but a decoy substring does not falsely satisfy."""
+    pred = Predicate(
+        kind=PredicateKind.SURFACE_CONTAINS,
+        params={
+            "event_type": ev.SURFACE_CAPTURED,
+            "labels": ["order confirmed", "payment received"],
+            "require_present": True,
+        },
+    )
+    # ANY of the set, case/punctuation-insensitive.
+    assert predicate_holds(pred, [_ev(ev.SURFACE_CAPTURED, {"labels": ["Payment received"]})])
+    assert predicate_holds(pred, [_ev(ev.SURFACE_CAPTURED, {"labels": ["Order confirmed!"]})])
+    # A decoy that only CONTAINS a token as a substring must NOT satisfy.
+    assert not predicate_holds(
+        pred, [_ev(ev.SURFACE_CAPTURED, {"labels": ["Reconfirmation settings"]})]
+    )
+    # No matching evidence + require_present ⇒ unsatisfied (the liveness reading).
+    assert not predicate_holds(pred, [_ev(ev.SURFACE_CAPTURED, {"labels": ["Basket"]})])
+
+
+def test_surface_contains_state_key_handle_became_selected() -> None:
+    """A ``state``/``states`` key scoped by ``handle`` expresses "handle H reached a
+    selected state" (#39) — folding the affordance's ``states`` on the surface event,
+    never page text. Only the NAMED handle's state is consulted."""
+    pred = Predicate(
+        kind=PredicateKind.SURFACE_CONTAINS,
+        params={
+            "event_type": ev.SURFACE_CAPTURED,
+            "states": ["selected", "checked", "pressed", "aria-selected"],
+            "handle": "s1",
+            "require_present": True,
+        },
+    )
+    selected = [
+        _ev(
+            ev.SURFACE_CAPTURED,
+            {"affordances": [{"handle": "s1", "label": "Red", "states": ["selected"]}]},
+        )
+    ]
+    unselected = [
+        _ev(
+            ev.SURFACE_CAPTURED,
+            {"affordances": [{"handle": "s1", "label": "Red", "states": []}]},
+        )
+    ]
+    # A DIFFERENT handle being selected does not satisfy the s1-scoped rail.
+    other_selected = [
+        _ev(
+            ev.SURFACE_CAPTURED,
+            {"affordances": [{"handle": "s2", "label": "Blue", "states": ["selected"]}]},
+        )
+    ]
+    assert predicate_holds(pred, selected)
+    assert predicate_holds(
+        pred,
+        [
+            _ev(
+                ev.SURFACE_CAPTURED,
+                {"affordances": [{"handle": "s1", "label": "Red", "states": ["checked"]}]},
+            )
+        ],
+    )
+    assert not predicate_holds(pred, unselected)
+    assert not predicate_holds(pred, other_selected)
+
+
 def test_spend_velocity_under_window_passes_over_window_fails() -> None:
     # §8 velocity rail: summed spend on harness.capability.used within the last
     # window_s must stay ≤ limit. The window is anchored at the latest event ts

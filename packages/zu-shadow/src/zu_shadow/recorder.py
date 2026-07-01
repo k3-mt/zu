@@ -63,11 +63,19 @@ class RawInput:
 class RecordedSession:
     """The result of a recording: the (already redacted) events on the log, the
     site the session ran against, and an optional human-stated outcome. This is the
-    input the synthesizer consumes (it never sees an un-redacted event)."""
+    input the synthesizer consumes (it never sees an un-redacted event).
+
+    ``live`` marks a recording authored through the LIVE headed capture (a real
+    browser + a real human). It matters to the promotion gate: an offline/fixture
+    recording can be replayed to faithfully reproduce its recorded outcome, but a
+    live capture cannot (the live site's data has moved on), so the gate must NOT
+    claim full outcome reproduction for a live recording that carries no explicitly
+    stated outcome — it holds instead (see :mod:`zu_shadow.replay_gate`)."""
 
     site: str
     events: list[Event] = field(default_factory=list)
     outcome: str | None = None
+    live: bool = False
 
     def shadow_events(self) -> list[Event]:
         """Just the ``data.shadow.*`` events, in order."""
@@ -88,6 +96,7 @@ class Recorder:
         policy: RedactionPolicy | None = None,
         trace_id: UUID | None = None,
         task_id: UUID | None = None,
+        live: bool = False,
     ) -> None:
         self._bus = bus
         self._site = site
@@ -96,6 +105,7 @@ class Recorder:
         self._task_id = task_id or uuid4()
         self._root_id: UUID | None = None
         self._steps = 0
+        self._live = live  # authored via the live headed capture (a real browser + human)
 
     def _make(self, type_: str, payload: dict, *, parent: UUID | None) -> Event:
         return Event(
@@ -120,7 +130,9 @@ class Recorder:
     async def start(self) -> Event:
         """Open the recording — the session root every action is parented to."""
         root = await self._emit(
-            ev.SHADOW_SESSION_START, {"site": self._site, "started_by": "human"}, parent=None
+            ev.SHADOW_SESSION_START,
+            {"site": self._site, "started_by": "human", "live": self._live},
+            parent=None,
         )
         self._root_id = root.event_id
         return root
@@ -175,16 +187,22 @@ class Recorder:
             await self.record(item)
         await self.end(outcome=outcome)
         events = await self._bus.query()
-        return RecordedSession(site=self._site, events=list(events), outcome=outcome)
+        return RecordedSession(site=self._site, events=list(events), outcome=outcome,
+                               live=self._live)
 
 
 def session_from_events(events: list[Any], *, site: str = "",
                         outcome: str | None = None) -> RecordedSession:
     """Reconstruct a :class:`RecordedSession` from an event log (e.g. one loaded from
-    a durable sink). The site falls back to the ``session.start`` payload."""
-    if not site:
-        for e in events:
-            if getattr(e, "type", "") == ev.SHADOW_SESSION_START:
-                site = (getattr(e, "payload", {}) or {}).get("site", "")
-                break
-    return RecordedSession(site=site, events=list(events), outcome=outcome)
+    a durable sink). The site and the ``live`` marker fall back to the ``session.start``
+    payload, so a recording reloaded from disk keeps its live-vs-offline provenance (the
+    promotion gate needs it)."""
+    live = False
+    for e in events:
+        if getattr(e, "type", "") == ev.SHADOW_SESSION_START:
+            start = getattr(e, "payload", {}) or {}
+            if not site:
+                site = start.get("site", "")
+            live = bool(start.get("live", False))
+            break
+    return RecordedSession(site=site, events=list(events), outcome=outcome, live=live)

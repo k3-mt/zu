@@ -17,7 +17,11 @@ def test_click_payload_is_semantic() -> None:
     assert ri is not None and ri.kind == "click"
     assert ri.target is not None
     assert (ri.target.role, ri.target.name, ri.target.label) == ("button", "Confirm booking", "Confirm booking")
-    assert set(ri.target.model_dump()) == {"role", "name", "label"}  # no selector/coordinate
+    # The target carries the semantic fields plus the locale-independent STRUCTURAL
+    # signals (input type / autocomplete / submits) — but never a selector or coordinate.
+    assert set(ri.target.model_dump()) == {"role", "name", "label",
+                                           "input_type", "autocomplete", "submits"}
+    assert "selector" not in ri.target.model_dump() and "x" not in ri.target.model_dump()
 
 
 def test_click_carries_intent_when_tagged() -> None:

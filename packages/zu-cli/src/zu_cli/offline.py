@@ -23,10 +23,12 @@ the run instead of silently passing).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zu_core.codec import IdentityCodec, PayloadCodec, decode_payload, encode_payload
 from zu_core.ports import ToolCall
 
 # The three off-box tools that need a fixture double; everything else a web agent
@@ -35,6 +37,17 @@ _DOUBLED_TOOLS = ("http_fetch", "render_dom", "browser")
 
 FIXTURES_DIR = "fixtures"
 BUNDLE_FILE = "capture.json"
+
+# The env var that turns on fixture encryption-at-rest. When it (or the shared
+# ``ZU_EVENT_KEY`` used elsewhere for at-rest event encryption) is present, a
+# capture is written as a version-tagged AEAD ciphertext blob instead of plaintext
+# JSON; when neither is set the $0 offline default stays byte-for-byte plaintext.
+_FIXTURE_KEY_ENV = "ZU_FIXTURE_KEY"
+_SHARED_KEY_ENV = "ZU_EVENT_KEY"
+# The AEAD blob leads with the codec's version byte (>0); a plaintext capture is a
+# JSON object, i.e. it starts with ``{`` (0x7b) or whitespace. Version 0 is the
+# plaintext IdentityCodec, so any first byte other than a JSON opener is a codec tag.
+_JSON_OPENERS = frozenset(b"{ \t\r\n")
 
 
 class OfflineError(RuntimeError):
@@ -75,21 +88,127 @@ class Bundle:
             observations={k: list(v) for k, v in (data.get("observations") or {}).items()},
         )
 
-    def save(self, path: str | Path) -> None:
-        Path(path).write_text(self.to_json(), encoding="utf-8")
+    # The AEAD envelope binds a fixed, purpose-scoping label as associated data so a
+    # capture ciphertext can't be lifted wholesale into a different at-rest slot that
+    # feeds the same codec (an event-log row) and decoded there. The whole plaintext
+    # (task + moves + observations) is already authenticated by GCM, so tampering with
+    # any captured byte fails decryption regardless; this label just scopes the blob.
+    _AAD = b"zu-fixture-capture/v1"
+
+    def save(self, path: str | Path, *, codec: PayloadCodec | None = None) -> None:
+        """Write the bundle. With an AEAD ``codec`` (or one resolved from the
+        environment, see :func:`fixture_codec`) the capture is a version-tagged,
+        AAD-bound ciphertext blob at rest; without one it is the current plaintext
+        JSON — byte-for-byte the $0 offline default (no regression)."""
+        codec = codec if codec is not None else fixture_codec()
+        text = self.to_json()
+        p = Path(path)
+        if codec is None or getattr(codec, "version", 0) == 0:
+            p.write_text(text, encoding="utf-8")
+            return
+        p.write_bytes(encode_payload(codec, text, self._AAD))
 
     @classmethod
-    def load(cls, path: str | Path) -> Bundle:
+    def from_blob(cls, blob: bytes, *, codec: PayloadCodec | None = None) -> Bundle:
+        """Load a capture blob whether plaintext JSON or an AEAD ciphertext. The
+        leading byte disambiguates: a plaintext JSON object opens with ``{``/whitespace;
+        any other leading byte is a codec version tag, decoded via the codec registry
+        (the configured/env AEAD codec plus the plaintext IdentityCodec). Tampering with
+        the ciphertext or its bound AAD fails decryption loudly (a clean OfflineError)."""
+        if not blob:
+            raise OfflineError("empty capture blob")
+        if blob[0] in _JSON_OPENERS:
+            return cls.from_json(blob.decode("utf-8"))
+        codec = codec if codec is not None else fixture_codec()
+        registry: dict[int, PayloadCodec] = {IdentityCodec().version: IdentityCodec()}
+        if codec is not None:
+            registry[codec.version] = codec
+        try:
+            text = decode_payload(blob, cls._AAD, registry)
+        except OfflineError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a decrypt/parse failure is a clean error
+            raise OfflineError(
+                f"could not decrypt capture blob: {type(exc).__name__}: {exc} "
+                "(wrong/missing key, an unconfigured codec, or the ciphertext was tampered)"
+            ) from exc
+        return cls.from_json(text)
+
+    @classmethod
+    def load(cls, path: str | Path, *, codec: PayloadCodec | None = None) -> Bundle:
         p = Path(path)
         try:
-            return cls.from_json(p.read_text(encoding="utf-8"))
+            return cls.from_blob(p.read_bytes(), codec=codec)
         except FileNotFoundError as exc:
             raise OfflineError(
                 f"no fixtures bundle at {p} — run `zu capture` once (live) to record one "
                 "before `zu run --offline`."
             ) from exc
+        except OfflineError:
+            raise
         except (ValueError, json.JSONDecodeError) as exc:
             raise OfflineError(f"malformed fixtures bundle at {p}: {exc}") from exc
+
+
+def fixture_codec() -> PayloadCodec | None:
+    """The AEAD codec to encrypt a capture at rest, or ``None`` for the plaintext
+    default. Opt-in via a key in the environment: ``ZU_FIXTURE_KEY`` (fixture-specific)
+    or the shared ``ZU_EVENT_KEY`` (the same key the event-log at-rest encryption uses).
+    When a key is present, the secure path is the DEFAULT for a fresh capture; when no
+    key is set, ``None`` keeps the $0 offline path byte-for-byte plaintext.
+
+    Reuses the existing ``ManagedAesGcmCodec`` (version 2, KMS-pluggable key rotation via
+    ``EnvKeyProvider``) from ``zu-backends[encryption]`` — never a bespoke cipher. A key
+    set but the extra not installed is a loud error, not a silent plaintext fallthrough."""
+    if not (os.environ.get(_FIXTURE_KEY_ENV) or os.environ.get(_SHARED_KEY_ENV)):
+        return None
+    try:
+        from zu_backends.encryption import EnvKeyProvider, ManagedAesGcmCodec
+    except ModuleNotFoundError as exc:
+        raise OfflineError(
+            f"{_FIXTURE_KEY_ENV}/{_SHARED_KEY_ENV} is set (fixture encryption-at-rest "
+            "requested) but the codec is not installed: pip install "
+            "'zu-backends[encryption]'."
+        ) from exc
+    # ManagedAesGcmCodec keys by id from a KeyProvider — reused verbatim so KMS-backed
+    # key rotation is available, not just a single env key. A fixture-scoped
+    # ZU_FIXTURE_KEY takes precedence over the shared ZU_EVENT_KEY the EnvKeyProvider
+    # already understands; when only the shared key is set, the plain EnvKeyProvider
+    # (and hence event-log key rotation) is used unchanged.
+    fixture_key = os.environ.get(_FIXTURE_KEY_ENV)
+    if fixture_key:
+        return ManagedAesGcmCodec(_FixtureKeyProvider(fixture_key, EnvKeyProvider.from_env()))
+    return ManagedAesGcmCodec(EnvKeyProvider.from_env())
+
+
+class _FixtureKeyProvider:
+    """A KeyProvider that serves the fixture-scoped ``ZU_FIXTURE_KEY`` under a
+    dedicated key id, delegating every OTHER id to the shared ``EnvKeyProvider`` so a
+    capture written under an event-log key id still decrypts. The current write id is
+    the fixture id, so a fresh capture is encrypted under ``ZU_FIXTURE_KEY``."""
+
+    _FIXTURE_ID = "fixture"
+
+    def __init__(self, fixture_key: str, delegate: Any) -> None:
+        self._key = _decode_fixture_key(fixture_key)
+        self._delegate = delegate
+
+    @property
+    def current_key_id(self) -> str:
+        return self._FIXTURE_ID
+
+    def key(self, key_id: str) -> bytes:
+        if key_id == self._FIXTURE_ID:
+            return self._key
+        return self._delegate.key(key_id)
+
+
+def _decode_fixture_key(raw: str) -> bytes:
+    """Decode a 32-byte fixture key from hex or base64 — the same accepted forms as
+    the event-log key, reusing the backend's decoder so the two agree."""
+    from zu_backends.encryption import _decode_key
+
+    return _decode_key(raw)
 
 
 def bundle_path(agent_dir: str | Path) -> Path:

@@ -99,12 +99,19 @@ class ContactForm:
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Done = a post-submit confirmation surface EVENTUALLY appears (liveness-by-
         # deadline: absent until the submit completes, so it must NOT fire pre-submit).
-        return [surface_shows(self.archetype, "submitted", label="thank you", liveness=True)]
+        # ANY confirmation variant satisfies it (#46) — "Message sent"/"We'll be in
+        # touch" work, not only the literal "thank you".
+        return [
+            surface_shows(self.archetype, "submitted", labels=_CONFIRM_CONTEXT, liveness=True)
+        ]
 
     def failure_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Failure CONTEXT = a validation/error alert appears. Safety shape:
-        # THROUGHOUT NOT contains(error) — fires the instant the error lands.
-        return [surface_shows(self.archetype, "form_error", label="error", negate=True)]
+        # THROUGHOUT NOT contains(<any error variant>) — fires the instant a
+        # validation/error surface lands (#46), not only on the literal "error".
+        return [
+            surface_shows(self.archetype, "form_error", labels=_ERROR_TOKENS, negate=True)
+        ]
 
     # The reversibility prior this pattern CONTRIBUTES: its submit step is
     # COMMITTING (a form POST that hands over real contact/shipping data). A

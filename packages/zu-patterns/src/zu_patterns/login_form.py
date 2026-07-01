@@ -16,7 +16,15 @@ from . import _match as m
 from .rail import surface_shows
 
 _ACCOUNT_TOKENS = ("logout", "log out", "sign out", "account", "profile", "my account")
-_ERROR_TOKENS = ("invalid", "incorrect", "error", "wrong password", "failed", "try again")
+_ERROR_TOKENS = (
+    "invalid",
+    "incorrect",
+    "error",
+    "wrong password",
+    "failed",
+    "declined",
+    "try again",
+)
 
 
 class LoginForm:
@@ -68,11 +76,14 @@ class LoginForm:
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Done = a post-submit surface EVENTUALLY shows an account/logout
         # affordance (a liveness-by-deadline postcondition: absent until the submit
-        # completes, so it must NOT fire on the pre-submit login surface).
+        # completes, so it must NOT fire on the pre-submit login surface). ANY of
+        # the account synonyms satisfies it (#46) — a casing/synonym variant no
+        # longer defeats the rail; matching is normalized + word-boundary-aware.
         return [
-            surface_shows(self.archetype, "reached_account", label=tok, liveness=True)
-            for tok in ("Logout", "Sign out", "Account")
-        ][:1]
+            surface_shows(
+                self.archetype, "reached_account", labels=_ACCOUNT_TOKENS, liveness=True
+            )
+        ]
 
     def failure_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Failure CONTEXT = an error alert/status appeared. Correct safety shape:
@@ -82,7 +93,7 @@ class LoginForm:
             surface_shows(
                 self.archetype,
                 "error_alert",
-                label="error",
+                labels=_ERROR_TOKENS,
                 event_type=ev.SURFACE_CAPTURED,
                 negate=True,
             )

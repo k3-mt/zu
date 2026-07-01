@@ -145,6 +145,68 @@ async def test_escalates_when_no_target_resolves() -> None:
     assert session.acts == []  # never acted on a guessed/invalid handle
 
 
+async def test_commit_boundary_detected_structurally_on_non_english_button() -> None:
+    # A commit control identified STRUCTURALLY (a form-submit) is a commit boundary
+    # regardless of label language: a German "Bezahlen" submit button yields committing
+    # even though it matches no English _COMMIT phrase.
+    bus = EventBus()
+    rec = Recorder(bus, site="https://shop.example.de")
+    stream = [
+        RawInput(kind="click", target=SemanticTarget(
+            role="button", name="Bezahlen", label="Bezahlen", submits=True)),  # "Pay" in German
+    ]
+    session = await rec.record_stream(stream)
+    steps = steps_from_recording(session.events)
+    pay = next(s for s in steps if s.name == "Bezahlen")
+    assert pay.committing  # structural submit signal → commit boundary, not an English phrase
+    await bus.aclose()
+
+    # And the executor ESCALATES at it (never auto-crosses the payment boundary).
+    session2 = FakeSession([_surface(("a1", "button", "Bezahlen"))])
+    report = await execute(steps, session2, ScriptedProvider.from_moves([]))
+    assert not report.completed and report.escalated_at == 0
+    assert session2.acts == []  # the commit was never clicked
+    assert report.outcomes[-1].via == "escalated"
+
+
+async def test_regression_english_only_would_auto_cross_non_english_pay_button() -> None:
+    # The pre-fix English-only path: a non-English pay button with NO structural signal
+    # threaded through is NOT recognised as a commit — proving the old code auto-crossed.
+    bus = EventBus()
+    rec = Recorder(bus, site="https://shop.example.de")
+    stream = [RawInput(kind="click", target=SemanticTarget(
+        role="button", name="Bezahlen", label="Bezahlen"))]  # no submits signal → fallback only
+    session = await rec.record_stream(stream)
+    steps = steps_from_recording(session.events)
+    pay = next(s for s in steps if s.name == "Bezahlen")
+    assert not pay.committing  # the English fallback silently misses — the documented gap
+    # With the structural signal set (the fix), the same button IS a commit boundary.
+    bus2 = EventBus()
+    rec2 = Recorder(bus2, site="https://shop.example.de")
+    session2 = await rec2.record_stream([RawInput(kind="click", target=SemanticTarget(
+        role="button", name="Bezahlen", label="Bezahlen", submits=True))])
+    steps2 = steps_from_recording(session2.events)
+    assert next(s for s in steps2 if s.name == "Bezahlen").committing
+    await bus.aclose()
+    await bus2.aclose()
+
+
+async def test_cc_autocomplete_field_is_a_commit_boundary_regardless_of_label() -> None:
+    # A payment-card field carrying autocomplete=cc-csc (a CVV) is a brokered commit
+    # boundary even when its label is non-English ("Prüfziffer") and non-Luhn.
+    bus = EventBus()
+    rec = Recorder(bus, site="https://shop.example.de")
+    stream = [RawInput(kind="type", value="123", target=SemanticTarget(
+        role="textbox", name="Prüfziffer", label="Prüfziffer", autocomplete="cc-csc"))]
+    session = await rec.record_stream(stream)
+    steps = steps_from_recording(session.events)
+    cvv = next(s for s in steps if s.name == "Prüfziffer")
+    assert cvv.committing  # cc-* autocomplete → payment-card control, brokered (§8)
+    # And its value was blanked (credential-marked structurally), not recorded verbatim.
+    assert cvv.value == "[REDACTED]"
+    await bus.aclose()
+
+
 async def test_steps_from_recording_cleans_and_marks_commit() -> None:
     bus = EventBus()
     rec = Recorder(bus, site="https://shop.example")

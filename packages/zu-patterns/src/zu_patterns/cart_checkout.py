@@ -19,7 +19,26 @@ from .rail import surface_shows
 from .reversibility import ActionPrior, Commitment
 
 _LINE_ITEM_CONTEXT = ("cart", "basket", "bag", "subtotal", "order summary", "line item", "qty")
-_CONFIRM_CONTEXT = ("order confirmed", "thank you for your order", "order number", "confirmation")
+_CONFIRM_CONTEXT = (
+    "order confirmed",
+    "thank you for your order",
+    "order number",
+    "confirmation",
+    "payment received",
+    "payment successful",
+    "order placed",
+)
+# Payment/checkout FAILURE vocabulary — an any-of set of real decline/error
+# surfaces (#46), so "Card declined"/"Payment failed" fire the failure rail, not
+# only the single English literal "error".
+_ERROR_TOKENS = (
+    "error",
+    "declined",
+    "payment failed",
+    "card declined",
+    "could not process",
+    "try again",
+)
 
 
 class CartCheckout:
@@ -72,14 +91,22 @@ class CartCheckout:
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Done = an order-confirmation surface EVENTUALLY appears (by the deadline).
         # A committed-but-never-confirmed run violates this liveness at the deadline.
+        # ANY of the confirmation-vocabulary variants satisfies it (#46), so a real
+        # "Payment received"/"Order #123" success is recognized, not only the single
+        # literal "order confirmed".
         return [
-            surface_shows(self.archetype, "order_confirmed", label="order confirmed", liveness=True)
+            surface_shows(
+                self.archetype, "order_confirmed", labels=_CONFIRM_CONTEXT, liveness=True
+            )
         ]
 
     def failure_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Failure CONTEXT = a payment/checkout error appears. Safety shape:
-        # THROUGHOUT NOT contains(error) — fires the instant the error lands.
-        return [surface_shows(self.archetype, "checkout_error", label="error", negate=True)]
+        # THROUGHOUT NOT contains(<any error variant>) — fires the instant a decline
+        # or failure surface lands (#46), not only on the literal "error".
+        return [
+            surface_shows(self.archetype, "checkout_error", labels=_ERROR_TOKENS, negate=True)
+        ]
 
     # The reversibility prior this pattern CONTRIBUTES: its place-order/pay step is
     # COMMITTING. A planner/classifier passes this into ``classify_action`` so the

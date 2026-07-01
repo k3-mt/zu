@@ -37,8 +37,12 @@ REDACTED = "[REDACTED]"
 _SECRET_HEADERS: frozenset[str] = frozenset({"authorization", "cookie", "set-cookie",
                                              "proxy-authorization", "x-api-key"})
 
-# Field names (in a captured user.type / form payload) the recorder may mark as a
-# credential; their value is blanked regardless of content. Case-folded substring.
+# Payload KEYS whose value is a credential and is blanked wholesale. The PRIMARY,
+# locale-independent path is upstream: the recorder marks a credential field
+# STRUCTURALLY (input type=password / autocomplete=cc-*) and routes its value under the
+# ``password`` key (see zu_shadow.capture._is_credential_target), which this list blanks.
+# The remaining tokens are a documented SECONDARY fallback for a value that arrived under
+# an already-credential-named key; they are English and so must never be the sole signal.
 _CREDENTIAL_FIELD_HINTS: tuple[str, ...] = ("password", "passwd", "secret", "token",
                                             "api_key", "apikey", "otp", "cvv", "pin")
 

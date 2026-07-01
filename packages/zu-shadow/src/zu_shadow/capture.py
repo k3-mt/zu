@@ -20,9 +20,20 @@ from pydantic import BaseModel
 from zu_core import events as ev
 from zu_core.surface import SurfaceAffordance
 
-# Target role/name/label tokens that mark an input as a CREDENTIAL field, so the
-# recorder records its typed value under a credential-named key the redaction stage
-# blanks wholesale — a password is never recorded verbatim, even pre-redaction-sweep.
+# STRUCTURAL credential signals — locale-INDEPENDENT, the PRIMARY basis for marking a
+# field a credential. An <input type=password> and the autocomplete tokens a browser
+# uses for secret fields (payment card number/security code, and password fields). These
+# fire regardless of the label's language, so a French "Prüfziffer"/"code de sécurité"
+# CVV carrying autocomplete=cc-csc is still caught.
+_CREDENTIAL_INPUT_TYPES: frozenset[str] = frozenset({"password"})
+_CREDENTIAL_AUTOCOMPLETE: frozenset[str] = frozenset({
+    "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-name",
+    "current-password", "new-password", "one-time-code",
+})
+# The English phrase list is kept ONLY as a documented, weak SECONDARY fallback for a
+# field whose structure the harness could not resolve (no input type / autocomplete
+# threaded through). It is locale-specific and so silently misses on a non-English site
+# — never rely on it as the sole signal.
 _CREDENTIAL_TARGET_HINTS: tuple[str, ...] = ("password", "passwd", "secret", "token",
                                              "api key", "api_key", "apikey", "otp",
                                              "cvv", "cvc", "pin", "security code",
@@ -33,28 +44,55 @@ _CREDENTIAL_TARGET_HINTS: tuple[str, ...] = ("password", "passwd", "secret", "to
                                              "iban", "sort code", "account number")
 
 
+def _is_cc_autocomplete(token: str | None) -> bool:
+    """A payment-card autocomplete token (cc-number/cc-csc/cc-exp/…) — the commit/credential
+    guards treat any of these as a payment-card control regardless of label language."""
+    return bool(token) and token.lower().startswith("cc-")  # type: ignore[union-attr]
+
+
 class SemanticTarget(BaseModel):
     """A user-action target, identified the way the core surface currency does:
     ``role`` (a free string, e.g. ``button``/``link``/``textbox``), the accessible
     ``name``, and a human ``label``. NO selector, NO coordinates — re-resolvable on
-    a changed page. Frozen so it is a stable value on the log."""
+    a changed page. Frozen so it is a stable value on the log.
+
+    ``input_type`` / ``autocomplete`` / ``submits`` are the locale-independent
+    STRUCTURAL signals threaded from the harness/CDP layer (mirroring the fields on
+    :class:`zu_core.surface.SurfaceAffordance`): the raw ``<input type>``, the
+    autocomplete token, and whether the control submits/commits. The credential and
+    commit guards drive off these first; the English phrase lists are only a fallback."""
 
     model_config = {"frozen": True}
 
     role: str
     name: str = ""
     label: str = ""
+    input_type: str | None = None
+    autocomplete: str | None = None
+    submits: bool = False
 
     @classmethod
     def from_affordance(cls, a: SurfaceAffordance, *, name: str = "") -> SemanticTarget:
         """Build a target from a core ``SurfaceAffordance`` — the bridge from a §5
         SurfaceView the live recorder reduced to a recorded action target. The
         affordance's ``label`` carries through; ``name`` is the accessible name the
-        CDP locate step resolved (the affordance has no separate name field)."""
-        return cls(role=a.role, name=name or a.label, label=a.label)
+        CDP locate step resolved (the affordance has no separate name field). The
+        structural signals (``input_type``/``autocomplete``/``submits``) carry through
+        too, so a downstream credential/commit guard sees them."""
+        return cls(role=a.role, name=name or a.label, label=a.label,
+                   input_type=a.input_type, autocomplete=a.autocomplete, submits=a.submits)
 
     def to_payload(self) -> dict:
-        return {"role": self.role, "name": self.name, "label": self.label}
+        out: dict = {"role": self.role, "name": self.name, "label": self.label}
+        # Only emit structural signals when present, so a recording made without them
+        # (or an older fixture) is byte-for-byte unchanged.
+        if self.input_type is not None:
+            out["input_type"] = self.input_type
+        if self.autocomplete is not None:
+            out["autocomplete"] = self.autocomplete
+        if self.submits:
+            out["submits"] = True
+        return out
 
 
 def capture_click(target: SemanticTarget, *, intent: str | None = None) -> tuple[str, dict]:
@@ -67,8 +105,20 @@ def capture_click(target: SemanticTarget, *, intent: str | None = None) -> tuple
 
 
 def _is_credential_target(target: SemanticTarget) -> bool:
-    """A type target whose role/name/label marks it as a credential input — so its
-    value is recorded under a credential-named key the redaction stage blanks."""
+    """Whether a type target is a CREDENTIAL input — so its value is recorded under a
+    credential-named key the redaction stage blanks wholesale.
+
+    PRIMARY signal is STRUCTURAL and locale-independent: an ``<input type=password>``
+    or a payment/secret autocomplete token (``cc-number``/``cc-csc``/``current-password``
+    …). These fire regardless of label language. The English phrase list is only a
+    documented SECONDARY fallback for a field whose structure was not threaded through."""
+    it = (target.input_type or "").lower()
+    if it in _CREDENTIAL_INPUT_TYPES:
+        return True
+    ac = (target.autocomplete or "").lower()
+    if ac in _CREDENTIAL_AUTOCOMPLETE or _is_cc_autocomplete(ac):
+        return True
+    # Fallback ONLY: the English phrase list, which silently misses on a non-English site.
     blob = f"{target.role} {target.name} {target.label}".lower()
     return any(h in blob for h in _CREDENTIAL_TARGET_HINTS)
 

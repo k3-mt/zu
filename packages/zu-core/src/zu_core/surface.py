@@ -31,6 +31,16 @@ class SurfaceAffordance(BaseModel):
     Action Surface assigns. ``role`` is a free string (NOT an enum) so a new
     producer can introduce roles without a core edit. ``states`` is a tuple so
     the whole value object is hashable/frozen.
+
+    ``input_type`` / ``autocomplete`` / ``submits`` are locale-INDEPENDENT
+    structural signals a producer may thread through from the harness/CDP layer
+    (an ``<input type=password>``, an ``autocomplete=cc-number``/``cc-csc`` token,
+    a ``button[type=submit]`` / form-submit control). Safety-critical guards drive
+    off these — a credential field, a commit boundary — instead of matching an
+    English word in the label, so a non-English site's ``Bezahlen`` submit button
+    or ``Prüfziffer`` CVV field is still recognised. Empty/None when the producer
+    did not (or could not) resolve them; all default so existing producers and
+    fixtures are unaffected.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -40,6 +50,9 @@ class SurfaceAffordance(BaseModel):
     label: str = ""
     value: str | None = None
     states: tuple[str, ...] = ()
+    input_type: str | None = None       # the raw <input type=…> (password/text/tel/…)
+    autocomplete: str | None = None      # the autocomplete token (cc-number/cc-csc/current-password/…)
+    submits: bool = False                # a submit/commit control (button[type=submit], form submit)
 
 
 class SurfaceView(BaseModel):

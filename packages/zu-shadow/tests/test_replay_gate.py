@@ -10,9 +10,9 @@ from zu_shadow.replay_gate import verify_and_gate
 from zu_shadow.synthesizer import Synthesizer
 
 
-async def _synthesis_and_session(outcome: str):
+async def _synthesis_and_session(outcome: str | None, *, live: bool = False):
     bus = EventBus()
-    rec = Recorder(bus, site="https://x.example.com")
+    rec = Recorder(bus, site="https://x.example.com", live=live)
     session = await rec.record_stream(
         [RawInput(kind="navigate", url="https://x.example.com/go", intent="why")],
         outcome=outcome,
@@ -78,3 +78,56 @@ async def test_replay_crash_is_a_block_not_a_traceback() -> None:
     )
     assert verdict.promote is False
     assert "boom" in verdict.reason
+
+
+# --- Issue #56: the live-capture path must not collapse to "returned SUCCESS" ---
+
+
+async def test_live_recording_without_outcome_is_held_not_auto_promoted() -> None:
+    # A LIVE-captured recording with NO stated outcome (the live capture() default): a
+    # replay that SUCCEEDS with a wholly different value must NOT be promoted — the gate
+    # no longer claims full outcome reproduction it cannot verify against a live capture.
+    synthesis, session = await _synthesis_and_session(None, live=True)
+    assert session.live is True and session.outcome is None
+
+    async def runner(spec, cfg, bundle):
+        # Succeeds, but with a value that diverges from anything the human did.
+        return Result(status=Status.SUCCESS, value={"summary": "no slots available"}), [object()]
+
+    verdict = await verify_and_gate(
+        synthesis, session, spec=None, cfg=None, bundle=None, runner=runner
+    )
+    assert verdict.promote is False       # NOT auto-promoted on SUCCESS alone
+    assert verdict.reproduced is False    # full outcome reproduction is not claimed
+    assert verdict.held is True           # held for a stated outcome (needs-input)
+    assert "cannot be verified" in verdict.reason
+
+
+async def test_live_recording_with_stated_outcome_still_reproduction_checked() -> None:
+    # A live recording that DID state an outcome is still held to the real reproduction
+    # check — a divergent value is BLOCKED, not held.
+    synthesis, session = await _synthesis_and_session("3 slots found", live=True)
+
+    async def runner(spec, cfg, bundle):
+        return Result(status=Status.SUCCESS, value={"summary": "no slots available"}), []
+
+    verdict = await verify_and_gate(
+        synthesis, session, spec=None, cfg=None, bundle=None, runner=runner
+    )
+    assert verdict.promote is False and verdict.held is False
+    assert "did not reproduce" in verdict.reason
+
+
+async def test_offline_recording_without_outcome_still_gets_real_check() -> None:
+    # An OFFLINE/fixture recording (live=False) with no stated outcome still reproduces its
+    # captured data faithfully, so a SUCCESS replay is promoted — the old behaviour is
+    # preserved for the path where it is actually sound.
+    synthesis, session = await _synthesis_and_session(None, live=False)
+
+    async def runner(spec, cfg, bundle):
+        return Result(status=Status.SUCCESS, value={"summary": "whatever"}), []
+
+    verdict = await verify_and_gate(
+        synthesis, session, spec=None, cfg=None, bundle=None, runner=runner
+    )
+    assert verdict.promote is True and verdict.reproduced is True

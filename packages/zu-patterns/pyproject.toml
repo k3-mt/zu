@@ -31,6 +31,7 @@ autocomplete = "zu_patterns.autocomplete:Autocomplete"
 cart_checkout = "zu_patterns.cart_checkout:CartCheckout"
 contact_form = "zu_patterns.contact_form:ContactForm"
 newsletter_signup = "zu_patterns.newsletter_signup:NewsletterSignup"
+variant_picker = "zu_patterns.variant_picker:VariantPicker"
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

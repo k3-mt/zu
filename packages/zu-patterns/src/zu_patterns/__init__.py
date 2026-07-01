@@ -36,6 +36,7 @@ from .search import (
     mpc_run,
     plan,
 )
+from .variant_picker import VariantPicker
 
 __zu_spec__ = "§5"  # pattern recognition + guided search (issue #30: greppable spec anchor)
 
@@ -44,6 +45,7 @@ __all__ = [
     "recognize",
     "ContactForm",
     "NewsletterSignup",
+    "VariantPicker",
     "Commitment",
     "Signal",
     "GoalContext",

@@ -17,6 +17,9 @@ from . import _match as m
 from .rail import surface_shows
 
 _CONSENT_CONTEXT = ("cookie", "consent", "gdpr", "privacy", "tracking")
+# Consent-wall failure vocabulary — an any-of set (#46), so a real block surface
+# fires the failure rail, not only the single literal "error".
+_ERROR_TOKENS = ("error", "blocked", "please accept", "try again")
 
 
 class CookieBanner:
@@ -68,4 +71,6 @@ class CookieBanner:
         # Failure CONTEXT = a consent-wall error appears. Safety shape: THROUGHOUT
         # NOT contains(error) — fires the instant it lands. (The "banner persists"
         # mode is the success liveness deadline-violation, not duplicated here.)
-        return [surface_shows(self.archetype, "consent_error", label="error", negate=True)]
+        return [
+            surface_shows(self.archetype, "consent_error", labels=_ERROR_TOKENS, negate=True)
+        ]

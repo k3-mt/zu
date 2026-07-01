@@ -95,8 +95,28 @@ CAPTURE_JS = r"""
     }catch(e){}
     return '';
   }
+  function structural(el){
+    // Locale-independent STRUCTURAL signals the credential/commit guards drive off:
+    // the raw <input type>, the autocomplete token, and whether the control submits a
+    // form (a commit boundary). Never a selector or coordinate.
+    const out = {};
+    try{
+      const t=(el.tagName||'').toLowerCase();
+      if(t==='input'){ const it=(el.getAttribute('type')||'text').toLowerCase(); out.input_type=it; }
+      const ac=el.getAttribute && el.getAttribute('autocomplete');
+      if(ac && ac.trim()) out.autocomplete=ac.trim().toLowerCase();
+      const ty=(el.type||'').toLowerCase();
+      const isSubmit = ty==='submit' || ty==='image' ||
+        (t==='button' && (el.getAttribute('type')||'submit').toLowerCase()==='submit');
+      // a click on a control inside a form that submits it is a commit boundary
+      const inForm = el.closest && el.closest('form');
+      if(isSubmit && inForm) out.submits=true;
+    }catch(e){}
+    return out;
+  }
   function rep(kind, el, extra){
-    try{ window.__zuShadow(Object.assign({kind, role:role(el), name:name(el)}, extra||{})); }catch(e){}
+    try{ window.__zuShadow(Object.assign({kind, role:role(el), name:name(el)},
+      structural(el), extra||{})); }catch(e){}
   }
   let box = null, replaying = false;
   function closeWhy(){ if(box){ box.remove(); box = null; } }
@@ -175,14 +195,22 @@ def _payload_to_raw(p: dict) -> RawInput | None:
     kind = p.get("kind")
     name = str(p.get("name", "") or "")
     intent = p.get("intent")
+    # Locale-independent structural signals (may be absent for a non-input control).
+    input_type = p.get("input_type")
+    autocomplete = p.get("autocomplete")
+    submits = bool(p.get("submits"))
     if kind == "click":
         return RawInput(kind="click", intent=intent,
                         target=SemanticTarget(role=str(p.get("role") or "generic"),
-                                              name=name, label=name))
+                                              name=name, label=name,
+                                              input_type=input_type, autocomplete=autocomplete,
+                                              submits=submits))
     if kind == "type":
         return RawInput(kind="type", value=str(p.get("value", "") or ""), intent=intent,
                         target=SemanticTarget(role=str(p.get("role") or "textbox"),
-                                              name=name, label=name))
+                                              name=name, label=name,
+                                              input_type=input_type, autocomplete=autocomplete,
+                                              submits=submits))
     if kind == "navigate":
         return RawInput(kind="navigate", url=str(p.get("url", "") or ""), intent=intent)
     if kind == "network":
@@ -242,10 +270,12 @@ def _interesting_response(resp: Any) -> bool:  # pragma: no cover - live-only
 async def _fold(items: list[RawInput], *, site: str, outcome: str | None) -> RecordedSession:
     """Redaction-before-append: the captured items go through the SAME Recorder the
     offline path uses, so secrets (and the redacted "why" text) are stripped before they
-    reach the recording."""
+    reach the recording. Marked ``live=True`` — this is the live headed capture, so the
+    promotion gate scopes its reproduction check accordingly (a live recording's outcome
+    can't be faithfully re-run; see :mod:`zu_shadow.replay_gate`)."""
     bus = EventBus()
     try:
-        rec = Recorder(bus, site=site)
+        rec = Recorder(bus, site=site, live=True)
         return await rec.record_stream(items, outcome=outcome)
     finally:
         await bus.aclose()
@@ -253,12 +283,18 @@ async def _fold(items: list[RawInput], *, site: str, outcome: str | None) -> Rec
 
 def capture(url: str, *, site: str, out: str, port: int = 9222,
             profile: str = "/tmp/zu-shadow-profile", headed: bool = True,
-            max_seconds: float | None = None,
+            max_seconds: float | None = None, outcome: str | None = None,
             chrome: str = _CHROME_MACOS) -> int:  # pragma: no cover - live-only, manual
     """Launch a dedicated Chrome at ``url``, capture the human's semantic actions and
     fork "whys" until Ctrl-C (or ``max_seconds``), then write a REDACTED recording to
     ``out``. Returns the number of action steps captured. Run by hand: you click, it asks
-    why at the forks, it records."""
+    why at the forks, it records.
+
+    ``outcome`` is the human's stated result — the concrete thing they just achieved
+    (e.g. "3 slots found for Thursday"). It is what the promotion gate reproduces, so a
+    live recording carries a real outcome to verify against instead of silently passing on
+    SUCCESS alone. When omitted the human is prompted for it at session end; a still-empty
+    outcome leaves the gate to HOLD the agent (needs-input), never auto-promote."""
     import asyncio
 
     sync_playwright = _require_playwright()
@@ -327,8 +363,20 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
         except Exception:  # noqa: BLE001
             proc.kill()
 
+    # Give the live recording a real outcome so the promotion gate has something to
+    # reproduce (Issue #56). Prefer the passed ``outcome``; otherwise prompt at session
+    # end (the same "state the result" affordance used at forks). A still-empty outcome
+    # is left as None — the gate then HOLDS the agent rather than auto-promoting on
+    # SUCCESS alone.
+    if outcome is None:
+        try:
+            answer = input("shadow capture: what did you accomplish? "
+                           "(the result to verify, blank to skip) > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        outcome = answer or None
     items = [ri for a in actions if (ri := _payload_to_raw(a)) is not None]
-    session = asyncio.run(_fold(items, site=site, outcome=None))
+    session = asyncio.run(_fold(items, site=site, outcome=outcome))
     doc = {"site": session.site, "outcome": session.outcome,
            "events": [{"type": e.type, "payload": e.payload} for e in session.events]}
     Path(out).write_text(json.dumps(doc, indent=1), encoding="utf-8")
