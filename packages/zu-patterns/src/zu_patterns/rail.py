@@ -13,6 +13,8 @@ read cleanly.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from zu_core import events as ev
 from zu_core.invariants import Invariant, InvariantKind, Predicate, PredicateKind
 
@@ -26,7 +28,10 @@ def surface_shows(
     criterion: str,
     *,
     label: str | None = None,
+    labels: Sequence[str] | None = None,
     handle: str | None = None,
+    state: str | None = None,
+    states: Sequence[str] | None = None,
     recognized_archetype: str | None = None,
     event_type: str = ev.SURFACE_CAPTURED,
     negate: bool = False,
@@ -36,9 +41,15 @@ def surface_shows(
     """An Invariant over a surface event — the seam a Pattern's success/failure
     criterion compiles to (ZU-RAIL-9).
 
-    Exactly one of ``label`` / ``handle`` / ``recognized_archetype`` is the token
-    SURFACE_CONTAINS folds the event log for. ``negate=True`` asserts ABSENCE (the
-    natural shape for "the banner is gone").
+    One of ``label`` / ``labels`` / ``handle`` / ``state`` / ``recognized_archetype``
+    is the token(s) SURFACE_CONTAINS folds the event log for. ``labels`` is an
+    ANY-OF set (#46): the rail is satisfied if ANY of the equivalent success/failure
+    markers appears — so a casing/synonym variant of the expected token no longer
+    defeats the verify layer. Label matching is normalized + word-boundary-aware
+    (#57). ``state``/``states`` + ``handle`` asserts "handle H reached that state
+    (or ANY of these states)" — the content-free "a control became selected" success
+    criterion (#39); ``states`` is the any-of set (selected/checked/pressed/…).
+    ``negate=True`` asserts ABSENCE (the natural shape for "the banner is gone").
 
     Two semantics, chosen by ``liveness``:
 
@@ -64,8 +75,23 @@ def surface_shows(
     params: dict = {"event_type": event_type, "negate": negate}
     if recognized_archetype is not None:
         params["archetype"] = recognized_archetype
+    elif state is not None or states is not None:
+        # A per-control state rail (#39): "handle H reached ANY of these states".
+        # The handle scopes the check to the acted control, not any control. An
+        # any-of set (``states``) covers the equivalent selection markers
+        # (selected/checked/pressed/aria-selected) so a picker that flips ``checked``
+        # rather than ``selected`` still satisfies "became selected".
+        if states is not None:
+            params["states"] = list(states)
+        if state is not None:
+            params["state"] = state
+        if handle is not None:
+            params["handle"] = handle
     elif handle is not None:
         params["handle"] = handle
+    elif labels is not None:
+        # An any-of set of equivalent success/failure markers (#46).
+        params["labels"] = list(labels)
     elif label is not None:
         params["label"] = label
     if liveness:

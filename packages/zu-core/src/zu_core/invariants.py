@@ -15,6 +15,7 @@ shape, so the registry/loop wiring is untouched.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -79,7 +80,14 @@ class Predicate(BaseModel):
                            SAME match the pre-exec navigation gate uses so they can't
                            drift)}
       * required_field:   {"event_type": str, "field": str}
-      * surface_contains: {"event_type": str, one of "handle"|"label"|"archetype",
+      * surface_contains: {"event_type": str, one of
+                           "handle"|"label"|"state"|"archetype" (a SINGLE literal)
+                           OR its plural any-of list
+                           "handles"|"labels"|"states"|"archetypes" (satisfied if
+                           ANY token matches — #46). Label/archetype matching is
+                           normalized + word-boundary-aware (#57). A "state" key
+                           plus a single "handle" asserts "handle H reached that
+                           state" (e.g. selected — #39).
                            "negate": bool (optional, default False),
                            "require_present": bool (optional, default False — when
                            True, absence-of-evidence is unsatisfied, not vacuously
@@ -219,9 +227,55 @@ def _eval_required_field(events: Sequence[Any], params: dict) -> bool:
     return True
 
 
+# The keys SURFACE_CONTAINS can fold, in the priority order it selects them. A
+# ``state`` key (#39) lets a rail express "a control reached STATE selected" — the
+# content-free "a control became selected" success criterion — folding an
+# affordance's ``states`` carried on the surface event, not page text. ``state``
+# is checked BEFORE ``handle`` because a state rail also carries a ``handle`` (to
+# scope the state check to the acted control), and that handle must NOT be mistaken
+# for a "handle appeared" check.
+_SURFACE_KEYS = ("state", "handle", "label", "archetype")
+
+# The alphanumeric "words" of a normalized label — the unit a short/symbol token
+# matches by whole-word equality. Replicated (not imported) here to keep zu-core
+# SDK-free and free of any zu-patterns dependency; the SAME logic lives in
+# zu_patterns._match.token_matches (issue #57), so the rail and the pattern layer
+# agree on word-boundary matching without a cross-package import.
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _norm(s: str) -> str:
+    """Lowercase, collapse whitespace — the canonical label form (mirrors
+    ``zu_patterns._match.norm``)."""
+    return " ".join(s.lower().split())
+
+
+def _token_matches(text_norm: str, token: str) -> bool:
+    """True iff ``token`` matches the already-normalized ``text_norm`` on WORD
+    BOUNDARIES (issue #57/#46). A multi-word token matches a consecutive word-run
+    ("order confirmed" ⊂ "Order confirmed!"); a pure-symbol token matches when it
+    stands alone with non-word neighbours; a plain word matches only as a WHOLE word
+    ("confirmation" does NOT match "Reconfirmation", "error" does NOT match a stray
+    substring). This is the rail's matcher: a decoy label that merely CONTAINS the
+    token as a substring never falsely satisfies the verify layer, while real
+    casing/punctuation/synonym variants do. Word-boundary-aligned with
+    ``zu_patterns._match.token_matches`` (which keeps raw substring for the longer
+    button-label vocabulary used in affordance selection — a deliberately looser
+    reading appropriate there; the rail is the strict, decoy-proof one)."""
+    tok = _norm(token)
+    if not tok:
+        return False
+    if not any(ch.isalnum() for ch in tok):
+        # A pure symbol ("×", ">", "<"): present with non-word neighbours.
+        return bool(re.search(r"(?<!\w)" + re.escape(tok) + r"(?!\w)", text_norm))
+    # A word or multi-word phrase: match on word boundaries so it is a whole word /
+    # a consecutive word-run, never glued inside a longer word.
+    return bool(re.search(r"\b" + re.escape(tok) + r"\b", text_norm))
+
+
 def _surface_tokens(payload: dict, key: str) -> set[str]:
     """The set of string tokens a surface/recognition event exposes under one of
-    ``handle`` | ``label`` | ``archetype`` — the minimal vocabulary
+    ``handle`` | ``label`` | ``state`` | ``archetype`` — the minimal vocabulary
     SURFACE_CONTAINS matches against. Reads defensively: a surface event carries
     ``handles`` (and may carry ``labels``/``affordances`` dicts); a recognition
     event carries ``matched_handles`` and ``archetype``. Anything unrecognised
@@ -239,6 +293,16 @@ def _surface_tokens(payload: dict, key: str) -> set[str]:
         affs = payload.get("affordances")
         if isinstance(affs, (list, tuple)):
             out.update(str(a["label"]) for a in affs if isinstance(a, dict) and "label" in a)
+    elif key == "state":
+        # The union of every affordance's ``states`` on this surface — the raw
+        # material for a "a control reached state X" (e.g. selected) rail (#39).
+        affs = payload.get("affordances")
+        if isinstance(affs, (list, tuple)):
+            for a in affs:
+                if isinstance(a, dict):
+                    st = a.get("states")
+                    if isinstance(st, (list, tuple)):
+                        out.update(str(x) for x in st)
     elif key == "archetype":
         v = payload.get("archetype")
         if isinstance(v, str):
@@ -246,17 +310,57 @@ def _surface_tokens(payload: dict, key: str) -> set[str]:
     return out
 
 
+def _handle_in_state(payload: dict, handle: str, state: str) -> bool:
+    """True iff the affordance ``handle`` on this surface event carries ``state``
+    (case/space-normalized). The precise form of the #39 "handle H became STATE
+    selected" success criterion — a per-handle state check, not a surface-wide
+    "some control is selected"."""
+    affs = payload.get("affordances")
+    if not isinstance(affs, (list, tuple)):
+        return False
+    want = _norm(state)
+    for a in affs:
+        if isinstance(a, dict) and str(a.get("handle", "")) == handle:
+            st = a.get("states")
+            if isinstance(st, (list, tuple)) and any(_norm(str(x)) == want for x in st):
+                return True
+    return False
+
+
+def _expected_tokens(params: dict, key: str) -> list[str]:
+    """The any-of expected token list a SURFACE_CONTAINS rail folds for (#46).
+
+    Accepts either a single ``params[key]`` literal OR a ``params[key + 's']``
+    list (``labels``/``handles``/``states``/``archetypes``) — so a rail satisfied
+    by ANY of a set of equivalent success/failure markers is expressible while the
+    single-token form still works."""
+    plural = key + "s"
+    out: list[str] = []
+    raw_plural = params.get(plural)
+    if isinstance(raw_plural, (list, tuple)):
+        out.extend(str(x) for x in raw_plural)
+    if key in params:
+        out.append(str(params[key]))
+    return out
+
+
 def _eval_surface_contains(events: Sequence[Any], params: dict) -> bool:
     """True iff the expected post-state appeared on some matching surface event.
 
-    Folds events of ``event_type`` and checks whether the expected token (one of
-    ``handle`` | ``label`` | ``archetype``) is present on ANY of them. With
-    ``negate=True`` the property is INVERSION: it holds iff the token is ABSENT
-    from every matching event (e.g. "the cookie banner's accept button is gone").
-    The predicate HOLDS (returns True) when no matching event has yet appeared —
-    a postcondition is only meaningful once its anchor has fired (the Invariant's
-    ``applies_to``/POST gating decides when to check), so absence-of-evidence is
-    not a violation here."""
+    Folds events of ``event_type`` and checks whether ANY expected token (one of
+    ``handle`` | ``label`` | ``state`` | ``archetype``, singular OR an any-of list
+    via the plural key — #46) is present on ANY of them. Label/archetype matching
+    is NORMALIZED and word-boundary-aware (#57): "Order confirmed"/"order
+    confirmed!" satisfy the token "order confirmed", while a decoy that merely
+    contains a short token as a substring does not. A ``state`` key + a single
+    ``handle`` expresses "handle H reached state selected" (#39).
+
+    With ``negate=True`` the property is INVERSION: it holds iff NO expected token
+    is present on any matching event (e.g. "the cookie banner's accept button is
+    gone"). The predicate HOLDS (returns True) when no matching event has yet
+    appeared — a postcondition is only meaningful once its anchor has fired (the
+    Invariant's ``applies_to``/POST gating decides when to check), so
+    absence-of-evidence is not a violation here."""
     event_type = str(params.get("event_type", ""))
     negate = bool(params.get("negate", False))
     # ``require_present``: when set, absence-of-evidence is NOT vacuously true — the
@@ -264,18 +368,48 @@ def _eval_surface_contains(events: Sequence[Any], params: dict) -> bool:
     # this so "no surface ever showed the success state" is unsatisfied (and so
     # VIOLATES at the deadline), rather than passing vacuously.
     require_present = bool(params.get("require_present", False))
-    key = next((k for k in ("handle", "label", "archetype") if k in params), None)
+    key = next(
+        (k for k in _SURFACE_KEYS if k in params or (k + "s") in params),
+        None,
+    )
     if key is None:
         return True  # nothing to check (a malformed spec is inert, never a false VIOLATION)
-    expected = str(params[key])
+    expected = _expected_tokens(params, key)
+    if not expected:
+        return True  # malformed (key named but no value) — inert, never a false VIOLATION
     matching = [e for e in events if getattr(e, "type", None) == event_type]
     if not matching:
         # No evidence yet. For a negated (absence) property this holds; for a
         # plain postcondition it is vacuously true UNLESS the caller demands the
         # token actually appear (require_present), the liveness reading.
         return True if negate else not require_present
-    present = any(expected in _surface_tokens(_payload(e), key) for e in matching)
+    present = any(_event_has_token(_payload(e), key, expected, params) for e in matching)
     return (not present) if negate else present
+
+
+def _event_has_token(payload: dict, key: str, expected: list[str], params: dict) -> bool:
+    """True iff this surface event exposes ANY of the ``expected`` tokens under
+    ``key`` — the any-of, normalized, word-boundary match (#46/#57/#39)."""
+    if key == "state":
+        # "handle H reached state selected": if a specific handle is named, check
+        # THAT handle's states; otherwise any control on the surface in the state.
+        handle = params.get("handle")
+        if isinstance(handle, str):
+            return any(_handle_in_state(payload, handle, st) for st in expected)
+        toks = {_norm(t) for t in _surface_tokens(payload, "state")}
+        return any(_norm(st) in toks for st in expected)
+    if key in ("handle", "archetype"):
+        # Opaque identifiers — exact (normalized) set membership, no substring.
+        toks = {_norm(t) for t in _surface_tokens(payload, key)}
+        return any(_norm(t) in toks for t in expected)
+    # label — normalized, word-boundary-aware substring/whole-word matching (#57),
+    # so real English variants ("Order confirmed", "Payment received") satisfy.
+    labels = _surface_tokens(payload, key)
+    for lbl in labels:
+        lbl_norm = _norm(lbl)
+        if any(_token_matches(lbl_norm, t) for t in expected):
+            return True
+    return False
 
 
 def _eval_spend_velocity(events: Sequence[Any], params: dict) -> bool:

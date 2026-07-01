@@ -23,6 +23,18 @@ from .reversibility import ActionPrior, Commitment
 
 _FILLABLE_ROLES = ("textbox", "searchbox", "combobox")
 _SUBSCRIBE_CONTEXT = ("newsletter", "subscribe", "sign up for", "get updates", "stay updated")
+# Subscription-confirmation vocabulary — an any-of set of real opt-in surfaces
+# (#46), so "You're subscribed"/"Check your inbox" satisfy the success rail, not
+# only the single literal "subscribed".
+_CONFIRM_CONTEXT = (
+    "subscribed",
+    "you're subscribed",
+    "thanks for subscribing",
+    "check your inbox",
+    "confirm your subscription",
+    "almost done",
+)
+_ERROR_TOKENS = ("error", "invalid", "already subscribed", "please enter", "try again")
 
 
 def _is_password(aff: SurfaceAffordance) -> bool:
@@ -81,13 +93,18 @@ class NewsletterSignup:
         )
 
     def success_invariants(self, result: RecognitionResult) -> list[Invariant]:
-        # Done = a post-submit confirmation/opt-in surface EVENTUALLY appears.
-        return [surface_shows(self.archetype, "subscribed", label="subscribed", liveness=True)]
+        # Done = a post-submit confirmation/opt-in surface EVENTUALLY appears. ANY
+        # confirmation variant satisfies it (#46), not only the literal "subscribed".
+        return [
+            surface_shows(self.archetype, "subscribed", labels=_CONFIRM_CONTEXT, liveness=True)
+        ]
 
     def failure_invariants(self, result: RecognitionResult) -> list[Invariant]:
         # Failure CONTEXT = a validation error appears. Safety shape:
-        # THROUGHOUT NOT contains(error) — fires the instant the error lands.
-        return [surface_shows(self.archetype, "signup_error", label="error", negate=True)]
+        # THROUGHOUT NOT contains(<any error variant>) — fires the instant it lands (#46).
+        return [
+            surface_shows(self.archetype, "signup_error", labels=_ERROR_TOKENS, negate=True)
+        ]
 
     # The reversibility prior this pattern CONTRIBUTES: its subscribe step is
     # REVERSIBLE-leaning (a low-stakes opt-in, typically undoable). The weight
