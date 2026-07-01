@@ -28,6 +28,7 @@ import logging
 import os
 
 import discord
+from _config import parse_guild_id, should_sync_commands
 from discord import app_commands
 
 try:  # Optional convenience: load .env if python-dotenv is installed.
@@ -66,9 +67,19 @@ class ZekeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
-        guild_id = os.environ.get("GUILD_ID")
-        if guild_id:
-            guild = discord.Object(id=int(guild_id))
+        # Parse GUILD_ID defensively: a malformed value falls back to global scope
+        # (a clear log line) instead of crashing startup with an unhandled ValueError.
+        guild_id = parse_guild_id(os.environ.get("GUILD_ID"))
+        # Gate the sync so a restart loop doesn't burn the global command rate limit.
+        if not should_sync_commands():
+            log.info(
+                "Skipping slash-command sync this startup (no GUILD_ID and "
+                "ZEKE_SYNC_COMMANDS not set). Commands rarely change between restarts; "
+                "set ZEKE_SYNC_COMMANDS=1 to force a global re-sync."
+            )
+            return
+        if guild_id is not None:
+            guild = discord.Object(id=guild_id)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
             log.info("Slash commands synced to guild %s (instant).", guild_id)

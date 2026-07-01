@@ -37,6 +37,7 @@ from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandl
 
 from ._session import attach, put_handle_map, resolve_handle, run_key
 from .action_surface import Surface
+from .render_image import default_render_image
 from .vision_surface import (
     DEFAULT_CONFIDENCE_FLOOR,
     DEFAULT_MIN_AREA,
@@ -44,7 +45,9 @@ from .vision_surface import (
     reduce_vision_surface,
 )
 
-_DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
+# Generic, pinned, env-overridable default (see render_image) — no hardcoded
+# owner literal or floating ``:latest``.
+_DEFAULT_IMAGE = default_render_image()
 
 
 class VisionCapture:

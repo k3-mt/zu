@@ -24,6 +24,7 @@ from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, SandboxBackend, Too
 from .action_schema import validate_actions
 from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
+from .render_image import default_render_image
 
 # Default browser viewport. Chromium otherwise falls back to Playwright's
 # implicit 1280x720; we set it explicitly so the rendered DOM is reproducible
@@ -34,8 +35,9 @@ _DEFAULT_HEIGHT = 720
 # The sandbox image is a spec detail, not a hard-coded constant in the loop:
 # the backend launches it. The published Playwright/Chromium image is the default
 # tier-2 environment (built from images/render-chromium in this repo); swap it via
-# RenderDom(image=...) or config without touching the loop.
-_DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
+# RenderDom(image=...), env (ZU_RENDER_IMAGE*), or config without touching the loop.
+# Derived generically (pinned tag, env-overridable namespace) — see render_image.
+_DEFAULT_IMAGE = default_render_image()
 
 
 class RenderDom:

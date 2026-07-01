@@ -11,11 +11,17 @@ ExecStart=/opt/zu/.venv/bin/python bot.py
 Restart=always
 RestartSec=10
 
-# Hardening: the bot needs no privileges, no write access, no home.
+# Hardening: the bot needs no privileges and no home.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+# ProtectSystem=strict makes the whole filesystem (including the /opt/zu install
+# dir) read-only. That is a foot-gun for the self-update path (the git-pull in
+# deploy/gcp/startup.sh) and for any future state the bot writes under its install
+# dir. Punch a writable hole for exactly the install tree so those keep working
+# while the rest of the system stays read-only.
+ReadWritePaths=/opt/zu
 
 [Install]
 WantedBy=multi-user.target

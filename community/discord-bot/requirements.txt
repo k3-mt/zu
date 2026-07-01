@@ -1,4 +1,8 @@
-# Zu community Discord bot.
-discord.py>=2.4,<3
+# Zu community Discord bot — pinned so the deploy path (Docker build / VM
+# startup git-pull + pip install) is reproducible and doesn't pull whatever
+# floats. Bump these deliberately; re-pin when you upgrade.
+#
+# Regenerate/audit with:  pip install -U discord.py python-dotenv  (then re-pin).
+discord.py==2.7.1
 # Optional: load DISCORD_BOT_TOKEN / GUILD_ID from a .env file automatically.
-python-dotenv>=1.0
+python-dotenv==1.2.2

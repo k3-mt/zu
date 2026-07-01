@@ -65,7 +65,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages", "images", "automation"]
+testpaths = ["packages", "images", "automation", "community/discord-bot/tests"]
 addopts = "-q"
 # Markers are also registered by the zu-testing pytest plugin; declared here too
 # so `pytest --markers` documents them and an unknown-marker typo is an error.
