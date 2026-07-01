@@ -18,9 +18,14 @@ jobs:
   live:
     runs-on: ubuntu-latest
     env:
+      # Vendor API keys are genuine secrets → secrets.*. The tests self-skip when a
+      # key is absent, so a no-secret run is green; no vendor is *required* here.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      # A base URL is configuration, not a secret — carry it as a plain repo
+      # variable (optional; empty when unset) instead of secrets.*. Sourcing an
+      # endpoint from secrets is the coupling F77 flags.
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4

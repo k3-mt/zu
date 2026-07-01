@@ -25,9 +25,12 @@ from ._session import close_run, get_or_open, run_key
 from .action_schema import validate_actions
 from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
+from .render_image import default_render_image
 from .settle import settle, settle_budget_ms
 
-_DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
+# Generic, pinned, env-overridable default (see render_image) — no hardcoded
+# owner literal or floating ``:latest``.
+_DEFAULT_IMAGE = default_render_image()
 _OBS_KEYS = ("status", "url", "text", "html", "content", "network",
              "action_error", "action_error_kind", "consent_dismissed")
 

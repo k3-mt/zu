@@ -51,8 +51,11 @@ from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandl
 from ._session import get_or_open, put_handle_map, resolve_handle, run_key
 from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
+from .render_image import default_render_image
 
-_DEFAULT_IMAGE = "ghcr.io/k3-mt/zu-render-chromium:latest"
+# Generic, pinned, env-overridable default (see render_image) — no hardcoded
+# owner literal or floating ``:latest``.
+_DEFAULT_IMAGE = default_render_image()
 
 # Roles that represent something the agent can *do*. The list is generous on
 # purpose — enumerating the possible is the job; choosing among it is the

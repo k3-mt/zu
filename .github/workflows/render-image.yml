@@ -1,9 +1,15 @@
 name: render-image
 
 # Build and publish the tier-2 render image (the headless-Chromium sandbox the
-# `render_dom`/`browser` tools launch). This is the default image hardcoded in
-# zu-tools (`ghcr.io/<owner>/zu-render-chromium:latest`), so it must be published
-# and PUBLIC for the browser tools to work out of the box.
+# `render_dom`/`browser` tools launch). zu-tools resolves its default image
+# generically (zu_tools.render_image.default_render_image): a PINNED tag
+# (ZU_RENDER_IMAGE_TAG, default a release tag — not floating `:latest`) under an
+# env-overridable namespace. So this workflow must publish that pinned tag (the
+# `v*` ref below) PUBLIC for the browser tools to work out of the box; `:latest`
+# is only a convenience alias, never what an install pins to.
+#
+# The image namespace is derived from ${{ github.repository_owner }} (no owner
+# literal), and each build is also tagged immutably by commit sha (type=sha).
 #
 # Publishes to ghcr.io/<owner>/zu-render-chromium on a version tag (v*) or manual run.
 # NOTE: GHCR packages are private on first push — set this package's visibility to
