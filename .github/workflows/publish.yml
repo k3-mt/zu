@@ -45,7 +45,7 @@ jobs:
       # hashes every file in dist/, no per-file hardcoding.
       - name: Record provenance manifest (sha256 of every dist file)
         working-directory: dist
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum -- * > SHA256SUMS   # -- so a dist name with a leading dash isn't read as an option (SC2035)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: dist
