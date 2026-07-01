@@ -11,11 +11,15 @@ from __future__ import annotations
 import pytest
 
 from zu_core.ports import (
+    CartAdder,
+    CartAddition,
     CheckoutProceeder,
     CheckoutState,
     ConnectedSurface,
     ConsentControl,
     ConsentResolver,
+    FunnelPhase,
+    FunnelPhaseClassifier,
     RequiredSelection,
     SelectionSatisfier,
     SurfaceAction,
@@ -53,6 +57,19 @@ class _Proceeder:
         return False
 
 
+class _Adder:
+    def inspect(self, view: SurfaceView) -> CartAddition:
+        return CartAddition(added=False)
+
+    async def add(self, surface: ConnectedSurface) -> bool:
+        return False
+
+
+class _Classifier:
+    def classify(self, view: SurfaceView) -> FunnelPhase:
+        return FunnelPhase.UNKNOWN
+
+
 def test_interface_versions_registered() -> None:
     from zu_core.ports import INTERFACE_VERSION
 
@@ -60,6 +77,8 @@ def test_interface_versions_registered() -> None:
     assert INTERFACE_VERSION["consent_resolvers"] == 1
     assert INTERFACE_VERSION["selection_satisfiers"] == 1
     assert INTERFACE_VERSION["checkout_proceeders"] == 1
+    assert INTERFACE_VERSION["cart_adders"] == 1
+    assert INTERFACE_VERSION["funnel_phase_classifiers"] == 1
 
 
 def test_entry_point_groups_registered() -> None:
@@ -67,6 +86,8 @@ def test_entry_point_groups_registered() -> None:
     assert GROUPS["consent_resolvers"] == "zu.consent_resolvers"
     assert GROUPS["selection_satisfiers"] == "zu.selection_satisfiers"
     assert GROUPS["checkout_proceeders"] == "zu.checkout_proceeders"
+    assert GROUPS["cart_adders"] == "zu.cart_adders"
+    assert GROUPS["funnel_phase_classifiers"] == "zu.funnel_phase_classifiers"
 
 
 def test_protocols_are_structural_and_runtime_checkable() -> None:
@@ -74,13 +95,23 @@ def test_protocols_are_structural_and_runtime_checkable() -> None:
     assert isinstance(_Resolver(), ConsentResolver)
     assert isinstance(_Satisfier(), SelectionSatisfier)
     assert isinstance(_Proceeder(), CheckoutProceeder)
+    assert isinstance(_Adder(), CartAdder)
+    assert isinstance(_Classifier(), FunnelPhaseClassifier)
+
+
+def test_funnel_phase_enum_values() -> None:
+    assert FunnelPhase.AT_PAYMENT.value == "at_payment"
+    assert {p.value for p in FunnelPhase} == {
+        "browsing", "on_product", "in_cart", "at_checkout", "at_payment", "unknown",
+    }
 
 
 def test_value_objects_are_frozen() -> None:
     action = SurfaceAction(handle="a1", kind="click")
     control = ConsentControl(handle="a1", kind="accept", label="Accept all")
     selection = RequiredSelection(handle="a1", chosen_label="Red")
-    for obj in (action, control, selection):
+    addition = CartAddition(added=True, handle="a1")
+    for obj in (action, control, selection, addition):
         with pytest.raises(Exception):  # noqa: B017 — pydantic frozen raises ValidationError
             obj.handle = "a2"
 

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from zu_core.ports import CheckoutProceeder, SurfaceAction
 from zu_core.surface import SurfaceAffordance, SurfaceView
-from zu_tools.checkout import WholeWordCheckoutProceeder, _is_commit
+from zu_tools._commerce import is_commit as _is_commit
+from zu_tools.checkout import WholeWordCheckoutProceeder
 
 
 def aff(handle: str, role: str, label: str) -> SurfaceAffordance:

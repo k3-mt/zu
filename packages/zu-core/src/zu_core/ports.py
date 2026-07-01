@@ -72,6 +72,8 @@ INTERFACE_VERSION: dict[str, int] = {
     "consent_resolvers": 1,  # ConsentResolver — deterministic cookie/consent dismissal (#94)
     "selection_satisfiers": 1,  # SelectionSatisfier — satisfy required variant selects (#95)
     "checkout_proceeders": 1,  # CheckoutProceeder — advance add-to-cart -> checkout, short of commit (#117)
+    "cart_adders": 1,  # CartAdder — deterministic product -> cart, recognise/click/verify (#122)
+    "funnel_phase_classifiers": 1,  # FunnelPhaseClassifier — where a page sits in the funnel (#121)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -1309,3 +1311,62 @@ class CheckoutProceeder(Protocol):
     def inspect(self, view: SurfaceView) -> CheckoutState: ...
 
     async def proceed(self, surface: ConnectedSurface) -> bool: ...
+
+
+class CartAddition(BaseModel):
+    """What a :class:`CartAdder` reads off one surface. ``added`` — a 'took' signal
+    is present (a mini-cart drawer / cart-count / 'added to cart'). ``handle`` — the
+    LIVE add-to-cart control, if one is present (``None`` when absent or disabled,
+    e.g. a required option is unmet)."""
+
+    model_config = {"frozen": True}
+
+    added: bool
+    handle: str | None = None
+
+
+@runtime_checkable
+class CartAdder(Protocol):
+    """Deterministically add the current product to the cart and CONFIRM it took —
+    the ``product → cart`` transition, symmetric with :class:`CheckoutProceeder`
+    (#117) and the step before it.
+
+    ``inspect`` finds a LIVE (non-disabled) add-to-cart control by WHOLE-WORD
+    accessible name — NEVER a committing control (place-order/pay/buy-now excluded,
+    as in #117). ``add`` clicks it and verifies via a genuine before/after DELTA
+    (the #39 'a control became acted' invariant): a mini-cart drawer / a NEW checkout
+    control / an 'added to cart' confirmation APPEARED. A persistent header 'View
+    basket' link present in both is NOT a 'took' signal. A silent no-op (a required
+    option unmet) returns False, so the host can satisfy the option and retry rather
+    than falsely claim success. Short of the commit boundary — the host's
+    vault/approval still owns pay. (#122)"""
+
+    def inspect(self, view: SurfaceView) -> CartAddition: ...
+
+    async def add(self, surface: ConnectedSurface) -> bool: ...
+
+
+class FunnelPhase(str, Enum):
+    """Where a page sits in a purchase funnel — the content-free STATE the shipped
+    connected-surface resolvers are transitions OVER (#121). Derived purely from the
+    SHAPE a surface already carries (an add-to-cart control, a cart/'added' signal, a
+    checkout url / place-order control, a card field), never product prose. It powers
+    observability (a phase timeline; drift is a phase regression) and resilience
+    (revert on regression; don't escalate while the phase can still advance)."""
+
+    BROWSING = "browsing"        # a listing / category / search page — no product committed
+    ON_PRODUCT = "on_product"    # a product page — an add-to-cart control is present
+    IN_CART = "in_cart"          # the item is in the cart (cart badge / 'added' / mini-cart)
+    AT_CHECKOUT = "at_checkout"  # the checkout / shipping page — SHORT of place-order/pay
+    AT_PAYMENT = "at_payment"    # card / pay fields present — the COMMIT boundary
+    UNKNOWN = "unknown"          # nothing recognisable (an empty / non-commerce surface)
+
+
+@runtime_checkable
+class FunnelPhaseClassifier(Protocol):
+    """Classify which :class:`FunnelPhase` a surface sits in — structural and
+    content-free. The web reference impl reads a ``SurfaceView``; a non-web producer
+    may supply its own, but the :class:`FunnelPhase` enum is the shared vocabulary
+    regardless (#121)."""
+
+    def classify(self, view: SurfaceView) -> FunnelPhase: ...

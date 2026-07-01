@@ -54,6 +54,12 @@ first_option = "zu_tools.selection:FirstOptionSelectionSatisfier"
 [project.entry-points."zu.checkout_proceeders"]
 whole_word = "zu_tools.checkout:WholeWordCheckoutProceeder"
 
+[project.entry-points."zu.cart_adders"]
+whole_word = "zu_tools.cart:WholeWordCartAdder"
+
+[project.entry-points."zu.funnel_phase_classifiers"]
+web = "zu_tools.funnel:WebFunnelPhaseClassifier"
+
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
 Repository = "https://github.com/k3-mt/zu"
