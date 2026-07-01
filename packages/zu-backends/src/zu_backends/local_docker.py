@@ -42,9 +42,9 @@ class _Sandbox:
     """A handle to a launched container. Returned by ``launch`` and passed back
     to ``exec``/``destroy`` — opaque to the loop, which only moves it around.
 
-    ``cleanup_paths`` are host temp files (e.g. a per-run MITM CA bind-mounted into
-    the container) to remove at ``destroy``, so an enabled MITM leaves nothing on
-    the host after the run."""
+    ``cleanup_paths`` are host temp files (e.g. a per-run TLS-intercept CA
+    bind-mounted into the container) to remove at ``destroy``, so an enabled
+    egress interception leaves nothing on the host after the run."""
 
     container: Any
     image: str
@@ -193,8 +193,57 @@ def _render_argv(args: dict) -> list[str]:
     return argv
 
 
+class ImagePolicyError(RuntimeError):
+    """Raised when ``launch`` refuses an image that fails the pull policy (F34):
+    a registry not on the allowlist, or a floating tag when a digest is required.
+    Distinct from :class:`DockerUnavailableError` so a policy refusal is never
+    mistaken for a missing daemon."""
+
+
+class NetworkPolicyError(RuntimeError):
+    """Raised when ``launch`` refuses unrestricted egress (``network: True``)
+    without the explicit opt-in flag (F38): unrestricted egress must be a
+    deliberate, logged choice, never a silent default."""
+
+
+def _image_registry(image: str) -> str:
+    """The registry host of a Docker image reference, or ``""`` for Docker Hub's
+    implicit ``docker.io`` (a bare ``name`` or ``ns/name``). Purely lexical — the
+    first path segment is a registry only if it looks like a host (contains a
+    ``.`` or ``:``, or is ``localhost``), matching Docker's own reference grammar.
+    A ``@sha256:`` digest or ``:tag`` on the final segment does not affect this."""
+    ref = image.split("@", 1)[0]  # drop any digest before splitting on '/'
+    head = ref.split("/", 1)[0]
+    if head == "localhost" or "." in head or ":" in head:
+        return head
+    return ""
+
+
+def _image_is_digest_pinned(image: str) -> bool:
+    """True when the image reference names an immutable ``@sha256:`` digest — so
+    Docker's auto-pull resolves to exactly one content-addressed image, not a
+    mutable tag a registry could repoint."""
+    return "@sha256:" in image
+
+
+def _split_csv_env(raw: str | None) -> list[str]:
+    """Parse a comma/space-separated env value into a clean list (empties dropped).
+    Used for the registry allowlist so it is env/config-derived, never hardcoded."""
+    if not raw:
+        return []
+    return [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
+
+
 class LocalDockerBackend:
     name = "local-docker"
+
+    # The default registry allowlist (F34): a bare/`ns/name` image (implicit
+    # ``docker.io``, registry ``""``) is always permitted so existing test/render
+    # images keep working, and ``localhost`` (a locally-built image) is trusted.
+    # This is a floor, not a hardcode: the effective allowlist is the union of this,
+    # the ``ZU_IMAGE_REGISTRY_ALLOWLIST`` env, and the per-launch ``image_allowlist``
+    # spec key — the project namespace is supplied by config, not baked in here.
+    _DEFAULT_REGISTRY_ALLOWLIST = ("", "localhost")
 
     def __init__(
         self, client: Any = None, *, startup_timeout_s: int = 30, exec_timeout_s: int = 45
@@ -234,24 +283,80 @@ class LocalDockerBackend:
             ) from exc
         return self._client
 
+    def _check_image_policy(self, image: str, spec: dict) -> None:
+        """Guard the image before Docker's implicit auto-pull (F34): an arbitrary
+        ``spec['image']`` would otherwise let a run name ANY registry/image and
+        have Docker pull it. Two configurable, generic controls, both default-off
+        for the existing test/render images:
+
+          * a REGISTRY ALLOWLIST — the union of the built-in floor
+            (``docker.io``/``localhost``), the ``ZU_IMAGE_REGISTRY_ALLOWLIST`` env,
+            and the per-launch ``spec['image_allowlist']``. An image whose registry
+            is not on it is refused. The project's own namespace is supplied by
+            config, not hardcoded here.
+          * a DIGEST-PIN requirement — when ``spec['require_digest']`` is set (or
+            ``ZU_IMAGE_REQUIRE_DIGEST=1``), a floating ``:tag`` is refused; only an
+            ``@sha256:`` reference (one immutable, content-addressed image) is run.
+
+        The decision is logged either way, so the policy that let (or blocked) a
+        pull is auditable."""
+        allowlist = {
+            *self._DEFAULT_REGISTRY_ALLOWLIST,
+            *_split_csv_env(os.environ.get("ZU_IMAGE_REGISTRY_ALLOWLIST")),
+            *(spec.get("image_allowlist") or ()),
+        }
+        registry = _image_registry(image)
+        if registry not in allowlist:
+            logger.warning(
+                "refusing image %r: registry %r not on allowlist %s",
+                image, registry, sorted(allowlist),
+            )
+            raise ImagePolicyError(
+                f"image {image!r} names registry {registry or 'docker.io'!r}, which is "
+                f"not on the allowlist {sorted(allowlist)}; add it via "
+                f"ZU_IMAGE_REGISTRY_ALLOWLIST or spec['image_allowlist']."
+            )
+        require_digest = bool(spec.get("require_digest")) or bool(
+            _split_csv_env(os.environ.get("ZU_IMAGE_REQUIRE_DIGEST"))
+        )
+        if require_digest and not _image_is_digest_pinned(image):
+            logger.warning("refusing image %r: digest pin required but reference is a tag", image)
+            raise ImagePolicyError(
+                f"image {image!r} is not digest-pinned; policy requires an @sha256: "
+                f"reference (set spec['require_digest']=False to opt out)."
+            )
+        logger.debug(
+            "image policy passed for %r (registry=%r, digest_pinned=%s)",
+            image, registry, _image_is_digest_pinned(image),
+        )
+
     async def launch(self, spec: dict) -> _Sandbox:
         """Start a detached container from ``spec['image']`` and return an opaque
         handle. Network has three modes:
 
           * absent/false  -> ``network_disabled`` (the render default; no egress);
-          * truthy        -> network on (the public-web tier);
+          * truthy        -> network on, EXPLICITLY UNRESTRICTED (the public-web
+            tier). This is the one mode with no egress enforcement, so it must be
+            opted into deliberately: pass ``spec['allow_unrestricted_egress']=True``
+            (or set ``ZU_ALLOW_UNRESTRICTED_EGRESS=1``) or the launch is refused
+            (F38). Callers wanting ENFORCED egress should use ``"isolated"`` below;
+            the choice to go unrestricted is logged.
           * ``"isolated"`` -> attach to the pre-created INTERNAL docker network
             ``spec['network_name']`` (no external route), so the egress proxy is
             the **only** path off-box. The internal network is the default-DROP
-            enforcement for the red-team container form (RED_TEAM_CONTAINER.md
-            §3.1); ``spec['proxy']`` then injects HTTP(S)_PROXY so a cooperative
-            client routes through it — the env is convenience, the network is the
-            guarantee.
+            enforcement for the contained-egress container form; ``spec['proxy']``
+            then injects HTTP(S)_PROXY so a cooperative client routes through it —
+            the env is convenience, the network is the guarantee.
+
+        The image is guarded before launch by :meth:`_check_image_policy` (F34):
+        a registry allowlist and an optional digest-pin requirement, so an
+        arbitrary image cannot be auto-pulled from an arbitrary registry.
 
         ``spec['proxy']`` (``{host, port}``) injects proxy env; ``spec['extra_hosts']``
         DNS-pins validated host->IP; the cap-drop/no-new-privileges/pids hardening
         is unchanged."""
         image = spec["image"]
+        self._check_image_policy(image, spec)
         client = self._docker()
         # Privilege hardening with a FLOOR the spec can tighten but not loosen:
         # this container runs untrusted, model-chosen work. ``cap_drop`` always
@@ -292,8 +397,28 @@ class LocalDockerBackend:
             # The only route off-box is the proxy on this internal network.
             run_kwargs["network"] = spec["network_name"]
             run_kwargs["network_disabled"] = False
+        elif network:
+            # Unrestricted egress (F38): no proxy, no default-DROP — the container
+            # can reach anything. This must be a deliberate, logged choice, never a
+            # silent default: refuse unless the caller explicitly opted in (or steer
+            # them to network="isolated" for enforced egress).
+            opt_in = bool(spec.get("allow_unrestricted_egress")) or bool(
+                _split_csv_env(os.environ.get("ZU_ALLOW_UNRESTRICTED_EGRESS"))
+            )
+            if not opt_in:
+                raise NetworkPolicyError(
+                    "network=True grants UNRESTRICTED egress (no proxy / no default-DROP). "
+                    "Opt in explicitly via spec['allow_unrestricted_egress']=True or "
+                    "ZU_ALLOW_UNRESTRICTED_EGRESS=1, or use network='isolated' for "
+                    "enforced egress through the proxy."
+                )
+            logger.warning(
+                "launching %r with UNRESTRICTED egress (network=True, no egress proxy) "
+                "by explicit opt-in", image,
+            )
+            run_kwargs["network_disabled"] = False
         else:
-            run_kwargs["network_disabled"] = not network
+            run_kwargs["network_disabled"] = True
         # DNS gating (ZU-NET-1): when an EgressEnforcement supplies ``dns`` (e.g.
         # a non-resolving nameserver so the embedded resolver cannot be used as a
         # covert egress channel), set it on the container — the proxy is reached by
@@ -301,9 +426,10 @@ class LocalDockerBackend:
         # ⇒ Docker's default, so existing runs are unchanged.
         if spec.get("dns"):
             run_kwargs["dns"] = list(spec["dns"])
-        # Optional seccomp profile: the audit profile (redteam-audit.json) LOGs
-        # sensitive syscalls; the blocking profile (redteam-block.json) ERRNOs the
-        # escape primitives. Appended to security_opt. NOTE: the docker SDK passes
+        # Optional seccomp profile: an AUDIT profile LOGs sensitive syscalls; a
+        # BLOCKING profile ERRNOs the escape primitives. The profile is supplied by
+        # the caller (path/JSON/"unconfined"); this backend names no specific one.
+        # Appended to security_opt. NOTE: the docker SDK passes
         # the value to the daemon verbatim — unlike the CLI it does NOT read a file
         # — so a path must be inlined to its JSON content here, or the daemon fails
         # with "Decoding seccomp profile failed". A profile given as JSON (starts
@@ -328,17 +454,20 @@ class LocalDockerBackend:
                 "http_proxy": url, "https_proxy": url,
                 "NO_PROXY": spec.get("no_proxy", "localhost,127.0.0.1"),
             })
-        # Per-run MITM CA (P2): write it to a host temp file, bind-mount it
+        # Per-run TLS-intercept CA: write it to a host temp file, bind-mount it
         # read-only into the container, and point the standard TLS-trust env vars
-        # at it so the in-container client trusts the proxy's minted leaves. The
-        # temp file is tracked for removal at destroy — the CA dies with the run.
+        # at it so the in-container client trusts the egress proxy's minted leaves.
+        # The temp file is tracked for removal at destroy — the CA dies with the run.
         cleanup_paths: list[str] = []
         ca_cert = spec.get("ca_cert")
         if ca_cert:
-            fd, ca_path = tempfile.mkstemp(suffix="-zu-redteam-ca.pem")
+            fd, ca_path = tempfile.mkstemp(suffix="-zu-tls-intercept-ca.pem")
             os.write(fd, ca_cert if isinstance(ca_cert, bytes) else str(ca_cert).encode())
             os.close(fd)
             cleanup_paths.append(ca_path)
+            # The default in-container mount path is a stable, consumer-facing
+            # value (kept for compatibility with existing callers that rely on it);
+            # it is opaque and carries no policy meaning. Override via ``ca_mount``.
             mount = spec.get("ca_mount", "/zu-redteam-ca.pem")
             run_kwargs["volumes"] = {**(spec.get("volumes") or {}),
                                      ca_path: {"bind": mount, "mode": "ro"}}
@@ -462,11 +591,11 @@ class LocalDockerBackend:
         environment: dict | None = None, timeout_s: float | None = None,
     ) -> tuple[int, str, str]:
         """Run an arbitrary argv in the container and return ``(exit_code, stdout,
-        stderr)``. Generalises :meth:`exec` (which is render-specific) so the
-        red-team container form can exec the ``zu-redteam-run`` runner inside the
-        box — passing the scenario spec via ``environment['ZU_REDTEAM_SPEC']`` —
-        and read its JSONL event log off stdout. Bounded by ``timeout_s`` (default
-        the backend's ``exec_timeout_s``) so a wedged run can't hang forever."""
+        stderr)``. Generalises :meth:`exec` (which is render-specific) so a caller
+        can exec its own runner inside the box — passing a spec via an environment
+        variable of its choosing — and read its JSONL event log off stdout. Bounded
+        by ``timeout_s`` (default the backend's ``exec_timeout_s``) so a wedged run
+        can't hang forever."""
         timeout = self.exec_timeout_s if timeout_s is None else timeout_s
         try:
             exit_code, streams = await asyncio.wait_for(
@@ -520,10 +649,10 @@ class LocalDockerBackend:
     async def fs_diff(self, sandbox: _Sandbox) -> list[dict]:
         """The container's filesystem changes since launch (``docker diff``), as
         ``[{path, kind}]`` — the out-of-band record of what the run *wrote*, read
-        AFTER the run and BEFORE teardown. This is the host-effect audit source the
-        red-team container form (RED_TEAM_CONTAINER.md §3.3, P3) reads: a plugin
-        that modified the filesystem is visible here whether or not it admitted to
-        it. Defensive about the SDK shape so an injected stub still works."""
+        AFTER the run and BEFORE teardown. This is the host-effect audit source a
+        containment consumer reads: a plugin that modified the filesystem is
+        visible here whether or not it admitted to it. Defensive about the SDK
+        shape so an injected stub still works."""
         raw = await asyncio.to_thread(sandbox.container.diff)
         out: list[dict] = []
         for d in raw or []:
@@ -599,7 +728,7 @@ class LocalDockerBackend:
                 getattr(sandbox.container, "id", "?"),
                 exc,
             )
-        for p in getattr(sandbox, "cleanup_paths", []):  # remove the per-run MITM CA
+        for p in getattr(sandbox, "cleanup_paths", []):  # remove the per-run TLS-intercept CA
             try:
                 os.unlink(p)
             except OSError:

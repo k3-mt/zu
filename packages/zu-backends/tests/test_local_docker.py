@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 from zu_backends.local_docker import (
     DockerUnavailableError,
+    ImagePolicyError,
     LocalDockerBackend,
+    NetworkPolicyError,
+    _image_is_digest_pinned,
+    _image_registry,
     _render_argv,
     _spec_target,
 )
@@ -127,7 +132,7 @@ async def test_network_enabled_when_requested() -> None:
     container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
     client = _FakeClient(container)
     backend = LocalDockerBackend(client=client)
-    await backend.launch({"image": "img", "network": True})
+    await backend.launch({"image": "img", "network": True, "allow_unrestricted_egress": True})
     assert client.containers.run_kwargs is not None
     assert client.containers.run_kwargs["network_disabled"] is False
 
@@ -137,7 +142,8 @@ async def test_extra_hosts_dns_pin_is_passed_to_docker() -> None:
     container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
     client = _FakeClient(container)
     backend = LocalDockerBackend(client=client)
-    await backend.launch({"image": "img", "network": True, "extra_hosts": {"shop.test": "93.184.216.34"}})
+    await backend.launch({"image": "img", "network": True, "allow_unrestricted_egress": True,
+                          "extra_hosts": {"shop.test": "93.184.216.34"}})
     kw = client.containers.run_kwargs
     assert kw is not None and kw["extra_hosts"] == {"shop.test": "93.184.216.34"}
 
@@ -161,9 +167,128 @@ async def test_no_dns_key_leaves_docker_default() -> None:
     container = _FakeContainer(exit_code=0, output=b"{}")
     client = _FakeClient(container)
     backend = LocalDockerBackend(client=client)
-    await backend.launch({"image": "img", "network": True})
+    await backend.launch({"image": "img", "network": True, "allow_unrestricted_egress": True})
     kw = client.containers.run_kwargs
     assert kw is not None and "dns" not in kw
+
+
+# --- F34: image pull policy (registry allowlist + optional digest pin) ---------
+
+
+def test_image_registry_parsing_is_lexical() -> None:
+    # A bare name / ns/name is implicit docker.io (registry ""); a host-looking
+    # first segment is the registry; a digest doesn't confuse the split.
+    assert _image_registry("img") == ""
+    assert _image_registry("library/nginx:latest") == ""
+    assert _image_registry("zu/render-chromium:latest") == ""
+    assert _image_registry("ghcr.io/k3-mt/zu-render:latest") == "ghcr.io"
+    assert _image_registry("registry.example.com:5000/x/y@sha256:" + "a" * 64) \
+        == "registry.example.com:5000"
+    assert _image_registry("localhost/x") == "localhost"
+
+
+def test_image_digest_pin_detection() -> None:
+    assert _image_is_digest_pinned("x@sha256:" + "a" * 64) is True
+    assert _image_is_digest_pinned("x:latest") is False
+
+
+async def test_launch_refuses_image_from_registry_not_on_allowlist() -> None:
+    # F34: the load-bearing guard — an arbitrary registry cannot be auto-pulled.
+    # On OLD code (no policy) this image would be run without complaint.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    with pytest.raises(ImagePolicyError):
+        await backend.launch({"image": "evil.example.com/malware:latest"})
+    assert client.containers.run_kwargs is None  # never reached containers.run
+
+
+async def test_launch_allows_default_and_localhost_registries() -> None:
+    # Non-breaking floor: implicit docker.io (bare/ns names) and localhost pass.
+    for image in ("img", "zu/render-chromium:latest", "localhost/x:latest"):
+        container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+        client = _FakeClient(container)
+        backend = LocalDockerBackend(client=client)
+        await backend.launch({"image": image})
+        assert client.containers.run_kwargs is not None
+
+
+async def test_launch_allows_registry_via_spec_allowlist() -> None:
+    # The allowlist is extensible per-launch (config-derived, not hardcoded).
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "ghcr.io/k3-mt/zu-render:latest",
+                          "image_allowlist": ["ghcr.io"]})
+    assert client.containers.run_kwargs is not None
+
+
+async def test_launch_allows_registry_via_env_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZU_IMAGE_REGISTRY_ALLOWLIST", "ghcr.io, quay.io")
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "quay.io/org/x:latest"})
+    assert client.containers.run_kwargs is not None
+
+
+async def test_require_digest_refuses_a_floating_tag() -> None:
+    # F34 digest-pin policy: with the flag set, a mutable :tag is refused; only an
+    # @sha256: reference (one immutable image) is run.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    with pytest.raises(ImagePolicyError):
+        await backend.launch({"image": "img:latest", "require_digest": True})
+    assert client.containers.run_kwargs is None
+    # A digest-pinned reference passes the same policy.
+    digest = "img@sha256:" + "a" * 64
+    await backend.launch({"image": digest, "require_digest": True})
+    assert client.containers.run_kwargs is not None
+
+
+# --- F38: unrestricted egress (network=True) must be an explicit opt-in ---------
+
+
+async def test_network_true_without_opt_in_is_refused() -> None:
+    # F38: on OLD code network=True silently disabled isolation with no proxy. Now
+    # unrestricted egress requires an explicit, logged opt-in or it is refused.
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    with pytest.raises(NetworkPolicyError):
+        await backend.launch({"image": "img", "network": True})
+    assert client.containers.run_kwargs is None
+
+
+async def test_network_true_with_opt_in_flag_launches_unrestricted() -> None:
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "network": True, "allow_unrestricted_egress": True})
+    kw = client.containers.run_kwargs
+    assert kw is not None and kw["network_disabled"] is False
+
+
+async def test_network_true_opt_in_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZU_ALLOW_UNRESTRICTED_EGRESS", "1")
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "network": True})
+    kw = client.containers.run_kwargs
+    assert kw is not None and kw["network_disabled"] is False
+
+
+async def test_isolated_network_needs_no_egress_opt_in() -> None:
+    # The enforced-egress tier is unaffected: "isolated" never requires the opt-in
+    # (its egress is proxy-scoped, not unrestricted).
+    container = _FakeContainer(exit_code=0, output=b'{"html": ""}')
+    client = _FakeClient(container)
+    backend = LocalDockerBackend(client=client)
+    await backend.launch({"image": "img", "network": "isolated", "network_name": "net"})
+    kw = client.containers.run_kwargs
+    assert kw is not None and kw["network"] == "net"
 
 
 async def test_container_is_hardened_by_default() -> None:
@@ -275,7 +400,42 @@ async def test_missing_docker_sdk_raises_clear_error() -> None:
         builtins.__import__ = real_import
 
 
-# --- the red-team container form (RED_TEAM_CONTAINER.md P1) ------------------
+# --- F39: the generic backend names no specific consumer ----------------------
+
+
+def test_generic_backend_has_no_site_specific_naming() -> None:
+    # F39: the generic sandbox backend must not couple to a specific consumer.
+    # Its source carries no red-team / MITM naming nor a RED_TEAM_CONTAINER.md
+    # reference (behaviour is unchanged; this is a naming/doc de-coupling). The one
+    # retained token is the compat default mount value, which is opaque.
+    import zu_backends.local_docker as mod
+
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    lowered = src.lower()
+    assert "red-team" not in lowered and "red_team" not in lowered
+    assert "redteam" not in lowered.replace("/zu-redteam-ca.pem", "")  # only the compat default
+    assert "mitm" not in lowered
+    assert "RED_TEAM_CONTAINER" not in src
+
+
+# --- F40: the only CONNECT/dial path is the egress proxy's (resolve-then-pin) ---
+
+
+def test_local_docker_has_no_independent_connect_dial_path() -> None:
+    # F40 evidence: the MITM/CONNECT dial with resolve-then-pin (issue #50) lives
+    # solely in egress_proxy (which resolves once via _resolve_validated_ip and
+    # dials the pinned IP). The generic backend has NO socket/connect path of its
+    # own — it injects proxy env + extra_hosts DNS pins and lets Docker route the
+    # container through the proxy — so there is no separate re-resolving dial to fix.
+    import zu_backends.local_docker as mod
+
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    for needle in ("open_connection", "create_connection", "getaddrinfo",
+                   ".connect(", "socket.socket"):
+        assert needle not in src, f"unexpected dial primitive in local_docker: {needle}"
+
+
+# --- the contained-egress container form --------------------------------------
 
 
 class _ExecContainer(_FakeContainer):
@@ -414,7 +574,9 @@ async def test_browser_session_holds_state_across_commands_live() -> None:
     # The persistent session: open a page, then read it again — the SAME browser
     # is held across commands (state persists), proven against the real image.
     image = os.environ.get("ZU_RENDER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
-    session = await LocalDockerBackend().open_session({"image": image, "network": True})
+    session = await LocalDockerBackend().open_session(
+        {"image": image, "network": True, "allow_unrestricted_egress": True,
+         "image_allowlist": ["ghcr.io"]})
     try:
         opened = await session.send({"op": "open", "url": "https://example.com"})
         assert opened["status"] == 200 and "Example Domain" in opened["text"]
@@ -435,7 +597,9 @@ async def test_axtree_locate_pointer_screenshot_against_real_chromium_live() -> 
     import base64
 
     image = os.environ.get("ZU_RENDER_IMAGE", "ghcr.io/k3-mt/zu-render-chromium:latest")
-    session = await LocalDockerBackend().open_session({"image": image, "network": True})
+    session = await LocalDockerBackend().open_session(
+        {"image": image, "network": True, "allow_unrestricted_egress": True,
+         "image_allowlist": ["ghcr.io"]})
     try:
         # A page with a real, addressable button (so the AX tree exposes it).
         await session.send({"op": "open", "url": "data:text/html,"
@@ -503,7 +667,9 @@ async def test_real_pointer_attaches_to_run_session_and_clicks_by_handle_live() 
     backend = LocalDockerBackend()
     with _session._LOCK:
         _session._RUNS.pop(run, None)
-    session = await backend.open_run_session({"image": image, "network": True}, run_key=run)
+    session = await backend.open_run_session(
+        {"image": image, "network": True, "allow_unrestricted_egress": True,
+         "image_allowlist": ["ghcr.io"]}, run_key=run)
     try:
         await session.send({"op": "open", "url": "data:text/html,"
                            "<title>T</title><button>Place order</button>"})
