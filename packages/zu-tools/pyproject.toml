@@ -40,6 +40,17 @@ vision = "zu_tools.vision:VisionCapture"
 simulate = "zu_tools.simulate:Simulate"
 pdf_extract = "zu_tools.pdf:PdfExtract"
 
+# The connected-surface family (#93/#94/#95): web Action Surfaces over an external
+# CDP target a host owns, reusing the action_surface reduction.
+[project.entry-points."zu.connected_surfaces"]
+cdp = "zu_tools.connected_surface:CdpConnectedSurface"
+
+[project.entry-points."zu.consent_resolvers"]
+whole_word = "zu_tools.consent:WholeWordConsentResolver"
+
+[project.entry-points."zu.selection_satisfiers"]
+first_option = "zu_tools.selection:FirstOptionSelectionSatisfier"
+
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
 Repository = "https://github.com/k3-mt/zu"

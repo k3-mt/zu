@@ -86,6 +86,9 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 | a harness-owned channel     | `zu-backends`    | `zu.channels`     | `Channel`       |
 | a workload identity         | `zu-backends`    | `zu.workload_identity` | `WorkloadIdentity`|
 | egress enforcement          | `zu-backends`    | `zu.egress_enforcement`| `EgressEnforcement`|
+| a web surface over an external CDP target | `zu-tools` | `zu.connected_surfaces` | `ConnectedSurface` |
+| cookie/consent dismissal    | `zu-tools`       | `zu.consent_resolvers` | `ConsentResolver` |
+| required variant-select satisfaction | `zu-tools` | `zu.selection_satisfiers` | `SelectionSatisfier` |
 
 The last four are the **upstream-conformance** seams (see
 [`zu-upstream-conformance.md`](zu-upstream-conformance.md) and the trusted-base

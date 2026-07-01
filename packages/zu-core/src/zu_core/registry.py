@@ -60,6 +60,12 @@ GROUPS = {
     # the secret harness-side; an Instrument adapter (a real issuer/vault) plugs in
     # behind it. Discovered like any other kind.
     "credential_brokers": "zu.credential_brokers",
+    # The connected-surface family (#93/#94/#95): web Action Surfaces over an
+    # external CDP target a host owns, reusing the AX-tree reduction. Ports in
+    # zu_core.ports; reference impls are plugins in zu-tools.
+    "connected_surfaces": "zu.connected_surfaces",
+    "consent_resolvers": "zu.consent_resolvers",
+    "selection_satisfiers": "zu.selection_satisfiers",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind

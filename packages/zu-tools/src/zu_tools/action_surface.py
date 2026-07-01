@@ -92,6 +92,15 @@ class AxNode(BaseModel):
     visible: bool = True
     ignored: bool = False
     bounds: list[float] | None = None
+    # The CDP ``backendDOMNodeId`` for this AX node, when the tree carried one.
+    # It is GLOBAL to the target — stable across shadow-root and (same-process)
+    # frame boundaries — so a consumer bound to an external CDP endpoint
+    # (:class:`~zu_core.ports.ConnectedSurface`, #93) can resolve a handle to its
+    # element ACROSS those boundaries via ``DOM.resolveNode``. Threaded into the
+    # harness-side ``handle_map`` by :func:`reduce_surface`, never model-visible;
+    # ``None`` on the offline reduce path / a tree that omits it (fixtures and
+    # existing producers are unaffected — it is purely additive).
+    node_id: int | None = None
 
 
 class Affordance(BaseModel):
@@ -196,8 +205,13 @@ def reduce_surface(
                     states=list(node.states),
                 )
             )
-            # The durable locator the model never sees (role + accessible name).
-            handle_map[handle] = {"role": role, "name": label}
+            # The durable locator the model never sees (role + accessible name),
+            # plus the CDP backend node id when the tree carried one — #93 resolves
+            # a handle to its element across shadow/frame boundaries via that id.
+            locator: dict[str, Any] = {"role": role, "name": label}
+            if node.node_id is not None:
+                locator["node_id"] = node.node_id
+            handle_map[handle] = locator
 
     blind = False
     blind_reason: str | None = None
@@ -246,6 +260,10 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
         if not role:
             continue
         props = {p.get("name"): p.get("value", {}) for p in n.get("properties", []) if isinstance(p, dict)}
+        # The CDP backend DOM-node id — global to the target, so #93 can resolve a
+        # handle across shadow/frame boundaries. Absent on older/partial trees.
+        raw_node_id = n.get("backendDOMNodeId")
+        node_id = raw_node_id if isinstance(raw_node_id, int) else None
         states: list[str] = []
         for sp in sorted(state_props):
             val = props.get(sp, {})
@@ -265,6 +283,7 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
                 # is folded into ``hidden`` when the server supplies bounds.
                 visible=not bool(props.get("hidden", {}).get("value", False))
                 if isinstance(props.get("hidden"), dict) else True,
+                node_id=node_id,
             )
         )
     return out

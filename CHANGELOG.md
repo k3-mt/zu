@@ -7,6 +7,28 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the connected-surface family: web Action Surfaces over an external CDP target
+Reuse zu's accessibility-tree reduction (which already flattens OPEN shadow roots + child frames)
+over a browser a HOST owns, instead of a hand-rolled DOM walk that goes blind at every boundary.
+Three new runtime-checkable ports in `zu_core.ports`, each with a `zu-tools` reference impl,
+proven offline with a fake CDP target (no browser, network, or Docker).
+- **`ConnectedSurface`** (`zu.connected_surfaces`, #93) — `perceive()` returns a `SurfaceView`
+  flattened across open shadow roots + child frames; `act(SurfaceAction)` resolves an opaque
+  handle to its element ACROSS those boundaries (via the element's GLOBAL backend DOM-node id,
+  now threaded through the reducer's `handle_map` — an additive change) and re-perceives.
+  Reference impl `zu_tools.connected_surface.CdpConnectedSurface` over a minimal injectable
+  `CdpTarget` transport (one `send(method, params)` — a raw devtools client / `CDPSession.send`).
+- **`ConsentResolver`** (`zu.consent_resolvers`, #94) — `find()` picks the ACCEPT control by
+  WHOLE-WORD accessible name (never 'Manage preferences'/'Decline'; whole-word so 'ok' does not
+  match 'Bespoke', 'allow' not 'swallow'); `dismiss()` does the two-step (open panel → accept)
+  across frames + shadow and reports whether the banner was actually cleared.
+  Reference impl `zu_tools.consent.WholeWordConsentResolver`.
+- **`SelectionSatisfier`** (`zu.selection_satisfiers`, #95) — `satisfy_required()` sets every
+  UNSET required single-choice control (product-variant `<select>`) to its first VALID option
+  (placeholder/disabled skipped), content-free, and reports what it set so the #39 'control is
+  now selected' invariant can confirm each took.
+  Reference impl `zu_tools.selection.FirstOptionSelectionSatisfier`.
+
 ### Added — navigation-reliability layer, primitive 3: bounded live retry-on-stale
 Recover a detached element in the LIVE path by re-resolving the SAME control by IDENTITY
 (role+name+nth), bounded and event-sourced — bringing zu's replay-only soft-miss tolerance to
