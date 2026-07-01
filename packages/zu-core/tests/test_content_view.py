@@ -494,7 +494,9 @@ def test_surface_view_has_no_new_fields() -> None:
     # locale-independent structural signals (input type / autocomplete token / submit-ness)
     # the safety guards drive off, and the single-choice group id. These are control
     # metadata, never page PROSE, so the action view stays content-free (Issue #45 added the
-    # three structural signals; #120 added the group id — an opaque AX-container id).
+    # three structural signals; #120 added the group id — an opaque AX-container id;
+    # #127 added the enclosing label — a name-class signal, the label of a control's
+    # own group box, never free page prose).
     assert set(SurfaceAffordance.model_fields) == {
         "handle",
         "role",
@@ -505,4 +507,5 @@ def test_surface_view_has_no_new_fields() -> None:
         "autocomplete",
         "submits",
         "group",
+        "enclosing_label",
     }

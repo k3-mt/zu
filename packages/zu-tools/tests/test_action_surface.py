@@ -344,3 +344,38 @@ def test_normalize_group_is_none_without_a_container() -> None:
     nodes = [_ax("root", "RootWebArea", children=["r1"]), _ax("r1", "radio", "Lonely", backend=1)]
     surface = reduce_surface(normalize_axtree(nodes))
     assert surface.affordances[0].group is None
+
+
+def test_normalize_stamps_enclosing_label_from_card_heading() -> None:
+    # A list of service cards whose buttons are ALL named 'Select'; each button must
+    # carry its own card heading as the enclosing label so a hint can disambiguate (#127).
+    nodes = [
+        _ax("root", "RootWebArea", children=["list"]),
+        _ax("list", "list", children=["c1", "c2"]),
+        _ax("c1", "listitem", children=["h1", "b1"]),
+        _ax("h1", "heading", "Cut & Finish"),
+        _ax("b1", "button", "Select", backend=11),
+        _ax("c2", "listitem", children=["h2", "b2"]),
+        _ax("h2", "heading", "Full Head Colour"),
+        _ax("b2", "button", "Select", backend=12),
+    ]
+    surface = reduce_surface(normalize_axtree(nodes))
+    selects = sorted((a.enclosing_label or "") for a in surface.affordances if a.label == "Select")
+    assert selects == ["Cut & Finish", "Full Head Colour"]
+
+
+def test_enclosing_label_prefers_container_own_name_over_heading() -> None:
+    nodes = [
+        _ax("root", "RootWebArea", children=["g"]),
+        _ax("g", "group", "Colour", children=["h", "r1"]),  # group has its own name
+        _ax("h", "heading", "Ignored heading"),
+        _ax("r1", "radio", "Red", backend=1),
+    ]
+    surface = reduce_surface(normalize_axtree(nodes))
+    assert surface.affordances[0].enclosing_label == "Colour"
+
+
+def test_enclosing_label_is_none_without_a_labelled_container() -> None:
+    nodes = [_ax("root", "RootWebArea", children=["b"]), _ax("b", "button", "Go", backend=1)]
+    surface = reduce_surface(normalize_axtree(nodes))
+    assert surface.affordances[0].enclosing_label is None

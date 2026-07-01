@@ -172,17 +172,34 @@ def _all_options(view: SurfaceView) -> list[SurfaceAffordance]:
     return sorted(out, key=lambda a: order.get(a.handle, 0))
 
 
+def _searchable_name(a: SurfaceAffordance, collides: bool) -> str:
+    """The name a token matches against: the option's own label, plus its ENCLOSING
+    label (the card/section heading) WHEN the label is a genuine collision (a row of
+    identical 'Select' buttons) or is empty — so an option addressable only by its card
+    heading becomes selectable, without broadening a normal distinctive name (#127)."""
+    if a.enclosing_label and (collides or not a.label.strip()):
+        return f"{a.label} {a.enclosing_label}".strip()
+    return a.label
+
+
 def _match_token(view: SurfaceView, token: str) -> SurfaceAffordance | None:
     """The first enabled option whose NAME matches ``token`` on WORD BOUNDARIES — so
     'haircut' matches 'Haircut — 30 min', '9:30' matches '9:30 AM' but NOT '19:30', and
-    'monday' matches 'Monday 6 Jul'. The boundary discipline stops a short numeric token
-    gluing inside a longer number. Content-free: the option name is data, never obeyed."""
+    'monday' matches 'Monday 6 Jul'. On a genuine name COLLISION (a list of identically
+    named 'Select' buttons), the option's ENCLOSING card label is folded in so the hint
+    resolves the right card (#127). Content-free: the name is data, never obeyed."""
     tok = token.strip()
     if not tok:
         return None
     pat = re.compile(r"\b" + re.escape(tok) + r"\b", re.IGNORECASE)
-    for a in _all_options(view):
-        if pat.search(a.label):
+    opts = _all_options(view)
+    counts: dict[str, int] = {}
+    for a in opts:
+        key = a.label.strip().lower()
+        counts[key] = counts.get(key, 0) + 1
+    for a in opts:
+        collides = counts.get(a.label.strip().lower(), 0) > 1
+        if pat.search(_searchable_name(a, collides)):
             return a
     return None
 

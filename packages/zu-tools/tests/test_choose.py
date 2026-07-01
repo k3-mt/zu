@@ -197,3 +197,63 @@ async def test_apply_hint_selects_a_native_select_option() -> None:
 def test_inspect_no_hint_is_applicable_on_an_unset_select() -> None:
     combo = view(aff("sz", "combobox", "Size", value=""))
     assert ChooseOne().inspect(combo).applicable is True
+
+
+# --- #127: repeated-card lists + disambiguation by enclosing label ----------
+
+def _card(handle: str, label: str, enclosing: str) -> SurfaceAffordance:
+    return SurfaceAffordance(handle=handle, role="button", label=label, enclosing_label=enclosing)
+
+
+def test_disambiguates_identical_select_buttons_by_card_heading() -> None:
+    # A service list whose buttons are ALL 'Select' — selectable only by each card's
+    # enclosing heading (#127). The treatwell shape.
+    v = view(
+        _card("a1", "Select", "Cut & Finish"),
+        _card("a2", "Select", "Full Head Colour"),
+        _card("a3", "Select", "Blow Dry"),
+    )
+    assert chosen(v, "Colour") == "a2"     # matched via the enclosing card heading
+    assert chosen(v, "Blow Dry") == "a3"
+
+
+def test_does_not_fold_enclosing_label_when_names_are_distinctive() -> None:
+    # No name collision → the enclosing label is NOT folded, so a normal distinctive
+    # name is never broadened (a hint matching only the shared card container fails).
+    v = view(
+        _card("a1", "Haircut", "Salon A"),
+        _card("a2", "Colour", "Salon A"),
+    )
+    assert resolve(v, "Salon") is None
+    assert chosen(v, "Haircut") == "a1"
+
+
+def test_empty_named_option_is_addressable_by_enclosing_label() -> None:
+    v = view(_card("a1", "", "Monday 6 Jul"), _card("a2", "", "Tuesday 7 Jul"))
+    assert chosen(v, "Tuesday") == "a2"
+
+
+def test_positional_hint_picks_from_a_repeated_card_list() -> None:
+    v = view(_card("a1", "Select", "Cut"), _card("a2", "Select", "Colour"), _card("a3", "Select", "Wax"))
+    assert chosen(v, "first") == "a1"
+    assert chosen(v, "last") == "a3"
+
+
+async def test_apply_chooses_the_named_card_and_verifies_advance() -> None:
+    before = view(_card("a1", "Select", "Cut & Finish"), _card("a2", "Select", "Full Colour"))
+    after = view(SurfaceAffordance(handle="b1", role="heading", label="Choose a time"))
+    surface = ScriptedSurface(before, transitions={("a2", "click"): after})
+
+    outcome = await ChooseOne().apply(surface, hint="Colour")
+
+    assert outcome.progress == "advance"
+    assert surface.acted == [("a2", "click")]  # picked the 'Full Colour' card, not the first
+
+
+async def test_apply_hinted_card_that_selects_a_committing_control_is_refused() -> None:
+    # A run that includes a committing control must never be chosen by choose_one.
+    v = view(
+        SurfaceAffordance(handle="a1", role="button", label="Pay now", enclosing_label="Total"),
+        SurfaceAffordance(handle="a2", role="button", label="Pay now", enclosing_label="Deposit"),
+    )
+    assert resolve(v, "Deposit") is None  # committing controls are not candidates
