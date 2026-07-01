@@ -150,6 +150,11 @@ def browser_egress_spec(
     out-of-the-box default until the run provisions one) it falls back to
     ``network: True`` but STILL carries the allowlist, so the tool never launches
     the *unscoped* form again.
+
+    The no-proxy fallback is unrestricted egress, so it carries the explicit
+    ``allow_unrestricted_egress`` opt-in the backend requires (F38): the choice is
+    a deliberate, logged fallback rather than an accidental default, and callers
+    who want it enforced should provision the proxy for the ``isolated`` path.
     """
     allowlist = sorted(set(target_hosts))
     spec: dict[str, Any] = {"allowlist": allowlist}
@@ -162,5 +167,8 @@ def browser_egress_spec(
     else:
         # No proxy provisioned: the honest declaration is still open egress, but
         # the allowlist is attached for a firewall-capable backend to enforce.
+        # Unrestricted egress is opted into explicitly (F38) so the backend permits
+        # it rather than refusing an accidental unscoped launch.
         spec["network"] = True
+        spec["allow_unrestricted_egress"] = True
     return spec
