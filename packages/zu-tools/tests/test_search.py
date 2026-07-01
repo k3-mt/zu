@@ -141,3 +141,45 @@ def test_shipped_default_still_constructs_with_exa_host() -> None:
     # single Exa host — the fix does not regress the supported path.
     assert WebSearch(api_key="k").egress == frozenset({"api.exa.ai"})
     assert WebSearch(connector="exa", api_key="k").egress == frozenset({"api.exa.ai"})
+
+
+# --- SearxngConnector — self-hosted metasearch backend (no key) ------------------- #
+
+def _searxng_transport(results: list[dict], *, capture: dict | None = None) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if capture is not None:
+            capture["url"] = str(request.url)
+            capture["method"] = request.method
+        return httpx.Response(200, json={"results": results})
+
+    return httpx.MockTransport(handler)
+
+
+def test_searxng_is_a_registered_connector() -> None:
+    from zu_tools.search import _CONNECTORS
+    assert "searxng" in _CONNECTORS
+
+
+async def test_searxng_reduces_json_dedupes_and_hits_json_api() -> None:
+    cap: dict = {}
+    tool = WebSearch(connector="searxng", num_results=10, transport=_searxng_transport([
+        {"title": "Pall Mall Barbers — Book", "url": "https://pallmallbarbers.example/book", "engine": "startpage"},
+        {"title": "Booksy", "url": "https://booksy.example/s/barber", "engine": "duckduckgo"},
+        {"title": "dupe", "url": "https://booksy.example/s/barber", "engine": "brave"},   # same url again
+        {"title": "no url", "url": ""},                                                    # dropped
+    ], capture=cap))
+    out = await tool(None, "barber london book")
+    assert [r["url"] for r in out["results"]] == [
+        "https://pallmallbarbers.example/book", "https://booksy.example/s/barber"]
+    assert cap["method"] == "GET" and "/search" in cap["url"] and "format=json" in cap["url"]
+
+
+async def test_searxng_egress_scoped_to_the_self_hosted_instance(monkeypatch) -> None:
+    monkeypatch.setenv("SEARXNG_URL", "http://searx.internal:8888")
+    tool = WebSearch(connector="searxng", transport=_searxng_transport([]))
+    assert tool.egress == frozenset({"searx.internal"})   # our instance, never the open web
+
+
+def test_searxng_needs_no_key() -> None:
+    # Unlike Exa, constructing + reporting egress requires no api key at all.
+    assert WebSearch(connector="searxng").egress  # constructs; no RuntimeError for a missing key
