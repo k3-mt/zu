@@ -220,7 +220,7 @@ for deterministic replay.
 Every built-in above is registered through the **same** plugin API you'd use for your
 own — which is how we prove the plugin system is real, not a second-class add-on.
 
-## The five-minute promise (real today)
+## The five-minute promise (offline, deterministic)
 
 See the whole arc in one command — zero setup, no API key, no Docker:
 
@@ -230,9 +230,11 @@ zu demo --offline --type escalation
 
 It fetches a page, **fails on JavaScript, escalates to a browser**, and returns
 **validated** structured data, then prints the queryable event log — all three
-pillars in one run, deterministic with the fake model and saved fixtures. Drop
-`--offline` and add `--model claude-sonnet-4-6` (with a key) to watch a real model
-make the same escalation decision.
+pillars in one run, deterministic with the fake model and saved fixtures. The
+escalation demo runs **offline only today**: the live path (`--type escalation`
+without `--offline`) raises, because it needs Docker and a published tier-2
+browser image that is not available yet. The `web` demo (`--type web`, tier 1)
+does run live with `--model` and a key.
 
 ## 🏗️ Architecture in one breath
 
@@ -251,6 +253,8 @@ zu/
     zu-checks/      # detectors (empty, error, js-shell, bot-wall) + validators (schema, grounding)
     zu-backends/    # local-docker sandbox + sqlite/jsonl event sinks
     zu-huggingface/ # HuggingFace task models as typed tools/detectors/validators
+    zu-patterns/    # Pattern recognizers + learned FSM site-map + MPC (the policy-prior/guided-search layer)
+    zu-shadow/      # author an agent by demonstration: record a human session → synthesize agent + rail
     zu-redteam/     # the plugin-test gate + adversarial red team (zu test-plugin)
     zu-cli/         # the `zu` command + `zu serve` (HTTP)
     zu/             # the `import zu` embed facade (published as zu-runtime)
@@ -266,12 +270,15 @@ zu/
 The v1 core is complete and green: the typed contracts, the six ports, the
 plugin registry, a scripted (fake) model provider, the event spine (SQLite sink
 + append-before-notify bus + projection), the deterministic interpreter loop
-with tier-1 tools and budgets, the escalation ladder and the tier-2 browser,
+with tier-1 tools and budgets, the escalation ladder (the tier-2 browser runs in
+the offline replay; the **live** tier-2 path is not complete — it needs Docker and
+a published browser image, and currently raises),
 validation against the event log (schema + grounding), the real `anthropic` and
 `openai-compatible` model adapters, the **config system** (`zu run task.yaml`
 wires a whole run from a file, the model a one-line swap), and the **killer
 demo** — the full fetch → fail-on-JS → escalate → validated-result arc, runnable
-with zero setup. What remains is breadth behind the existing ports, not new core.
+offline with zero setup. What remains is breadth behind the existing ports (and
+the live tier-2 lane), not new core.
 
 ## Documentation
 

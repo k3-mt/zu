@@ -21,7 +21,7 @@ classifiers = [
 # (zu-tools, zu-providers) are LAZY-imported inside the fixtures that need them,
 # so the dep graph stays acyclic — every package can depend on zu-testing for
 # dev without zu-testing depending back on them.
-dependencies = ["zu-core==0.8.0", "pytest>=8", "httpx"]
+dependencies = ["zu-core==0.8.0", "pytest>=8", "httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"

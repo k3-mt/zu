@@ -23,6 +23,7 @@ on it, because they gate autonomous output bound for production.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,12 +42,36 @@ class GuardrailViolation:
 
 @dataclass
 class GuardrailReport:
+    """The guardrail verdict PLUS provenance for its resilience score.
+
+    A bare score is untraceable — you can't tell which fixture (or which authored
+    config) it was computed over, so a stale score can outlive the inputs it was
+    true for. ``fixture_hash`` is the content hash of the exact captured bundle the
+    perturbations replayed against, and ``config_hash`` the hash of the authored
+    surface (agent.yaml + tool source) G3 scanned. Both are CONTENT hashes — no
+    ``time.time()``, so a re-run over the same inputs yields an identical
+    ``provenance``, and any change to the fixture or config changes it. This is how
+    a score is bound to, and audit-traceable to, the exact inputs it scored."""
+
     violations: list[GuardrailViolation] = field(default_factory=list)
     resilience: float = 1.0
+    fixture_hash: str | None = None
+    config_hash: str | None = None
 
     @property
     def passed(self) -> bool:
         return not self.violations
+
+    @property
+    def provenance(self) -> str:
+        """A single stable hash binding the score to ALL its inputs (fixture +
+        config). Deterministic: identical inputs → identical provenance; any change
+        to either → a different one. ``None`` only if neither input hash was set."""
+        parts = [p for p in (self.fixture_hash, self.config_hash) if p]
+        if not parts:
+            return "sha256:" + hashlib.sha256(b"").hexdigest()
+        joined = "\n".join(parts)
+        return "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def _config_text(agent_dir: str | Path) -> str:
@@ -99,4 +124,13 @@ async def enforce_guardrails(
                 "agent config or a tool's source — a generic agent must derive it, not "
                 "hardcode it"))
 
-    return GuardrailReport(violations=violations, resilience=hr.resilience)
+    # Provenance: content hashes of the exact inputs scored (the captured bundle and
+    # the authored surface G3 scanned). Both deterministic — a re-run over the same
+    # inputs yields the same hashes, so the score is traceable to what produced it.
+    config_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return GuardrailReport(
+        violations=violations,
+        resilience=hr.resilience,
+        fixture_hash=bundle.content_hash(),
+        config_hash=config_hash,
+    )

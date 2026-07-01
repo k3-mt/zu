@@ -299,13 +299,44 @@ class ConfigError(Exception):
     user with a clear message rather than a traceback."""
 
 
+def _explain_validation_error(exc: Any, *, source: str | None = None) -> str:
+    """Turn a Pydantic ``ValidationError`` into a short, actionable message.
+
+    A raw ``ValidationError`` dumps every failing location as a multi-line blob
+    with a docs URL — accurate but hostile to read for a config typo. This walks
+    the structured ``.errors()`` and, per failure, names the offending field (its
+    dotted path), what was expected, and the file when known — so ``containment:
+    strict`` yields *"containment: containment must be 'audit' or 'required'"*,
+    not a pydantic traceback. Generic: it reads whatever fields Pydantic reports,
+    so it stays correct as the config schema grows."""
+    try:
+        errors = exc.errors()
+    except (AttributeError, TypeError):  # not a ValidationError shape — fall back
+        return f"{source + ': ' if source else ''}{exc}"
+    lines: list[str] = []
+    for err in errors:
+        loc = ".".join(str(p) for p in err.get("loc", ())) or "(root)"
+        msg = err.get("msg", "invalid value")
+        etype = err.get("type", "")
+        if etype == "missing":
+            detail = f"{loc}: required field is missing"
+        else:
+            detail = f"{loc}: {msg}"
+        lines.append(detail)
+    where = f"{source}: " if source else ""
+    if len(lines) == 1:
+        return f"{where}{lines[0]}"
+    joined = "; ".join(lines)
+    return f"{where}invalid config ({len(lines)} problems) — {joined}"
+
+
 def load_config(path: str) -> RunConfig:
     from pydantic import ValidationError
 
     try:
         return RunConfig.model_validate(_read_doc(path))
     except ValidationError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
+        raise ConfigError(_explain_validation_error(exc, source=path)) from exc
 
 
 def load_task(path: str, *, default_budget: Budget | None = None) -> TaskSpec:
@@ -319,7 +350,7 @@ def load_task(path: str, *, default_budget: Budget | None = None) -> TaskSpec:
     try:
         return TaskSpec.model_validate(doc)
     except ValidationError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
+        raise ConfigError(_explain_validation_error(exc, source=path)) from exc
 
 
 # --- coercion (a config/task may arrive as a path, a dict, or a typed object) -
@@ -437,7 +468,7 @@ def coerce_config(source: Any) -> RunConfig:
         try:
             return RunConfig.model_validate(source)
         except ValidationError as exc:
-            raise ConfigError(f"invalid config: {exc}") from exc
+            raise ConfigError(_explain_validation_error(exc, source="config")) from exc
     raise ConfigError(f"unsupported config type: {type(source).__name__}")
 
 
@@ -456,10 +487,14 @@ def coerce_task(source: Any, default_budget: Budget, *, allow_paths: bool) -> Ta
             raise ConfigError("task must be a JSON object (the task spec)")
         return load_task(source, default_budget=default_budget)
     if isinstance(source, dict):
+        from pydantic import ValidationError
+
         doc = dict(source)
         doc.setdefault("budget", default_budget.model_dump())
         try:
             return TaskSpec.model_validate(doc)
+        except ValidationError as exc:
+            raise ConfigError(_explain_validation_error(exc, source="task")) from exc
         except Exception as exc:  # noqa: BLE001 - surface as a ConfigError, not a raw pydantic error
             raise ConfigError(f"invalid task: {exc}") from exc
     raise ConfigError(f"unsupported task type: {type(source).__name__}")

@@ -265,6 +265,44 @@ async def test_captcha_detector_pauses_the_run_for_a_human() -> None:
     assert req.payload["reason"] == "captcha"
 
 
+def test_shared_wall_markers_live_in_a_neutral_module_neither_detector_owns() -> None:
+    # O11 — the wall marker sets are shared by bot-wall (tier climb) and captcha
+    # (human route). They must live in a NEUTRAL module both import, so neither
+    # detector reaches into the other's internals (a hidden coupling). This test
+    # fails on the old code, where human_gate imported the markers FROM bot_wall.
+    import ast
+    from pathlib import Path
+
+    from zu_checks.detectors import _markers, bot_wall, human_gate
+
+    # The one source of truth is the neutral module, and it defines all three sets.
+    for attr in ("STRONG_MARKERS", "WEAK_MARKERS", "CLOUDFLARE_FINGERPRINTS"):
+        assert hasattr(_markers, attr), f"{attr} must live in the neutral _markers module"
+
+    # Both detectors bind the SAME objects the neutral module owns (identity, not
+    # a re-declared copy that could drift).
+    assert bot_wall.STRONG_MARKERS is _markers.STRONG_MARKERS
+    assert bot_wall.WEAK_MARKERS is _markers.WEAK_MARKERS
+    assert bot_wall.CLOUDFLARE_FINGERPRINTS is _markers.CLOUDFLARE_FINGERPRINTS
+    assert human_gate.STRONG_MARKERS is _markers.STRONG_MARKERS
+    assert human_gate.WEAK_MARKERS is _markers.WEAK_MARKERS
+    assert human_gate.CLOUDFLARE_FINGERPRINTS is _markers.CLOUDFLARE_FINGERPRINTS
+
+    # And crucially: human_gate must NOT import the markers from bot_wall (the old
+    # hidden coupling). Parse its imports and assert no marker name comes via bot_wall.
+    src = Path(human_gate.__file__).read_text()
+    tree = ast.parse(src)
+    marker_names = {"STRONG_MARKERS", "WEAK_MARKERS", "CLOUDFLARE_FINGERPRINTS",
+                    "_STRONG_MARKERS", "_WEAK_MARKERS", "_CLOUDFLARE_FINGERPRINTS"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and "bot_wall" in node.module:
+            imported = {alias.name for alias in node.names}
+            assert not (imported & marker_names), (
+                "human_gate must not import wall markers from bot_wall — "
+                f"got {imported & marker_names} (use the neutral _markers module)"
+            )
+
+
 def test_detectors_discoverable() -> None:
     reg = Registry()
     reg.discover()

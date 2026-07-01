@@ -123,7 +123,16 @@ class FakeSandboxBackend:
         self.exec_calls.append(call)
         if self.exec_raises:
             raise RuntimeError("render blew up")
-        return {"status": 200, "html": self.rendered, "url": call.args["url"]}
+        # Generic over ANY ToolCall: the render-shaped observation (with the
+        # echoed page ``url``) is only produced when the call actually carries a
+        # ``url`` arg. A call for some other tool — whose args lack ``url`` — gets
+        # a sensible generic observation instead of a KeyError, so this backend is
+        # not over-fit to the browser-render {url} contract.
+        args = getattr(call, "args", None) or {}
+        obs = {"status": 200, "html": self.rendered}
+        if isinstance(args, dict) and "url" in args:
+            obs["url"] = args["url"]
+        return obs
 
     async def exec_entrypoint(self, sandbox: Any, argv: list[str], *,
                               environment: dict | None = None,

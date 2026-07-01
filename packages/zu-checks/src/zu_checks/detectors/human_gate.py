@@ -23,10 +23,10 @@ from __future__ import annotations
 from zu_core.ports import RunContext, Scope, Severity, Verdict
 
 from . import _contains_any, _html_of
-from .bot_wall import (
-    _CLOUDFLARE_FINGERPRINTS,
-    _STRONG_MARKERS,
-    _WEAK_MARKERS,
+from ._markers import (
+    CLOUDFLARE_FINGERPRINTS,
+    STRONG_MARKERS,
+    WEAK_MARKERS,
 )
 
 
@@ -44,8 +44,8 @@ class CaptchaDetector:
 
     def inspect(self, ctx: RunContext) -> Verdict | None:
         html = _html_of(ctx)
-        strong = _contains_any(html, _STRONG_MARKERS)
-        weak = _contains_any(html, _WEAK_MARKERS) and _contains_any(html, _CLOUDFLARE_FINGERPRINTS)
+        strong = _contains_any(html, STRONG_MARKERS)
+        weak = _contains_any(html, WEAK_MARKERS) and _contains_any(html, CLOUDFLARE_FINGERPRINTS)
         if strong or weak:
             return Verdict(
                 severity=Severity.ESCALATE,

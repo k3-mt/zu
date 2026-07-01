@@ -621,6 +621,40 @@ def test_non_mapping_top_level_is_rejected(tmp_path):
         load_config(bad)
 
 
+# --- O4: a malformed config surfaces an actionable message, not a pydantic blob ---
+
+
+def test_malformed_config_names_the_offending_field(tmp_path):
+    """O4: a bad field value yields a readable message naming the field + the file,
+    not a raw multi-line pydantic ValidationError dump."""
+    bad = _write(
+        tmp_path, "zu.yaml",
+        "provider: { name: scripted }\ncontainment: strict\n",  # not audit/required
+    )
+    with pytest.raises(ConfigError) as ei:
+        load_config(bad)
+    msg = str(ei.value)
+    assert "containment" in msg           # names the offending field
+    assert "audit" in msg and "required" in msg  # what was expected
+    assert bad in msg                     # the file, when known
+    # NOT the raw pydantic blob: no docs URL, no traceback-y "validation error(s) for".
+    assert "For further information visit" not in msg
+    assert "validation error" not in msg.lower()
+    # The underlying error stays chained for debugging.
+    assert ei.value.__cause__ is not None
+
+
+def test_missing_required_provider_is_reported_as_a_missing_field(tmp_path):
+    """A config omitting the required `provider` block names it as missing, cleanly."""
+    bad = _write(tmp_path, "zu.yaml", "budget: { max_usd: 1.0 }\n")
+    with pytest.raises(ConfigError) as ei:
+        load_config(bad)
+    msg = str(ei.value)
+    assert "provider" in msg
+    assert "missing" in msg.lower()
+    assert "For further information visit" not in msg
+
+
 # --- the whole thing: `zu run` end to end, fully offline ---------------------
 
 
@@ -696,3 +730,17 @@ def test_zu_run_reports_config_errors_without_a_traceback(tmp_path):
     result = runner.invoke(app, ["run", "/no/such.yaml"])
     assert result.exit_code == 2
     assert "config error" in result.output
+
+
+def test_zu_run_offline_without_fixtures_is_an_offline_error_not_config(tmp_path):
+    """O8: `zu run --offline` on an agent with no captured fixtures surfaces an
+    OFFLINE/fixture error, not a mislabeled 'config error'. The agent.yaml is valid;
+    the missing thing is the capture — the message must point there (`zu capture`)."""
+    agent = _offline_agent(tmp_path, str(tmp_path / "run.db"))  # valid config, no fixtures/
+
+    result = runner.invoke(app, ["run", agent, "--offline"])
+
+    assert result.exit_code == 2
+    assert "offline error" in result.output           # its own error class
+    assert "config error" not in result.output        # NOT masked as a config error
+    assert "capture" in result.output                 # actionable: run `zu capture`

@@ -77,3 +77,33 @@ async def test_g2_resilience_threshold_violation(tmp_path: Path) -> None:
 
     assert not report.passed
     assert any(v.rule == "resilience" for v in report.violations)
+
+
+async def test_report_carries_stable_provenance_of_its_inputs() -> None:
+    """O14: the resilience score is traceable — the report carries a CONTENT hash of
+    the exact fixture (and config) it was scored over, stable across runs (not a clock)."""
+    spec, cfg = load_agent(str(_BROWSER_WIDGET / "agent.yaml"))
+
+    r1 = await enforce_guardrails(spec, cfg, _bundle(), _BROWSER_WIDGET)
+    r2 = await enforce_guardrails(spec, cfg, _bundle(), _BROWSER_WIDGET)
+
+    # Provenance is present and is a content hash of the fixture that was scored.
+    assert r1.fixture_hash and r1.fixture_hash.startswith("sha256:")
+    assert r1.fixture_hash == _bundle().content_hash()
+    # Deterministic: same fixture + config → identical provenance (no time.time()).
+    assert r1.provenance == r2.provenance
+    assert r1.fixture_hash == r2.fixture_hash
+
+
+async def test_provenance_changes_when_the_scored_fixture_changes() -> None:
+    """A different fixture yields a different provenance hash — the score can't be
+    silently reattributed to inputs it wasn't computed over."""
+    spec, cfg = load_agent(str(_BROWSER_WIDGET / "agent.yaml"))
+    base = await enforce_guardrails(spec, cfg, _bundle(), _BROWSER_WIDGET)
+
+    mutated = copy.deepcopy(_bundle())
+    mutated.moves.append({"tool": "noop", "args": {}})
+    changed = await enforce_guardrails(spec, cfg, mutated, _BROWSER_WIDGET)
+
+    assert changed.fixture_hash != base.fixture_hash
+    assert changed.provenance != base.provenance

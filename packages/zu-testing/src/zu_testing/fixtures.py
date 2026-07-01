@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from .doubles import FakeSandboxBackend, FakeSink
-from .factories import fetch_tool, registry_with, scripted_provider
+from .factories import fetch_tool, registry_with, scripted_provider, search_tool
 
 
 @pytest.fixture
@@ -33,6 +33,16 @@ def make_sandbox_backend() -> Callable[..., FakeSandboxBackend]:
 def make_fetch_tool() -> Callable[..., Any]:
     """Factory for the real http_fetch tool over a mock transport (no network)."""
     return fetch_tool
+
+
+@pytest.fixture
+def make_search_tool() -> Callable[..., Any]:
+    """Factory for the real web_search tool over a mock transport (no network).
+
+    The parallel of ``make_fetch_tool``: the real ``web_search`` runs, only the
+    search API is faked. Pass ``results`` (a list of ``{"title", "url"}``) to
+    script the returned hits; the default is one hit with a valid absolute URL."""
+    return search_tool
 
 
 @pytest.fixture
@@ -57,10 +67,12 @@ def agent_runner() -> Callable[..., Awaitable[tuple[Any, list[Any]]]]:
         tools: dict[str, Any] | None = None,
         detectors: dict[str, Any] | None = None,
         validators: dict[str, Any] | None = None,
-        query: str = "q",
+        query: str = "exercise the agent under test",
         spec: Any = None,
-        containment: str = "audit",
+        containment: str | None = None,
     ) -> tuple[Any, list[Any]]:
+        import inspect
+
         from zu_core.bus import EventBus
         from zu_core.contracts import TaskSpec
         from zu_core.loop import run_task
@@ -69,6 +81,11 @@ def agent_runner() -> Callable[..., Awaitable[tuple[Any, list[Any]]]]:
         registry = registry_with(tools=tools, detectors=detectors, validators=validators)
         bus = EventBus()
         task = spec if spec is not None else TaskSpec(query=query)
+        # Defer to the loop's REAL containment default when the caller doesn't
+        # override it, so this fixture can't drift from ``run_task``'s floor —
+        # sourced from the signature, never a duplicated literal.
+        if containment is None:
+            containment = inspect.signature(run_task).parameters["containment"].default
         try:
             result = await run_task(task, provider, registry, bus, containment=containment)
             return result, await bus.query()

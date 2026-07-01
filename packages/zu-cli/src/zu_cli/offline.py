@@ -51,8 +51,9 @@ _JSON_OPENERS = frozenset(b"{ \t\r\n")
 
 
 class OfflineError(RuntimeError):
-    """A fixtures bundle is missing or malformed — surfaced as a clean ConfigError
-    by the CLI so ``--offline`` without a capture fails with an actionable message."""
+    """A fixtures bundle is missing or malformed — surfaced by the CLI as its OWN
+    ``offline error`` (not a config error), so ``--offline`` without a capture fails
+    with an actionable message that points at ``zu capture`` rather than the config."""
 
 
 # --- the bundle --------------------------------------------------------------
@@ -75,6 +76,22 @@ class Bundle:
              "moves": self.moves, "observations": self.observations},
             indent=2,
         )
+
+    def content_hash(self) -> str:
+        """A stable SHA-256 over the bundle's captured content — the fixture's
+        identity. Sorted-key, separator-fixed JSON so the same capture always
+        hashes the same (order- and whitespace-insensitive), which is what makes it
+        usable as deterministic provenance for anything scored over this bundle
+        (e.g. a GuardrailReport's resilience score). NOT a clock — reproducible."""
+        import hashlib
+
+        canonical = json.dumps(
+            {"task": self.task, "model": self.model,
+             "moves": self.moves, "observations": self.observations},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @classmethod
     def from_json(cls, text: str) -> Bundle:
