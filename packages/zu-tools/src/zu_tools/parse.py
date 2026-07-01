@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from selectolax.parser import HTMLParser
 
+from .limits import MAX_DOCUMENT_BYTES
+
 # Defensive cap on the HTML handed to the parser. ``http_fetch`` caps what it
 # retrieves, but ``html_parse`` is a standalone tool whose ``html`` arg can come
 # straight from the model/task with no cap — a huge hostile document is a CPU/
-# memory DoS in-process. Mirror the fetch byte cap (5 MB) and reject above it.
-_MAX_HTML_CHARS = 5_000_000
+# memory DoS in-process. Mirror the fetch byte cap (5 MB) and reject above it —
+# single-sourced with http_fetch's cap (issue #65 O12) in ``.limits``.
+_MAX_HTML_CHARS = MAX_DOCUMENT_BYTES
 
 
 class HtmlParse:

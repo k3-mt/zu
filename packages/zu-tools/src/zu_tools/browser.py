@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, BrowserSessionHandle, SessionBackend
 
 from ._session import close_run, get_or_open, run_key
+from .action_schema import validate_actions
 from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
 from .settle import settle, settle_budget_ms
@@ -197,6 +198,15 @@ class Browser:
         if op == "act":
             if self._session is None:
                 return {"error": "no open session; call browser(op=open, url=...) first"}
+            # Validate the model-supplied action args at the tool boundary BEFORE
+            # forwarding them to the live session (issue #65 F52): each action must
+            # be a well-formed {click|fill|select|wait_for: <selector>, value?, near?}
+            # | {wait_ms:<n>} — allowed op, selector/value typed, no stray fields.
+            # A malformed action is refused here, never forwarded to the sandbox.
+            if actions:
+                action_err = validate_actions(actions)
+                if action_err is not None:
+                    return {"error": action_err, "blocked": "invalid_action"}
             cmd = {"op": "act"}
             if actions:
                 cmd["actions"] = actions

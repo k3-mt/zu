@@ -57,3 +57,28 @@ async def test_recall_caps_returned_text() -> None:
 async def test_recall_is_pure_cpu_tier_1() -> None:
     r = Recall()
     assert r.tier == 1 and r.capabilities == frozenset() and r.egress == frozenset()
+
+
+async def test_recall_excerpt_aligned_for_length_changing_unicode() -> None:
+    # Issue #65 F53: 'İ'.lower() is TWO code points, so ``text.lower().find(q)``
+    # returns an index into the LOWERED string that is offset from the original by
+    # one per such char. The old code sliced the ORIGINAL by that lowered index and
+    # a window that mispositioned the match. With ENOUGH length-changing chars ahead
+    # of the needle the accumulated delta (300) exceeds the ±240 window, so the old
+    # slice misses the needle ENTIRELY — proving the bug, not just a cosmetic shift.
+    # The fix does index math on the original string, so the excerpt is aligned and
+    # the needle is present.
+    text = "İ" * 300 + ("x" * 50) + "NEEDLE" + ("y" * 50)
+    out = await Recall()(_ctx([_ev("http_fetch", content=text)]), query="needle")
+    assert out["matches"] == 1
+    assert "NEEDLE" in out["content"]  # old math sliced past it and returned ''
+
+
+async def test_recall_excerpt_is_a_slice_of_the_original() -> None:
+    # The returned excerpt must be a real slice of the ORIGINAL text (correct
+    # case + surrounding context), not of a length-changed ``lower()`` view.
+    text = "İ" * 5 + "prefix-context " + "FINDME" + " trailing-context"
+    out = await Recall()(_ctx([_ev("http_fetch", content=text)]), query="findme")
+    assert out["matches"] == 1
+    assert "FINDME" in out["content"]  # original case preserved
+    assert "prefix-context" in out["content"] and "trailing-context" in out["content"]

@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from zu_core.ports import CAP_NET, CAP_SANDBOX, EGRESS_OPEN, SandboxBackend, ToolCall
 
+from .action_schema import validate_actions
 from .browser_egress import browser_egress_spec, contained_egress_config, egress_caveat
 from .net import validate_and_pin
 
@@ -161,6 +162,15 @@ class RenderDom:
         wait_ms: int | None = None, actions: list | None = None,
         capture_network: bool = False,
     ) -> dict:
+        # Validate the model-supplied action args at the tool boundary BEFORE any
+        # sandbox is leased (issue #65 F52): each action must be a well-formed
+        # {click|fill|select|wait_for: <selector>, value?, near?} | {wait_ms:<n>}
+        # — allowed op, selector/value typed, no stray fields. A malformed action
+        # is refused here (a clear error the model can act on), never forwarded.
+        if actions:
+            action_err = validate_actions(actions)
+            if action_err is not None:
+                return {"error": action_err, "blocked": "invalid_action"}
         # Apply the same host-level SSRF backstop tier-1 http_fetch uses, *before*
         # leasing a browser: escalating to tier 2 must not become a way to fetch
         # an internal address (cloud metadata, loopback, RFC1918) with the guard
