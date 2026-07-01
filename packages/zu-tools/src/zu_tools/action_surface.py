@@ -434,8 +434,10 @@ class ActionSurface:
         # Ask the session for the accessibility tree. The browser server returns
         # ``{axtree: [...CDP nodes...], title, url}``; an older server that lacks
         # the op returns an error, which we surface (not a crash). The url is passed
-        # so a reused same-host session re-navigates to the requested page.
-        resp = await self._session.send({"op": "axtree", "url": url})
+        # so a reused same-host session re-navigates to the requested page. ``html:
+        # True`` also requests the raw markup + the navigation status (issue #40) so
+        # the interactive arm carries the same signals the tier-1 fetch path does.
+        resp = await self._session.send({"op": "axtree", "url": url, "html": True})
         if not isinstance(resp, dict) or resp.get("axtree") is None:
             err = resp.get("error") if isinstance(resp, dict) else "bad session response"
             return {"error": f"could not capture accessibility tree: {err}"}
@@ -446,7 +448,19 @@ class ActionSurface:
             url=str(resp.get("url", url)),
             unlabeled_ratio=self.unlabeled_ratio,
         )
-        return self._emit(surface, run_key=key)
+        # Mirror the fetch/render path's ``{status, html}`` shape (issue #40) so a
+        # detector keyed on status>=400 or an iframe/script-src scan runs on the
+        # interactive arm, not only the render arm. Both are ADDITIVE and default to
+        # None when the live session cannot supply them (an older browser server that
+        # does not echo html/status) — never a crash, and backward compatible.
+        html = resp.get("html")
+        status = resp.get("status")
+        return self._emit(
+            surface,
+            run_key=key,
+            html=str(html) if isinstance(html, str) else None,
+            http_status=int(status) if isinstance(status, int) else None,
+        )
 
     @staticmethod
     async def _open_session(backend: SessionBackend, spec: dict, key: str) -> Any:
@@ -458,18 +472,36 @@ class ActionSurface:
             return await opener(spec, run_key=key)
         return await backend.open_session(spec)
 
-    def _emit(self, surface: Surface, *, run_key: str = "") -> dict:
+    def _emit(
+        self,
+        surface: Surface,
+        *,
+        run_key: str = "",
+        html: str | None = None,
+        http_status: int | None = None,
+    ) -> dict:
         """The surface as a loop-friendly observation. The handle map is HARNESS-SIDE:
         it is stored in the run's shared registry (so the pointer/vision resolve a
         handle the model only ever emits) AND on this instance (for the offline
         reduce-only path); it is NEVER returned in the model-visible observation. Only
         ``surface_blind`` (the flag the blind detector reads) and the affordance list
-        the model picks a handle from cross into the message."""
+        the model picks a handle from cross into the message.
+
+        The live arm also carries ``html`` (the raw DOM snapshot) and ``http_status``
+        (the last navigation's HTTP status), mirroring the tier-1 fetch/render shape so
+        the full detector pass (status>=400 errors, iframe/script-src widget scans) runs
+        on the interactive arm too (issue #40). Both are additive and are ``None`` on
+        the offline reduce path / when the session cannot supply them."""
         self._handle_map = dict(surface.handle_map)
         put_handle_map(run_key, surface.handle_map)
         return {
             "action_surface": surface.model_dump(exclude={"handle_map"}),
             "surface_blind": surface.blind,
+            # Additive, backward-compatible fields — consistent with fetch/render's
+            # ``{status, html}``. ``None`` when unavailable (offline reduce; older
+            # session that does not echo them), never absent-on-crash.
+            "html": html,
+            "http_status": http_status,
         }
 
     async def aclose(self) -> None:

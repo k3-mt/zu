@@ -146,25 +146,42 @@ async def test_tool_resolve_and_stale_handle() -> None:
 
 
 class _FakeAxSession:
-    def __init__(self, axtree: list[dict]) -> None:
+    def __init__(
+        self, axtree: list[dict], *, html: str | None = None, status: int | None = None
+    ) -> None:
         self._axtree = axtree
+        self._html = html
+        self._status = status
         self.closed = False
+        self.last_cmd: dict | None = None
 
     async def send(self, cmd: dict) -> dict:
         assert cmd["op"] == "axtree"
-        return {"axtree": self._axtree, "title": "Live", "url": cmd["url"]}
+        self.last_cmd = cmd
+        resp: dict = {"axtree": self._axtree, "title": "Live", "url": cmd["url"]}
+        # A live browser server echoes the raw markup + navigation status when asked
+        # (issue #40). A fake without them stays valid — the tool returns None.
+        if self._html is not None:
+            resp["html"] = self._html
+        if self._status is not None:
+            resp["status"] = self._status
+        return resp
 
     async def close(self) -> None:
         self.closed = True
 
 
 class _FakeAxBackend:
-    def __init__(self, axtree: list[dict]) -> None:
+    def __init__(
+        self, axtree: list[dict], *, html: str | None = None, status: int | None = None
+    ) -> None:
         self._axtree = axtree
+        self._html = html
+        self._status = status
         self.sessions: list[_FakeAxSession] = []
 
     async def open_session(self, spec: dict) -> _FakeAxSession:
-        s = _FakeAxSession(self._axtree)
+        s = _FakeAxSession(self._axtree, html=self._html, status=self._status)
         self.sessions.append(s)
         return s
 
@@ -182,9 +199,34 @@ async def test_tool_open_op_captures_and_reduces_live_tree() -> None:
     assert "handle_map" not in out  # harness-side only
     # The AUTHORITATIVE run-end teardown closes the shared session (not the tool's
     # aclose, which only drops its reference).
+    # Additive fields are present even when the session does not supply them: html is
+    # None, http_status is None (issue #40 backward compatibility).
+    assert "html" in out and out["html"] is None
+    assert "http_status" in out and out["http_status"] is None
     from zu_tools._session import close_run
     await close_run("run-open")
     assert backend.sessions[0].closed
+
+
+async def test_open_op_returns_html_and_http_status_when_the_session_supplies_them() -> None:
+    """The live read now carries ``html`` (raw DOM) and ``http_status`` (the last
+    navigation's HTTP status) alongside affordances/text/title, mirroring the tier-1
+    fetch/render ``{status, html}`` shape — so a status>=400 check and an
+    iframe/script-src scan run on the interactive arm (issue #40)."""
+    cdp = [{"role": {"value": "button"}, "name": {"value": "Buy"}, "ignored": False}]
+    markup = '<html><body><iframe src="//widget.test/x"></iframe>Not Found</body></html>'
+    backend = _FakeAxBackend(cdp, html=markup, status=404)
+    tool = ActionSurface(backend=backend, allow_private=True)
+    out = await tool(_AxCtx("run-html"), op="open", url="http://shop.test/missing")
+    # The additive signals a detector consumes are now on the interactive arm.
+    assert out["html"] == markup
+    assert out["http_status"] == 404
+    # And the tool actually asked the session for the markup (op=axtree, html=True).
+    assert backend.sessions[0].last_cmd == {
+        "op": "axtree", "url": "http://shop.test/missing", "html": True,
+    }
+    from zu_tools._session import close_run
+    await close_run("run-html")
 
 
 class _RunScopedAxBackend:

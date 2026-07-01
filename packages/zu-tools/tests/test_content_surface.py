@@ -159,10 +159,94 @@ def test_every_region_is_a_generic_descriptor_not_a_selector() -> None:
     assert regions, "the fixture should produce regions to check"
     for region in regions:
         _assert_generic_region(region)
-    # The toast error's region is the GENERIC kind, never the element's .toast class.
-    assert any(r == "toast" for r in regions)
+    # The genuine alert's region is the GENERIC 'alert' kind, never the element's
+    # .toast/.alert class selector (the fixture toast carries role=alert, so it is a
+    # real error routed to the 'alert' region — issue #73).
+    assert any(r == "alert" for r in regions)
     # The table region is the generic index, never a selector.
     assert any(r == "table:0" for r in regions)
+
+
+# --- issue #73: benign modals/toasts must NOT pollute the errors channel -----
+
+# A page with a benign Quick View modal + a cookie/promo toast (NO error semantics)
+# alongside a genuine assertive validation alert. The benign dialogs are containers,
+# not verdicts; only the assertive alert is an actual error. Class names are generic
+# structural hints ("...modal...", "...toast...") — never product/site strings.
+_BENIGN_MODAL_HTML = """
+<html><body>
+  <main><h1>Dog collar</h1><p>A sturdy dog collar in three sizes.</p></main>
+  <div class="quick-view-modal">
+    <h2>Quick view</h2>
+    <button aria-label="Close (esc)">Close</button>
+  </div>
+  <div class="cookie-toast">We use cookies. Accept?</div>
+  <div class="promo-dialog">Subscribe to our newsletter</div>
+  <div role="alert" aria-live="assertive">Please enter a valid postcode</div>
+</body></html>
+"""
+
+
+def test_benign_modal_and_toast_do_not_land_in_errors() -> None:
+    """A dismissible Quick View modal / cookie toast / promo dialog carries no error
+    signal, so it must NOT appear in ``errors`` — a modal is a container, not a
+    verdict (issue #73). Only the genuine assertive alert does."""
+    view = reduce_content([], _BENIGN_MODAL_HTML, url="http://shop.test/collar")
+    error_texts = " ".join(u.text for u in view.errors)
+    # The benign dialogs' text is NOT in errors — no false "validation error".
+    assert "Quick view" not in error_texts
+    assert "Close" not in error_texts
+    assert "cookies" not in error_texts
+    assert "newsletter" not in error_texts
+    # The genuine assertive alert IS an error.
+    assert "Please enter a valid postcode" in error_texts
+
+
+def test_a_genuine_error_signal_still_lands_in_errors() -> None:
+    """The positive half of the contract: a ``role=alert``/``aria-live=assertive``
+    region and an error-CLASSED region both carry a real error signal and DO enter
+    ``errors`` (issue #73)."""
+    html = """
+    <html><body>
+      <div role="alert">Payment failed</div>
+      <div class="form-error">Card number is invalid</div>
+      <div class="quick-view-modal">Quick view</div>
+    </body></html>
+    """
+    view = reduce_content([], html, url="http://shop.test/pay")
+    texts = " ".join(u.text for u in view.errors)
+    assert "Payment failed" in texts
+    assert "Card number is invalid" in texts
+    assert "Quick view" not in texts
+
+
+def test_alertdialog_is_an_error_but_plain_dialog_is_not() -> None:
+    """An ``alertdialog`` IS an error dialog (e.g. 'Payment failed'); a plain content
+    ``dialog``/``modal`` is benign (issue #73). Structure, not class substring,
+    decides."""
+    html = """
+    <html><body>
+      <div role="alertdialog">Your session expired</div>
+      <div role="dialog" class="size-guide-modal">Size guide</div>
+    </body></html>
+    """
+    view = reduce_content([], html, url="http://shop.test/x")
+    texts = " ".join(u.text for u in view.errors)
+    assert "Your session expired" in texts
+    assert "Size guide" not in texts
+
+
+def test_ax_alertdialog_status_ge_400_analog_is_still_an_error() -> None:
+    """The AX side: an ``alert`` / ``alertdialog`` node carries the validation
+    message and still routes into ``errors`` (issue #73 keeps genuine errors)."""
+    from zu_tools.action_surface import AxNode
+
+    nodes = [
+        AxNode(role="alert", name="Out of stock"),
+        AxNode(role="button", name="Add to basket"),
+    ]
+    view = reduce_content(nodes, "", url="http://shop.test/x")
+    assert any("Out of stock" in u.text for u in view.errors)
 
 
 def test_adapter_projects_a_surface_onto_the_same_view() -> None:
