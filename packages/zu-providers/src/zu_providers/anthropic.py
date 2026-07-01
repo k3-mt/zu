@@ -54,6 +54,31 @@ _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TIMEOUT_S = 60.0
 _DEFAULT_MAX_RETRIES = 2
 
+# The sampling params this vendor honours, mapped from the neutral
+# ``ModelRequest.params`` key to the Anthropic wire name. Only params present in
+# the request are forwarded (an unset param is omitted, never sent as None), and
+# only these keys — a param the vendor doesn't support (e.g. ``seed``, which the
+# Messages API has no field for) is silently dropped here rather than passed
+# through and rejected at the wire. ``max_tokens`` is threaded separately (it has
+# an adapter default); these do not. The openai-compatible adapter mirrors this
+# with its own vendor-supported set (``seed`` yes, ``top_k`` no).
+_SAMPLING_PARAMS: dict[str, str] = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "stop": "stop_sequences",
+}
+
+
+def _sampling_kwargs(params: dict) -> dict[str, Any]:
+    """Thread the caller's sampling params through to the SDK call, sending only
+    the ones this vendor supports and omitting any that are unset (never None)."""
+    out: dict[str, Any] = {}
+    for neutral, wire in _SAMPLING_PARAMS.items():
+        if neutral in params and params[neutral] is not None:
+            out[wire] = params[neutral]
+    return out
+
 
 class AnthropicProvider:
     def __init__(
@@ -71,19 +96,32 @@ class AnthropicProvider:
         # An explicit key (for programmatic / in-memory use, e.g. zu.run with a
         # key your app already holds). Prefer ``api_key_env`` so the key never
         # lands in a committed config file; either way it stays out of the
-        # model's context. Never hard-code or ship a key.
-        self.api_key = api_key
+        # model's context. Never hard-code or ship a key. Stored under a private
+        # name (assigned below, after the docstring) so it stays out of reprs.
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.max_retries = max_retries
         # client is a testability/config seam (an AsyncAnthropic, possibly with a
         # mock transport); None -> construct from the resolved key on first use.
         self._client = client
+        # A resolved API key is a secret: it must never surface in a repr/str, a
+        # log line, or a serialized payload. Store it under a private name so the
+        # default attribute-listing reprs and naive ``vars(self)`` dumps don't
+        # carry it, and give the class an explicit redacting repr (below).
+        self._api_key = api_key
         # vision=True: the neutral request carries image blocks (LlmPolicy builds
         # them) and this adapter translates them to Anthropic's image/source wire
         # shape in to_anthropic_messages, so the model genuinely receives images.
         # LlmPolicy gates image content on this flag, so it must reflect reality.
         self.capabilities = Capabilities(native_tools=True, vision=True, max_context=1_000_000)
+
+    def __repr__(self) -> str:
+        # Never leak the API key: report only whether one was supplied, not its
+        # value. The SDK client (once built) also holds the key, but it isn't an
+        # attribute a default dataclass-style repr would print, and this class'
+        # repr is the surface a log/serialization path would reach for.
+        have_key = "set" if self._api_key else "unset"
+        return f"AnthropicProvider(model={self.model!r}, api_key=<{have_key}>)"
 
     def _ensure_client(self) -> Any:
         if self._client is None:
@@ -95,7 +133,7 @@ class AnthropicProvider:
                     "pip install 'zu-runtime[anthropic]'"
                 ) from exc
 
-            key = self.api_key or os.environ.get(self.api_key_env)
+            key = self._api_key or os.environ.get(self.api_key_env)
             if not key:
                 raise RuntimeError(
                     f"no Anthropic API key: pass api_key=... or set ${self.api_key_env} "
@@ -118,6 +156,10 @@ class AnthropicProvider:
             kwargs["system"] = system
         if req.tools:
             kwargs["tools"] = [anthropic_tool(t) for t in req.tools]
+        # Thread the caller's sampling params (temperature/top_p/top_k/stop)
+        # through to the SDK call. Previously only max_tokens was honoured and
+        # everything else in ``params`` was silently dropped.
+        kwargs.update(_sampling_kwargs(req.params))
         try:
             resp = await client.messages.create(**kwargs)
         except Exception as exc:  # translate SDK errors -> neutral port surface

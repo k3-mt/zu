@@ -52,6 +52,31 @@ _FINISH = {
 _DEFAULT_TIMEOUT_S = 60.0
 _DEFAULT_MAX_RETRIES = 2
 
+# The sampling params this vendor honours, mapped from the neutral
+# ``ModelRequest.params`` key to the Chat Completions wire name. Mirrors the
+# anthropic adapter's threading, but with this vendor's supported set: the Chat
+# Completions API takes ``seed`` (which Anthropic has no field for) but not
+# ``top_k`` (which Anthropic does). Only params present in the request are
+# forwarded — an unset param is omitted, never sent as None — and only these
+# keys; a param the vendor doesn't support is dropped here rather than sent and
+# rejected at the wire.
+_SAMPLING_PARAMS: dict[str, str] = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "stop": "stop",
+    "seed": "seed",
+}
+
+
+def _sampling_kwargs(params: dict) -> dict[str, Any]:
+    """Thread the caller's sampling params through to the SDK call, sending only
+    the ones this vendor supports and omitting any that are unset (never None)."""
+    out: dict[str, Any] = {}
+    for neutral, wire in _SAMPLING_PARAMS.items():
+        if neutral in params and params[neutral] is not None:
+            out[wire] = params[neutral]
+    return out
+
 
 class OpenAICompatibleProvider:
     def __init__(
@@ -72,14 +97,24 @@ class OpenAICompatibleProvider:
         self.api_key_env = api_key_env
         # Explicit key/base_url for programmatic use; prefer the *_env forms so a
         # key never lands in a committed config. Either way it stays out of the
-        # model's context. Never hard-code or ship a key.
-        self.api_key = api_key
+        # model's context. Never hard-code or ship a key. Stored under a private
+        # name so it never surfaces in a repr / log / serialized dump (#65 F33).
+        self._api_key = api_key
         self.base_url = base_url
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.max_retries = max_retries
         self._client = client
         self.capabilities = Capabilities(native_tools=native_tools)
+
+    def __repr__(self) -> str:
+        # Never leak the API key: report only whether one was supplied. Mirrors
+        # the anthropic adapter's redacting repr.
+        have_key = "set" if self._api_key else "unset"
+        return (
+            f"OpenAICompatibleProvider(model={self.model!r}, "
+            f"base_url={self.base_url!r}, api_key=<{have_key}>)"
+        )
 
     def _ensure_client(self) -> Any:
         if self._client is None:
@@ -94,7 +129,7 @@ class OpenAICompatibleProvider:
             # Local servers (Ollama/vLLM) need no key; the SDK still wants a
             # non-empty string, so fall back to a placeholder. Base URL is
             # optional (defaults to OpenAI) and read from the env when set.
-            key = self.api_key or os.environ.get(self.api_key_env) or "not-needed"
+            key = self._api_key or os.environ.get(self.api_key_env) or "not-needed"
             base_url = self.base_url or os.environ.get(self.base_url_env) or None
             self._client = openai.AsyncOpenAI(
                 api_key=key,
@@ -120,6 +155,10 @@ class OpenAICompatibleProvider:
         max_tokens = req.params.get("max_tokens", self.max_tokens)
         if max_tokens is not None:
             kwargs["max_tokens"] = int(max_tokens)
+        # Thread the caller's sampling params (temperature/top_p/stop/seed)
+        # through to the SDK call. Previously only max_tokens was honoured and
+        # everything else in ``params`` was silently dropped.
+        kwargs.update(_sampling_kwargs(req.params))
         try:
             resp = await client.chat.completions.create(**kwargs)
         except Exception as exc:  # translate SDK errors -> neutral port surface
@@ -199,12 +238,26 @@ def _to_model_response(resp: Any) -> ModelResponse:
 
 def _usage_of(resp: Any) -> dict:
     """The normalised usage shape (input/output/total) shared with the anthropic
-    adapter, degrading to ``{}`` when the provider reports no usage."""
+    adapter, degrading to ``{}`` when the provider reports no usage.
+
+    Guard a *partial* usage object the same way the anthropic adapter does: some
+    OpenAI-compatible servers (vLLM/Ollama/proxies) return a ``usage`` object
+    that omits a field or reports it as ``None`` (e.g. streaming aggregates, or a
+    server that only fills ``prompt_tokens``). Read each field defensively and
+    coerce a missing/None value to 0, then compute ``total`` from the parts when
+    the server didn't report it — so a partial usage degrades to a consistent
+    shape rather than raising AttributeError or misreporting ``None`` tokens.
+    This matches the anthropic adapter's parity contract on the usage edge."""
     raw = getattr(resp, "usage", None)
     if raw is None:
         return {}
+    in_tok = getattr(raw, "prompt_tokens", 0) or 0
+    out_tok = getattr(raw, "completion_tokens", 0) or 0
+    total = getattr(raw, "total_tokens", None)
+    if total is None:
+        total = in_tok + out_tok
     return {
-        "input_tokens": raw.prompt_tokens,
-        "output_tokens": raw.completion_tokens,
-        "total_tokens": raw.total_tokens,
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "total_tokens": total,
     }

@@ -95,7 +95,11 @@ class ScriptedProvider:
             return ModelResponse(text=None, finish=Finish.STOP)
         move = self._moves[self._i]
         self._i += 1
-        return move
+        # Return a FRESH copy, not the stored instance: a caller that mutates a
+        # returned response (e.g. appends to ``tool_calls`` or edits ``usage``)
+        # must not corrupt the script for a later replay. ``model_copy(deep=True)``
+        # gives each call its own object, so the recorded move stays pristine.
+        return move.model_copy(deep=True)
 
     @property
     def exhausted(self) -> bool:

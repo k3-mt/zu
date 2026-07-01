@@ -105,7 +105,10 @@ def test_provider_accepts_a_direct_api_key(monkeypatch):
     provider = build_provider(
         ProviderConfig(name="anthropic", model="claude-x", api_key="sk-test-123")
     )
-    assert provider.api_key == "sk-test-123"
+    # The key is carried onto the adapter, but under a private name so it never
+    # surfaces in a repr / log / serialized dump (#65 F33) — the redacting repr
+    # is proven in test_providers.py::test_repr_does_not_leak_api_key.
+    assert provider._api_key == "sk-test-123"
 
 
 # --- the merged agent.yaml + bundle directory --------------------------------
