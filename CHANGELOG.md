@@ -7,6 +7,22 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the purchase-funnel family completes: CartAdder + FunnelPhase (#121, #122)
+Two sibling additions that complete the connected-surface purchase funnel, proven offline (no browser).
+- **`CartAdder`** (`zu.cart_adders`, #122) — the `product → cart` transition, symmetric with
+  `CheckoutProceeder` (#117) and the step before it. `inspect(view)` finds a LIVE (non-disabled)
+  add-to-cart control by WHOLE-WORD name, never a committing control; `add(surface)` clicks it and
+  VERIFIES via a genuine before/after DELTA (a new mini-cart drawer / cart-count increase / 'added'
+  signal) — a persistent header 'View basket' is not a took signal, and a silent no-op returns False so
+  the host can satisfy a required option and retry. Impl `zu_tools.cart.WholeWordCartAdder`.
+- **`FunnelPhase`** enum + **`FunnelPhaseClassifier`** (`zu.funnel_phase_classifiers`, #121) — the
+  content-free STATE the resolvers transition over: `browsing / on_product / in_cart / at_checkout /
+  at_payment / unknown`, classified from surface SHAPE (an add-to-cart control, a cart/'added' signal, a
+  checkout url / place-order control, a `cc-*` card field), deepest phase wins, never product prose.
+  Impl `zu_tools.funnel.WebFunnelPhaseClassifier` (+ a `funnel_phase(view)` convenience).
+- The shared commerce vocabulary + structural signals are single-sourced in `zu_tools._commerce`
+  (checkout #117 refactored onto it; the commit-boundary drift guard against `zu_patterns` is retained).
+
 ### Added — SelectionSatisfier extends to custom swatch/radio-group variant pickers (#120)
 `FirstOptionSelectionSatisfier` satisfied native `<select>` only (#95/#110); a large fraction of shops
 use custom swatch / radio-group pickers, which it left untouched (add-to-cart stayed disabled). The

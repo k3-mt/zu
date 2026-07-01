@@ -67,6 +67,8 @@ GROUPS = {
     "consent_resolvers": "zu.consent_resolvers",
     "selection_satisfiers": "zu.selection_satisfiers",
     "checkout_proceeders": "zu.checkout_proceeders",
+    "cart_adders": "zu.cart_adders",
+    "funnel_phase_classifiers": "zu.funnel_phase_classifiers",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind
