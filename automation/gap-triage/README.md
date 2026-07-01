@@ -24,11 +24,24 @@ Anyone can open an issue, so the body is attacker-controllable. Defence in depth
   `render_dom`) and `containment: required` — there is no tool that can reach the network,
   so a prompt-injected model has nothing to exfiltrate the model key through.
 - **Structural rendering.** The workflow injects the issue via
-  `python -m zu_cli.gap_triage render`, which sets `task.query` through a YAML parser (the
-  issue is a *string value*). Issue content can never overwrite `provider`/`tiers`/
-  `containment`. See [`packages/zu-cli/src/zu_cli/gap_triage.py`](../../packages/zu-cli/src/zu_cli/gap_triage.py).
-- **Spotlighting.** The issue is wrapped as `<<UNTRUSTED_ISSUE>>` data, never instructions.
-- **Output sanitised.** `@mentions` are neutralised and length capped before posting.
+  `python automation/gap-triage/triage.py render`, which spotlights the issue then hands it
+  to the generic `zu_cli.gap_triage.render_agent` hook — which sets `task.query` through a
+  YAML parser (the issue is a *string value*). Issue content can never overwrite
+  `provider`/`tiers`/`containment`. See [`triage.py`](triage.py) and
+  [`zu_cli/gap_triage.py`](../../packages/zu-cli/src/zu_cli/gap_triage.py).
+- **Spotlighting (forge-proof).** The issue is wrapped as `<<UNTRUSTED_ISSUE>>` data, never
+  instructions — and any occurrence of the delimiter tokens *in the issue* is neutralised
+  first, so attacker text can't forge a close/open and break out of the data block.
+- **Structured result only.** Only the schema-validated fields (`is_capability_gap`,
+  `root_cause`, `proposed_capability`, `investigation_steps`, `confidence`) are rendered
+  into the comment — the raw `zu run` transcript / arbitrary model prose is NEVER posted,
+  so nothing exfiltrated by a prompt-injected model can ride out through the comment.
+- **Comment sanitised.** The bounded fields are defanged before posting — `@mentions`,
+  `#issue-refs`, inline HTML, and autolinked URLs / markdown links are all neutralised, and
+  length is capped.
+- **Failures aren't masked.** A failed / over-budget / schema-invalid run posts no success
+  comment and does not label the issue `triaged` (the run's exit status is honoured — no
+  blanket `|| true`).
 
 ## Run it offline ($0, no model, no network)
 
