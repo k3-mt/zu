@@ -22,6 +22,7 @@ import json
 import os
 import re
 import time
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -150,15 +151,33 @@ class ScriptedAttacker:
         """Run the **fleet** (RED_TEAM.md §4): each specialist covers the corpus
         cases for its objectives. The cases run once; results are grouped per
         specialist so the report shows each specialist's coverage — a suppressed
-        objective is visible as an empty specialist, which a flat replay hides."""
+        objective is visible as an empty specialist, which a flat replay hides.
+
+        A specialist objective with NO corpus case yields an empty specialist
+        SILENTLY — the coverage is a lie, not a real attack. We fail loudly (a
+        ``UserWarning`` naming the barren objectives) rather than pretend the surface
+        was exercised (issue #2): a declared objective must be backed by at least one
+        case, or the fleet's per-specialist coverage is theatre."""
         results = await self.run()
         by_obj: dict[str, list[AttackResult]] = {}
         for r in results:
             by_obj.setdefault(r.case.objective, []).append(r)
-        return {
+        fleet = {
             spec.name: [r for obj in spec.objectives for r in by_obj.get(obj, [])]
             for spec in FLEET
         }
+        barren = sorted({
+            obj for spec in FLEET for obj in spec.objectives if not by_obj.get(obj)
+        })
+        if barren:
+            warnings.warn(
+                f"fleet objective(s) {barren} yielded no specialist results — "
+                "declared in FLEET but backed by no corpus case; the coverage is "
+                "empty, not exercised. Add a corpus case or drop the objective.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return fleet
 
 
 # The attack contract the live attacker's policy must emit each round.

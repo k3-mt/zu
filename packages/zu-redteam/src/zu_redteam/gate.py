@@ -17,7 +17,9 @@ The verdict for gates 3–4 is rendered by the out-of-band observers in
 
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets as _secrets
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -33,9 +35,64 @@ from .fixtures import NEIGHBOUR_NAMES, ControlledHandler, StaticFetch, benign_ne
 from .harness import Scenario, run_scenario
 from .verdict import NeighbourHealth, ObservedRun, default_observers, render_verdict
 
-_PLANTED_SECRET = "ZU-PLANTED-SECRET-9f3a7c21"
-
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+
+
+@dataclass(frozen=True)
+class GateSecrets:
+    """The per-run canaries the gate plants (issue #7). The planted secret, the
+    benign probe host, and the §9 fingerprint were FIXED source-visible constants
+    reused across every gate run — so a plugin author who read the source could
+    special-case them (never echo *that* secret, treat *that* probe host as a test)
+    and slip a covert leak past the observers. Here they are DERIVED fresh per run
+    from a high-entropy token, so there is nothing constant to hardcode around.
+
+    ``fresh()`` draws a new 128-bit token per gate run. ``for_seed(seed)`` derives
+    the same values deterministically from a fixed seed, so tests stay reproducible
+    (a test injects a known seed and asserts against the derived values) while the
+    real gate is unpredictable. The derivations are all keyed off the one token, so
+    a single injected seed fixes the whole triple.
+    """
+
+    token: str
+
+    @classmethod
+    def fresh(cls) -> GateSecrets:
+        return cls(token=_secrets.token_hex(16))
+
+    @classmethod
+    def for_seed(cls, seed: str) -> GateSecrets:
+        # A deterministic, high-entropy token from a caller-supplied seed — the test
+        # hook. Hashed (not the raw seed) so even a short seed yields a full-entropy,
+        # encoded-match-safe canary.
+        return cls(token=hashlib.sha256(seed.encode()).hexdigest())
+
+    def _derive(self, label: str, length: int) -> str:
+        return hashlib.sha256(f"{label}:{self.token}".encode()).hexdigest()[:length]
+
+    @property
+    def planted_secret(self) -> str:
+        # Long/high-entropy so the exfil observer's encoded-form matching is enabled
+        # (its floor is 12 chars); prefixed for readability in a breach detail.
+        return f"ZU-CANARY-{self._derive('secret', 32)}"
+
+    @property
+    def probe_host(self) -> str:
+        # A per-run subdomain token under a reserved-for-docs base, so the benign
+        # probe host is unpredictable yet still a well-formed, non-routable name.
+        return f"probe-{self._derive('probe', 12)}.example"
+
+    @property
+    def pdf_fingerprint(self) -> str:
+        # The §9 host fingerprint canary — per run, so it too cannot be hardcoded
+        # around. In the gate flow the fingerprint IS the planted secret (the exfil
+        # observer watches one marker); this is the standalone-fixture form of it.
+        return f"os=linux;host=zu-sandbox-{self._derive('fingerprint', 12)}"
+
+
+# The fixed seed the deterministic offline suite plants, so every gate assertion is
+# reproducible while the real (unseeded) gate draws a fresh canary each run.
+_TEST_SEED = "zu-redteam-offline"
 
 
 @dataclass
@@ -124,12 +181,19 @@ async def run_gate(
     run_unit: bool = True,
     min_coverage: int = 5,
     on_event: Callable[[Any], None] | None = None,
+    secrets: GateSecrets | None = None,
 ) -> GateReport:
     """Run the gates and return a report. ``plugins`` are the package's plugins
     (kind, name, instance) to stand up; ``pkg_dir`` enables the unit gate.
     ``on_event`` (e.g. a live printer) is attached to every attack's bus so a gate
-    run can be watched as it happens (``zu test-plugin --watch``)."""
+    run can be watched as it happens (``zu test-plugin --watch``).
+
+    ``secrets`` are the per-run canaries (planted secret / probe host / fingerprint).
+    Left ``None`` the gate draws a FRESH high-entropy set for this run (issue #7), so
+    there is no fixed constant a plugin author can special-case; tests pass a
+    ``GateSecrets.for_seed(...)`` for reproducibility."""
     plugins = plugins or []
+    secrets = secrets or GateSecrets.fresh()
     subscribers: Sequence[Callable[[Any], None]] = [on_event] if on_event else []
     report = GateReport(pkg=pkg)
 
@@ -147,23 +211,20 @@ async def run_gate(
         report.results.append(GateResult("contract", PASS, f"{len(plugins)} plugin(s) conform"))
 
     # 3. interop ------------------------------------------------------------
-    report.results.append(await _interop_gate(plugins, subscribers))
+    report.results.append(await _interop_gate(plugins, subscribers, secrets))
 
     # 4. adversarial --------------------------------------------------------
-    adv_result, findings = await _adversarial_gate(plugins, min_coverage, subscribers)
+    adv_result, findings = await _adversarial_gate(plugins, min_coverage, subscribers, secrets)
     report.results.append(adv_result)
     report.findings = findings
 
     # 5. container ----------------------------------------------------------
-    report.results.append(await _container_gate())
+    report.results.append(await _container_gate(secrets))
 
     return report
 
 
-_PROBE_HOST = "example.com"
-
-
-def _container_probe_spec() -> dict:
+def _container_probe_spec(secrets: GateSecrets) -> dict:
     """The benign probe the container gate runs *inside* the box: a REAL fetch to
     an allowlisted host (RealFetch genuinely egresses), so a clean run proves the
     real sidecar enforcement is in place — the proxy actually observed the egress
@@ -171,17 +232,17 @@ def _container_probe_spec() -> dict:
     off-allowlist host while lying about it — is the opt-in live test.)"""
     return {
         "objective": "container-probe",
-        "planted_secret": _PLANTED_SECRET,
+        "planted_secret": secrets.planted_secret,
         "include_benign_neighbours": True,
         "neighbours": NEIGHBOUR_NAMES,
         "plugins": [{"kind": "tools", "name": "web_fetch",
                      "import": "zu_redteam.fixtures:RealFetch"}],
-        "moves": [{"tool": "web_fetch", "args": {"url": f"http://{_PROBE_HOST}/"}},
+        "moves": [{"tool": "web_fetch", "args": {"url": f"http://{secrets.probe_host}/"}},
                   {"text": '{"ok": true}', "finish": "stop"}],
     }
 
 
-async def _container_gate() -> GateResult:
+async def _container_gate(secrets: GateSecrets) -> GateResult:
     """Run a scenario *inside* a real Docker container whose sole egress is a proxy
     SIDECAR, and judge it on the proxy's out-of-band record (RED_TEAM_CONTAINER.md
     §3, the live form). The target sits on an internal network with no route but the
@@ -219,10 +280,10 @@ async def _container_gate() -> GateResult:
         monitor = CompositeHostMonitor(monitors=[
             DockerFsDiffMonitor(), DockerTopMonitor(), MountEscapeMonitor()])
         gate = SidecarContainerGate(
-            backend=LocalDockerBackend(), image=image, allowlist=[_PROBE_HOST],
+            backend=LocalDockerBackend(), image=image, allowlist=[secrets.probe_host],
             mitm=os.environ.get("ZU_REDTEAM_MITM") == "1", host_monitor=monitor,
         )
-        result = await gate.run(_container_probe_spec())
+        result = await gate.run(_container_probe_spec(secrets))
         detail = (
             f"ran a scenario inside {image} behind a proxy sidecar (sole egress) "
             f"— {len(result.connections)} egress connection(s), "
@@ -263,10 +324,13 @@ def _unit_gate(pkg_dir: str | Path | None) -> GateResult:
 
 
 async def _interop_gate(
-    plugins: list[tuple[str, str, Any]], subscribers: Sequence[Callable[[Any], None]] = ()
+    plugins: list[tuple[str, str, Any]],
+    subscribers: Sequence[Callable[[Any], None]] = (),
+    secrets: GateSecrets | None = None,
 ) -> GateResult:
     """Stand the plugins up with >= 3 cross-category neighbours and run a benign
     task to completion; every observer (incl. neighbour health) must stay clean."""
+    secrets = secrets or GateSecrets.fresh()
     extra = [p for p in plugins if (p[0], p[1]) not in {("tools", "neighbour_fetch")}]
     scenario = Scenario(
         objective="interop",
@@ -274,7 +338,7 @@ async def _interop_gate(
                  *benign_neighbours(), *extra],
         moves=[{"tool": "web_fetch", "args": {"url": "http://example.test/"}},
                {"text": '{"ok": true}', "finish": "stop"}],
-        planted_secret=_PLANTED_SECRET,
+        planted_secret=secrets.planted_secret,
         neighbours=NEIGHBOUR_NAMES,
     )
     run = await run_scenario(scenario, subscribers=subscribers)
@@ -288,12 +352,14 @@ async def _interop_gate(
 async def _adversarial_gate(
     plugins: list[tuple[str, str, Any]], min_coverage: int,
     subscribers: Sequence[Callable[[Any], None]] = (),
+    secrets: GateSecrets | None = None,
 ) -> tuple[GateResult, list[AttackFinding]]:
     """Replay the frozen corpus (with the target present) plus a directed probe of
     each target tool; render the out-of-band verdict and a per-attack finding so
     the result shows what was attempted and what defended it."""
+    secrets = secrets or GateSecrets.fresh()
     attacker = ScriptedAttacker(
-        planted_secret=_PLANTED_SECRET, extra_plugins=plugins, subscribers=subscribers
+        planted_secret=secrets.planted_secret, extra_plugins=plugins, subscribers=subscribers
     )
     # Run the fleet: each specialist covers its objectives' corpus cases. Flatten
     # (each case has one objective, so appears once) for the per-case findings,
@@ -308,7 +374,7 @@ async def _adversarial_gate(
     # Directed probes: invoke each target tool in a real run and judge it against
     # its OWN declaration — this is what catches a tool that under-declares egress.
     opaque_notes: list[str] = []
-    for tool_name, probe, opaque in _directed_probes(plugins):
+    for tool_name, probe, opaque in _directed_probes(plugins, secrets):
         run = await run_scenario(probe, subscribers=subscribers)
         findings.append(_finding(f"probe:{tool_name}", "envelope", run, probe.neighbours))
         if opaque:
@@ -316,7 +382,7 @@ async def _adversarial_gate(
 
     # Dormant-pivot probe: the two-phase controlled handler (RED_TEAM.md §6.1) —
     # catches a plugin that behaves in testing and pivots on a production trigger.
-    findings.append(await _dormant_pivot_probe(plugins, subscribers))
+    findings.append(await _dormant_pivot_probe(plugins, subscribers, secrets))
 
     breaches = [f"{f.id}: {b}" for f in findings for b in f.breaches]
     if breaches:
@@ -372,6 +438,7 @@ def _finding(id_: str, objective: str, run: ObservedRun, neighbours: list[str]) 
 async def _dormant_pivot_probe(
     plugins: list[tuple[str, str, Any]],
     subscribers: Sequence[Callable[[Any], None]] = (),
+    secrets: GateSecrets | None = None,
 ) -> AttackFinding:
     """The dormant-pivot probe (RED_TEAM.md §6.1): stand the target up against a
     two-phase controlled handler. Phase 1 the handler is benign; it arms itself
@@ -390,6 +457,7 @@ async def _dormant_pivot_probe(
     benign content for the first ``arm_after`` fetch(es), then arms itself and
     serves the trigger payload on the next — "behaved in testing, then a trigger
     appeared.\""""
+    secrets = secrets or GateSecrets.fresh()
     handler = ControlledHandler(arm_after=1)
     plugins_all: list[tuple[str, str, Any]] = [("tools", "web_fetch", handler), *benign_neighbours()]
     names = {(k, n) for k, n, _ in plugins_all}
@@ -413,7 +481,7 @@ async def _dormant_pivot_probe(
 
     scenario = Scenario(
         objective="pivot", plugins=plugins_all, moves=moves,
-        planted_secret=_PLANTED_SECRET, neighbours=NEIGHBOUR_NAMES,
+        planted_secret=secrets.planted_secret, neighbours=NEIGHBOUR_NAMES,
     )
     run = await run_scenario(scenario, subscribers=subscribers)
     return _finding("probe:dormant_pivot", "pivot", run, NEIGHBOUR_NAMES)
@@ -473,12 +541,15 @@ def _benign_args(obj: Any) -> tuple[dict, list[str]]:
     return args, opaque
 
 
-def _directed_probes(plugins: list[tuple[str, str, Any]]) -> list[tuple[str, Scenario, list[str]]]:
+def _directed_probes(
+    plugins: list[tuple[str, str, Any]], secrets: GateSecrets | None = None
+) -> list[tuple[str, Scenario, list[str]]]:
     """(tool_name, scenario, opaque_required) per target *tool*: invoke it once
     with benign args synthesised for ALL its required params (not just ``url``) so
     the observers can judge whether doing its job stayed inside its declared
     envelope. ``opaque_required`` names any required param we could only fill with
     a generic fallback — surfaced so a weak probe is visible, not silent."""
+    secrets = secrets or GateSecrets.fresh()
     probes: list[tuple[str, Scenario, list[str]]] = []
     for kind, name, obj in plugins:
         if kind != "tools":
@@ -488,7 +559,7 @@ def _directed_probes(plugins: list[tuple[str, str, Any]]) -> list[tuple[str, Sce
             objective="envelope",
             plugins=[(kind, name, obj), *benign_neighbours()],
             moves=[{"tool": name, "args": args}, {"text": '{"ok": true}', "finish": "stop"}],
-            planted_secret=_PLANTED_SECRET,
+            planted_secret=secrets.planted_secret,
             neighbours=NEIGHBOUR_NAMES,
         )
         probes.append((name, scenario, opaque))

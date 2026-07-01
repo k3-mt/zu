@@ -4,11 +4,40 @@ proof the gate is real — it both clears a good plugin and stops a bad one."""
 from __future__ import annotations
 
 from zu_redteam.fixtures import LeakyFetch, SecretEchoTool, StaticFetch
-from zu_redteam.gate import run_gate
+from zu_redteam.gate import GateSecrets, run_gate
 
 
 def _gate(report, name):
     return next(r for r in report.results if r.name == name)
+
+
+# --- issue #7: per-run randomized canaries, deterministic under a seed ---------
+
+
+def test_gate_secrets_are_fresh_per_run_and_high_entropy() -> None:
+    # Two unseeded gate runs draw DIFFERENT canaries — nothing constant to hardcode.
+    a, b = GateSecrets.fresh(), GateSecrets.fresh()
+    assert a.planted_secret != b.planted_secret
+    assert a.probe_host != b.probe_host
+    assert a.pdf_fingerprint != b.pdf_fingerprint
+    # The planted secret is long enough to enable the exfil observer's encoded-form
+    # matching (its 12-char floor) — not a short marker.
+    assert len(a.planted_secret) >= 12
+    # No source-visible fixed constant is reused: the old hardcoded values are gone.
+    assert a.planted_secret != "ZU-PLANTED-SECRET-9f3a7c21"
+    assert a.probe_host != "example.com"
+
+
+def test_gate_secrets_are_deterministic_under_a_fixed_seed() -> None:
+    # The test hook: a fixed seed derives the SAME triple every time, so a test can
+    # assert against a known secret while the real gate stays unpredictable.
+    a = GateSecrets.for_seed("fixed")
+    b = GateSecrets.for_seed("fixed")
+    assert a.planted_secret == b.planted_secret
+    assert a.probe_host == b.probe_host
+    assert a.pdf_fingerprint == b.pdf_fingerprint
+    # A different seed derives a different triple.
+    assert GateSecrets.for_seed("other").planted_secret != a.planted_secret
 
 
 async def test_gate_passes_a_safe_tool() -> None:
@@ -33,9 +62,15 @@ async def test_gate_fails_a_tool_that_underdeclares_egress() -> None:
 
 
 async def test_gate_fails_a_tool_that_leaks_the_secret() -> None:
+    # The gate plants a fresh per-run canary (issue #7): a tool that leaks THAT
+    # secret is caught. A fixed seed keeps the test deterministic; the echoing tool
+    # is handed the same derived secret the gate plants, so the leak is genuine.
+    from zu_redteam.gate import GateSecrets
+
+    secrets = GateSecrets.for_seed("test-leak")
     report = await run_gate(
-        "echo", plugins=[("tools", "read_secret", SecretEchoTool("ZU-PLANTED-SECRET-9f3a7c21"))],
-        run_unit=False,
+        "echo", plugins=[("tools", "read_secret", SecretEchoTool(secrets.planted_secret))],
+        run_unit=False, secrets=secrets,
     )
     assert not report.passed
     assert _gate(report, "adversarial").status == "FAIL"
@@ -149,14 +184,15 @@ async def test_container_gate_skips_without_docker_and_probe_spec_is_valid(monke
     # The container form is opt-in: without the flag (or Docker) it SKIPs, never
     # FAILs a plugin. And the benign probe spec the live path would run is itself
     # well-formed and clean when run offline — so the live path runs real work.
-    from zu_redteam.gate import _PLANTED_SECRET, _container_gate, _container_probe_spec
+    from zu_redteam.gate import GateSecrets, _container_gate, _container_probe_spec
     from zu_redteam.runner import run_spec
     from zu_redteam.verdict import ObservedRun, default_observers
 
+    secrets = GateSecrets.for_seed("test-container")
     monkeypatch.delenv("ZU_REDTEAM_CONTAINER", raising=False)
-    result = await _container_gate()
+    result = await _container_gate(secrets)
     assert result.status == "SKIP"
 
-    events = await run_spec(_container_probe_spec())
-    run = ObservedRun.from_events(events, None, planted_secret=_PLANTED_SECRET)
+    events = await run_spec(_container_probe_spec(secrets))
+    run = ObservedRun.from_events(events, None, planted_secret=secrets.planted_secret)
     assert all(o.inspect(run) is None for o in default_observers())

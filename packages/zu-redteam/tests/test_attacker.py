@@ -34,7 +34,7 @@ def test_craft_payload_encodings() -> None:
 async def test_scripted_attacker_runs_the_corpus() -> None:
     attacker = ScriptedAttacker(planted_secret="ZU-PLANTED-SECRET-x")
     results = await attacker.run()
-    assert len(results) == 7
+    assert len(results) == 8
     assert len(set(attacker.objectives_attempted(results))) >= 5
 
 
@@ -50,6 +50,42 @@ async def test_fleet_runs_each_specialist_over_its_objectives() -> None:
     for spec in FLEET:
         owned = set(spec.objectives)
         assert all(r.case.objective in owned for r in fleet[spec.name])
+
+
+async def test_run_fleet_warns_when_an_objective_yields_no_specialist(monkeypatch) -> None:
+    # issue #2: a FLEET objective backed by NO corpus case yields an EMPTY specialist
+    # silently — the coverage is a lie. run_fleet() must now WARN loudly. We inject a
+    # bogus objective into a specialist so it has no corpus case and assert the warn.
+    import warnings as _warnings
+
+    from zu_redteam import attacker as attacker_mod
+    from zu_redteam.attacker import FLEET, Specialist
+
+    patched = [*FLEET, Specialist("phantom", ("nonexistent_objective",), "no case")]
+    monkeypatch.setattr(attacker_mod, "FLEET", patched)
+
+    a = ScriptedAttacker(planted_secret="ZU-PLANTED-SECRET-x")
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        await a.run_fleet()
+    msgs = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert any("nonexistent_objective" in m and "no specialist results" in m for m in msgs)
+
+
+async def test_run_fleet_is_silent_when_every_objective_has_a_case() -> None:
+    # With the deputy corpus case added, every real FLEET objective is backed — so
+    # the healthy fleet run raises NO empty-specialist warning.
+    import warnings as _warnings
+
+    a = ScriptedAttacker(planted_secret="ZU-PLANTED-SECRET-x")
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        fleet = await a.run_fleet()
+    empties = [str(w.message) for w in caught
+               if issubclass(w.category, UserWarning) and "no specialist results" in str(w.message)]
+    assert not empties
+    # And the injector specialist now yields a real 'deputy' result (issue #2).
+    assert any(r.case.objective == "deputy" for r in fleet["injector"])
 
 
 def test_parse_attack_extracts_json_from_prose() -> None:
