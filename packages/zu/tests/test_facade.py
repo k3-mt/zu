@@ -103,4 +103,12 @@ def test_registration_decorators_are_exported():
     class _FacadeProbeTool:
         name = "facade_probe_tool"
 
+        # A minimal but VALID tool body: the loop protocol-checks a materialized
+        # tool (C3), and this probe registers onto the process-wide REGISTRY the
+        # loop reads, so it must satisfy the Tool contract (name + __call__) — not
+        # a bare name-only stub — to avoid polluting the shared registry with an
+        # unusable entry a later run would trip over.
+        async def __call__(self, ctx, **kwargs) -> dict:  # noqa: ANN001, ANN003
+            return {}
+
     assert "facade_probe_tool" in REGISTRY.names("tools")

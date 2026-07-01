@@ -304,6 +304,15 @@ def declared_envelope(plugin: Any) -> dict[str, Any]:
 
 # --- in-loop ports -------------------------------------------------------
 
+# Documented open aliases (C1). Some ``RunContext`` fields must stay open — the
+# core is policy-agnostic and cannot name the concrete type without importing a
+# plugin/policy. Rather than a bare ``Any`` (which says nothing), these aliases
+# NAME the intent at the seam: ``spec`` is a ``TaskSpec``-shaped object,
+# ``observation`` is a policy-shaped value (typically a ``dict``). They are
+# ``Any`` so the seam stays open; the alias is the documentation.
+TaskSpecLike = Any  # a TaskSpec-shaped object (zu_core.contracts.TaskSpec in the loop)
+ObservationLike = Any  # a policy-shaped observation value (usually a dict)
+
 
 class Scope(str, Enum):
     PER_OBSERVATION = "per_observation"
@@ -341,13 +350,31 @@ class RunContext(BaseModel):
     Detectors and validators read the run's event log through this context —
     how grounding confirms a value appears in retrieved content, and how
     history-dependent detectors ask their questions.
+
+    Typing discipline (C1): fields whose shape is genuinely knowable are typed
+    to a port Protocol (``grants: GrantStore``, ``execution: ExecutionLedger``,
+    ``invocation: ToolCall``) or a concrete contract, so a plugin gets real
+    completion/type-checking through the ctx. The two fields that MUST stay open
+    — ``spec`` and ``observation`` — are narrowed to the documented aliases
+    ``TaskSpecLike`` / ``ObservationLike`` (both ``= Any``): the loop passes a
+    :class:`~zu_core.contracts.TaskSpec` as ``spec`` and a policy-shaped
+    observation (usually a ``dict``) as ``observation``, but neither type is
+    imported into every port shape, so the alias documents the intent while
+    keeping the seam policy-agnostic. ``arbitrary_types_allowed`` lets the
+    Protocol-typed fields hold a concrete plugin instance without validation.
     """
 
     model_config = {"arbitrary_types_allowed": True}
 
-    spec: Any
-    # Populated by the loop (build step 4); kept Any so the core stays small.
-    observation: Any = None
+    # ``spec`` is a TaskSpec-shaped object (``zu_core.contracts.TaskSpec`` in the
+    # loop); left open (aliased ``TaskSpecLike``) so a caller can pass any object
+    # exposing the fields a detector reads (``query``/``budget``/…).
+    spec: TaskSpecLike
+    # The current observation under a checkpoint — a policy-shaped value (usually
+    # the tool's ``dict`` observation). Open (aliased ``ObservationLike``) because
+    # the observation currency is policy-defined; populated by the loop per
+    # checkpoint and reset to ``None`` outside one.
+    observation: ObservationLike = None
     # The run's event log as a *read-only* sequence: the loop hands plugins a
     # window that reflects the log as it grows but cannot be mutated through this
     # context (see ``loop._EventsView``). Typed ``Sequence`` to make that
@@ -370,12 +397,14 @@ class RunContext(BaseModel):
     # provable mode, composing the domain-allowlist / declarative policies / content
     # fencing into one contract rather than reassembled per consumer.
     quarantined: bool = False
-    # Durable per-grant state handle (ZU-CD-4): a ``GrantStore`` (kept ``Any`` so
-    # the contract stays a thin value object, matching ``spec``/``observation``).
-    grants: Any = None
+    # Durable per-grant state handle (ZU-CD-4): the run's ``GrantStore`` (C1 —
+    # Protocol-typed, so a gate/validator reading ``ctx.grants`` gets the real
+    # get/put/incr_if_below surface). ``None`` when the loop is between checkpoints
+    # that need it; the loop always seats a store (the in-memory default) per run.
+    grants: GrantStore | None = None
     # The ``ToolCall`` currently under pre-execution check (ZU-CORE-2); ``None``
-    # outside an InvocationGate ``check``.
-    invocation: Any = None
+    # outside an InvocationGate ``check`` (C1 — typed to the concrete contract).
+    invocation: ToolCall | None = None
     # The idempotency key minted for the invocation in flight (ZU-CORE-4); a tool
     # reads it to dedupe a retried side effect. ``None`` outside a tool call.
     idempotency_key: str | None = None
@@ -384,11 +413,12 @@ class RunContext(BaseModel):
     # gate can gate divergence/instruments by the rail's content-free consequence
     # class without reading hostile content. ``None`` outside a replayed call.
     annotations: dict | None = None
-    # Consume-once execution ledger (ZU-CD-6): an ``ExecutionLedger`` a tool/gate
-    # can ``claim(key)`` against to make a side effect idempotent across instances
-    # (kept ``Any`` like ``grants``). The loop itself claims before re-executing a
-    # human-approved invocation on resume, so a double-resume can't double-execute.
-    execution: Any = None
+    # Consume-once execution ledger (ZU-CD-6): the run's ``ExecutionLedger`` a
+    # tool/gate can ``claim(key)`` against to make a side effect idempotent across
+    # instances (C1 — Protocol-typed, mirroring ``grants``). The loop itself claims
+    # before re-executing a human-approved invocation on resume, so a double-resume
+    # can't double-execute.
+    execution: ExecutionLedger | None = None
 
 
 @runtime_checkable
@@ -565,6 +595,14 @@ class ExecutionLedger(Protocol):
         (already executed, refuse). A first claim journals so the log stays the
         source of truth and a resumed run sees the key as taken."""
         ...
+
+
+# ``RunContext`` (defined far above) types ``grants``/``execution`` to the
+# ``GrantStore``/``ExecutionLedger`` Protocols declared HERE — forward references
+# under ``from __future__ import annotations`` (C1). Rebuild it now that both
+# names exist in the module namespace, so pydantic resolves the annotations
+# eagerly rather than deferring to first use.
+RunContext.model_rebuild()
 
 
 # --- the replay-divergence arbiter (ZU-RAIL-3) ---------------------------

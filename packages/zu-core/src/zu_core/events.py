@@ -43,6 +43,26 @@ DETECTOR_FIRED = "harness.detector.fired"
 # a "violation" maps to a TERMINAL Verdict through the loop's existing halting path.
 MONITOR_FIRED = "harness.monitor.fired"
 VALIDATION_FAILED = "harness.validation.failed"
+# A detector / monitor / validator / replay-arbiter CRASHED while judging (C10):
+# {"kind": "detector"|"monitor"|"validator"|"replay_arbiter", "name": str,
+#  "error": str, "checkpoint": str}. The gate path already surfaces a crash
+# (harness.gate.decided rule_id "gate.crashed.*"); this is the same visibility for
+# the OTHER checks — a silently-broken check is on the audit log and counted, never
+# swallowed into a mere log line. Parented to the turn (or run.root on the final
+# ladder). ``source`` is the crashing check's name.
+CHECK_CRASHED = "harness.check.crashed"
+# The BASIS on which a run judged itself contained (F81), recorded at run start
+# under containment='required'. Payload: {"policy": str, "sandboxed": bool (the
+# ZU_SANDBOXED signal), "corroborated": bool (whether the harness-controlled
+# structural signals — the egress proxy + the internal network name the launcher
+# sets ALONGSIDE ZU_SANDBOXED — agree), "signals": {name: bool}}. The containment
+# boundary ultimately rests on ZU_SANDBOXED, a FORGEABLE env var with no
+# cryptographic attestation (documented in security.py). This event makes the
+# basis AUDITABLE: a run claiming ``sandboxed`` with ``corroborated=false`` (the
+# env is set but the proxy/network the real launcher always sets is absent) is a
+# forged-signal candidate a reviewer/monitor can flag after the fact — the honest,
+# tractable improvement short of real attestation. Parented to run.root.
+CONTAINMENT_ATTESTED = "harness.containment.attested"
 # A contained adversarial/unsafe attempt: a guard refused an action (SSRF/egress
 # block, an oversized "schema bomb" observation, a denied capability). Emitted at
 # the point of containment so a blocked attempt is on the record, never silent —
@@ -284,6 +304,8 @@ HARNESS_TYPES: frozenset[str] = frozenset(
         DETECTOR_FIRED,
         MONITOR_FIRED,
         VALIDATION_FAILED,
+        CHECK_CRASHED,
+        CONTAINMENT_ATTESTED,
         DEFENSE_BLOCKED,
         EGRESS_OBSERVED,
         HOST_EFFECT_OBSERVED,
