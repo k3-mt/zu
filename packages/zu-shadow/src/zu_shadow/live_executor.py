@@ -18,14 +18,17 @@ from pathlib import Path
 from typing import Any
 
 from zu_core.content_view import ContentView, Want, project
-from zu_core.ports import ModelProvider, ModelRequest
+from zu_core.ports import ModelProvider
 from zu_core.surface import SurfaceAffordance, SurfaceView
 
+from ._page_js import A11Y_HELPERS_JS, ACTIONABLE_SELECTOR
 from .executor import (
     Step,
     StepOutcome,
+    _choose_handle_request,
     _interstitial,
     _norm,
+    _pick_handle,
     _resolve_exact,
     steps_from_recording,
 )
@@ -36,38 +39,8 @@ from .recorder import RawInput, Recorder
 # and return them. Mirrors the §4 Action Surface (role + accessible name, never a selector).
 _ENUMERATE_JS = r"""
 (() => {
-  const SEL = 'button, a[href], [role=button], [role=link], [role=tab], [role=menuitem], '+
-    '[role=option], [role=checkbox], [role=radio], input, select, textarea, summary, [onclick]';
-  function role(el){
-    const r = el.getAttribute && el.getAttribute('role'); if(r && r.trim()) return r.trim();
-    const t=(el.tagName||'').toLowerCase();
-    if(t==='button'||t==='summary') return 'button';
-    if(t==='a' && el.hasAttribute('href')) return 'link';
-    if(t==='input'){const ty=(el.type||'text').toLowerCase();
-      if(ty==='submit'||ty==='button'||ty==='image')return'button';
-      if(ty==='checkbox')return'checkbox'; if(ty==='radio')return'radio';
-      if(ty==='search')return'searchbox'; return'textbox';}
-    if(t==='textarea')return'textbox'; if(t==='select')return'combobox'; return t||'generic';
-  }
-  function clean(s){ return (s||'').replace(/\s+/g,' ').trim().slice(0,80); }
-  function name(el){
-    try{
-      const al=el.getAttribute('aria-label'); if(al&&al.trim()) return clean(al);
-      if(el.id){const lab=document.querySelector('label[for="'+CSS.escape(el.id)+'"]');
-        const v=lab&&clean(lab.innerText); if(v) return v;}
-      const cl=el.closest&&el.closest('label'); {const v=cl&&clean(cl.innerText); if(v) return v;}
-      const it=clean(el.innerText); if(it) return it;
-      for(const a of ['value','placeholder','title','alt','name']){
-        const v=el.getAttribute&&el.getAttribute(a); if(v&&v.trim()) return clean(v);}
-      const ty=(el.type||'').toLowerCase();
-      if(ty==='submit'||ty==='image'||el.tagName==='BUTTON'){
-        const f=el.closest&&el.closest('form');
-        if(f&&(f.getAttribute('role')==='search'||/search/i.test(f.getAttribute('action')||'')||
-               f.querySelector('[type=search],[name*="search" i],[placeholder*="search" i]')))return'Search';
-        if(ty==='submit'||ty==='image')return'Submit';}
-    }catch(e){}
-    return '';
-  }
+  const SEL = '""" + ACTIONABLE_SELECTOR + r"""';
+""" + A11Y_HELPERS_JS + r"""
   const out=[]; let i=0;
   document.querySelectorAll(SEL).forEach(el=>{
     const r=el.getBoundingClientRect(); if(r.width<2||r.height<2) return;
@@ -212,29 +185,17 @@ def _await_in_thread(make_coro: Any) -> Any:
 
 def _choose_sync(step: Step, surface: SurfaceView, model: ModelProvider | None) -> str | None:
     """The model picks a handle from the CURRENT affordances (generalisation). Sync wrapper
-    (the live drive is sync Playwright); returns None if no model or no real handle named."""
-    import re
-
+    (the live drive is sync Playwright) around the SHARED choose seam the async executor uses
+    (``_choose_handle_request``/``_pick_handle`` — F13); returns None if no model or no real
+    handle named."""
     if model is None:
         return None
-    clickable = [a for a in surface.affordances
-                 if a.role in ("button", "link", "checkbox", "radio", "tab", "menuitem", "option")]
-    if not clickable:
+    built = _choose_handle_request(step, surface)
+    if built is None:
         return None
-    listing = "\n".join(f'{a.handle}: {a.role} "{a.label}"' for a in clickable)
-    goal = step.intent or f"{step.kind} {step.name}".strip()
-    req = ModelRequest(messages=[
-        {"role": "system", "content": "You drive a web agent following a known task on a live "
-         "site. The demonstrated control is not on this page. Pick the SINGLE affordance handle "
-         "that best continues the task. Reply with ONLY the handle (e.g. a3)."},
-        {"role": "user", "content": f"Step to continue: {goal}\nAffordances:\n{listing}\n\nHandle:"},
-    ])
+    req, handles = built
     resp = _await_in_thread(lambda: model.complete(req))
-    handles = {a.handle for a in clickable}
-    for tok in re.findall(r"[A-Za-z]+\w*", resp.text or ""):
-        if tok in handles:
-            return tok
-    return None
+    return _pick_handle(resp.text, handles)
 
 
 def run_live(recording: str, url: str, *, overrides: dict[str, str] | None = None,

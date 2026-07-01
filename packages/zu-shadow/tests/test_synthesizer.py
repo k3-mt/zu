@@ -99,6 +99,77 @@ def test_cleanup_collapses_widget_noise_and_strips_prices() -> None:
         "type:Search", "click:Large", "type:Large", "type:Card number"]
 
 
+async def test_egress_allowlist_is_scoped_to_first_party_not_trackers() -> None:
+    # F8: the self-writing allowlist must NOT absorb third-party trackers/analytics/CDNs.
+    # The scoping signal is FIRST-PARTY-ness derived from the navigated host's registrable
+    # domain: same-site api/cdn subdomains are kept; a tracker on another registrable
+    # domain is dropped. On the OLD code every recorded host was admitted (this fails).
+    from zu_shadow.synthesizer import induce_egress
+
+    bus = EventBus()
+    rec = Recorder(bus, site="https://shop.example.com")
+    session = await rec.record_stream([
+        RawInput(kind="navigate", url="https://shop.example.com/checkout"),
+        # first-party subresources the actions actually needed (same registrable domain):
+        RawInput(kind="network", url="https://api.shop.example.com/cart", status=200,
+                 host="api.shop.example.com"),
+        RawInput(kind="network", url="https://cdn.shop.example.com/app.js", status=200,
+                 host="cdn.shop.example.com"),
+        # incidental third-party beacons on OTHER registrable domains — must be dropped:
+        RawInput(kind="network", url="https://www.google-analytics.com/collect", status=200,
+                 host="www.google-analytics.com"),
+        RawInput(kind="network", url="https://tracker.doubleclick.net/px", status=200,
+                 host="tracker.doubleclick.net"),
+        RawInput(kind="network", url="https://cdn.thirdparty-cdn.com/lib.js", status=200,
+                 host="cdn.thirdparty-cdn.com"),
+        RawInput(kind="click",
+                 target=SemanticTarget(role="button", name="Continue", label="Continue")),
+    ])
+    await bus.aclose()
+
+    events: list[object] = list(session.events)
+    egress = induce_egress(events)
+    assert egress == ["api.shop.example.com", "cdn.shop.example.com", "shop.example.com"]
+    for tracker in ("www.google-analytics.com", "tracker.doubleclick.net",
+                    "cdn.thirdparty-cdn.com"):
+        assert tracker not in egress  # the tracker/analytics/3p-CDN host is NOT admitted
+
+
+async def test_success_invariant_is_derived_from_structure_not_model_goal() -> None:
+    # F12: the EVENTUALLY success criterion must be keyed on OBSERVED STRUCTURE (the
+    # terminal action's target label), not the model-invented goal string. Here the model
+    # returns a wildly different "goal" — the success rail must ignore it and use the
+    # recorded terminal control ("Confirm booking"). On the OLD code the rail's label was
+    # the model's goal ("banana pancakes"), so this fails.
+    from zu_core.invariants import InvariantKind, PredicateKind
+
+    bus = EventBus()
+    rec = Recorder(bus, site="https://vets.example.com")
+    session = await rec.record_stream([
+        RawInput(kind="navigate", url="https://vets.example.com/book"),
+        RawInput(kind="click",
+                 target=SemanticTarget(role="button", name="Chislehurst", label="Location")),
+        RawInput(kind="click",
+                 target=SemanticTarget(role="button", name="Confirm booking",
+                                       label="Confirm booking")),
+    ])
+    provider = ScriptedProvider.from_moves(
+        [{"text": '{"policy_prompt": "p", "goal": "banana pancakes"}', "finish": "stop"}]
+    )
+    result = await Synthesizer(provider).synthesize(session, "book a vet appointment")
+    await bus.aclose()
+
+    success = next(i for i in result.invariants
+                   if i.kind is InvariantKind.EVENTUALLY
+                   and i.predicate.kind is PredicateKind.SURFACE_CONTAINS)
+    label = success.predicate.params["label"]
+    assert label == "Confirm booking"          # DERIVED from the recorded terminal action
+    assert label != "banana pancakes"           # NOT the model-invented goal string
+    # The model's goal still names the human-readable spec goal — only the VERIFIABLE
+    # success token is derived-not-invented.
+    assert result.spec["task"]["goal"] == "banana pancakes"
+
+
 async def test_a_recording_feeds_the_section5_pathfinder() -> None:
     # The synthesizer's induced FSM IS a §5 pathfinder transition model: the guided search
     # plans a path over it, and a SECOND recording merges/grows it (the apprenticeship

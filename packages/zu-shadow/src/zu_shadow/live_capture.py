@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 
 from zu_core.bus import EventBus
 
+from ._page_js import A11Y_HELPERS_JS
 from .capture import SemanticTarget
 from .recorder import RawInput, RecordedSession, Recorder
 
@@ -54,47 +55,7 @@ CAPTURE_JS = r"""
       '[onclick], [tabindex]');
     return c || el;
   }
-  function clean(s){ return (s||'').replace(/\s+/g,' ').trim().slice(0,80); }
-  function role(el){
-    const r = el.getAttribute && el.getAttribute('role'); if(r && r.trim()) return r.trim();
-    const t = (el.tagName||'').toLowerCase();
-    if(t==='button' || t==='summary') return 'button';
-    if(t==='a' && el.hasAttribute('href')) return 'link';
-    if(t==='input'){const ty=(el.type||'text').toLowerCase();
-      if(ty==='submit'||ty==='button'||ty==='image')return'button';
-      if(ty==='checkbox')return'checkbox'; if(ty==='radio')return'radio';
-      if(ty==='search')return'searchbox'; return'textbox';}
-    if(t==='textarea') return 'textbox';
-    if(t==='select') return 'combobox';
-    if(el.hasAttribute && (el.hasAttribute('onclick')||el.hasAttribute('tabindex'))) return 'button';
-    return t || 'generic';
-  }
-  function name(el){
-    try{
-      const al=el.getAttribute('aria-label'); if(al && al.trim()) return clean(al);
-      const lb=el.getAttribute('aria-labelledby');
-      if(lb){const n=document.getElementById(lb); const v=n&&clean(n.innerText); if(v) return v;}
-      if(el.id){const lab=document.querySelector('label[for="'+CSS.escape(el.id)+'"]');
-        const v=lab&&clean(lab.innerText); if(v) return v;}
-      const cl=el.closest && el.closest('label'); { const v=cl&&clean(cl.innerText); if(v) return v; }
-      const it=clean(el.innerText); if(it) return it;   // innerText skips <style>/<script> CSS soup
-      for(const a of ['value','placeholder','title','alt','name']){
-        const v=el.getAttribute && el.getAttribute(a); if(v && v.trim()) return clean(v); }
-      const ic=el.querySelector && el.querySelector('[aria-label],img[alt],[title]');
-      if(ic){ const v=ic.getAttribute('aria-label')||ic.getAttribute('alt')||ic.getAttribute('title');
-        if(v && v.trim()) return clean(v); }
-      // an unlabeled submit/icon button inside a search form is "Search", else "Submit"
-      const ty=(el.type||'').toLowerCase();
-      const btn = ty==='submit'||ty==='image'||el.tagName==='BUTTON'||el.getAttribute('role')==='button';
-      if(btn){
-        const f=el.closest && el.closest('form');
-        if(f && (f.getAttribute('role')==='search' || /search/i.test(f.getAttribute('action')||'') ||
-                 f.querySelector('[type=search],[name*="search" i],[placeholder*="search" i]'))) return 'Search';
-        if(ty==='submit'||ty==='image') return 'Submit';
-      }
-    }catch(e){}
-    return '';
-  }
+""" + A11Y_HELPERS_JS + r"""
   function structural(el){
     // Locale-independent STRUCTURAL signals the credential/commit guards drive off:
     // the raw <input type>, the autocomplete token, and whether the control submits a
@@ -186,6 +147,34 @@ CAPTURE_JS = r"""
   }, true);
 })();
 """
+
+
+class CaptureIncomplete(RuntimeError):
+    """A capture session failed mid-drive (a CDP/browser error escaped the recording
+    loop). Any recording written for this session is a PARTIAL, truncated one — it is
+    persisted marked ``complete: false`` so nothing is lost, but this is raised so the
+    caller CANNOT mistake a truncated capture for a clean one (F14). Carries the number
+    of steps that were captured before the failure and the path they were written to."""
+
+    def __init__(self, message: str, *, steps: int, out: str) -> None:
+        super().__init__(message)
+        self.steps = steps
+        self.out = out
+
+
+def _recording_doc(session: RecordedSession, *, complete: bool) -> dict:
+    """Build the on-disk recording document from a folded session. ``complete`` records
+    whether the capture session ended cleanly (all pages closed / deadline / Ctrl-C) or
+    was TRUNCATED by a mid-drive failure — so a reader (and the caller) can tell a partial
+    recording from a whole one (F14). Pure; the offline test drives it directly."""
+    return {"site": session.site, "outcome": session.outcome, "complete": complete,
+            "events": [{"type": e.type, "payload": e.payload} for e in session.events]}
+
+
+def _count_steps(session: RecordedSession) -> int:
+    """The number of action steps (click/type/navigate) in a folded session."""
+    return sum(1 for e in session.events
+               if e.type.endswith(("user.click", "user.type", "user.navigate")))
 
 
 def _payload_to_raw(p: dict) -> RawInput | None:
@@ -301,6 +290,7 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
     proc = _launch_chrome(url, port=port, profile=profile, headed=headed, chrome=chrome)
     actions: list[dict] = []
     seen_hosts: set[str] = set()  # record each egress host once, not every tracker ping
+    capture_error: BaseException | None = None  # a mid-drive failure ⇒ the recording is partial
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}")
@@ -354,8 +344,14 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
                         break
             except KeyboardInterrupt:
                 pass
-    except Exception:  # noqa: BLE001 - a browser closed mid-session is a stop, never a crash
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # A failure DURING the drive (a CDP/protocol error, a crash) is NOT a clean stop:
+        # the recording collected so far is truncated. Remember it so the recording is
+        # marked incomplete and the caller is told, instead of silently reporting the
+        # partial capture as a success (F14). The normal stop paths — the human closing
+        # the last window / the deadline / Ctrl-C — break the loop above and never reach
+        # here, so a clean session is unaffected.
+        capture_error = exc
     finally:
         proc.terminate()
         try:
@@ -368,7 +364,9 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
     # end (the same "state the result" affordance used at forks). A still-empty outcome
     # is left as None — the gate then HOLDS the agent rather than auto-promoting on
     # SUCCESS alone.
-    if outcome is None:
+    if outcome is None and capture_error is None:
+        # Only prompt for the outcome on a CLEAN session — a failed capture has no whole
+        # result to state, and its recording is written incomplete regardless.
         try:
             answer = input("shadow capture: what did you accomplish? "
                            "(the result to verify, blank to skip) > ").strip()
@@ -377,11 +375,20 @@ def capture(url: str, *, site: str, out: str, port: int = 9222,
         outcome = answer or None
     items = [ri for a in actions if (ri := _payload_to_raw(a)) is not None]
     session = asyncio.run(_fold(items, site=site, outcome=outcome))
-    doc = {"site": session.site, "outcome": session.outcome,
-           "events": [{"type": e.type, "payload": e.payload} for e in session.events]}
+    complete = capture_error is None
+    doc = _recording_doc(session, complete=complete)
     Path(out).write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    steps = sum(1 for e in session.events
-                if e.type.endswith(("user.click", "user.type", "user.navigate")))
+    steps = _count_steps(session)
+    if capture_error is not None:
+        # The session failed mid-drive: the recording is a PARTIAL one, persisted marked
+        # complete=false so nothing is lost, but the caller is told rather than seeing a
+        # success message (F14). A truncated capture is now distinguishable from a clean one.
+        print(f"shadow capture: FAILED mid-session ({type(capture_error).__name__}: "
+              f"{capture_error}) — wrote a PARTIAL recording of {steps} step(s) marked "
+              f"incomplete -> {out}")
+        raise CaptureIncomplete(
+            f"live capture failed mid-session: {type(capture_error).__name__}: {capture_error}",
+            steps=steps, out=out) from capture_error
     whys = sum(1 for e in session.events if (e.payload or {}).get("intent"))
     print(f"shadow capture: {steps} action step(s), {whys} tagged 'why', "
           f"{len(session.events)} redacted data.shadow.* events -> {out}")

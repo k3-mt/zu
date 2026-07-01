@@ -28,6 +28,8 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, Field
 
+from .capture import CREDENTIAL_FIELD_NAMES
+
 # The placeholder a redacted value is replaced with — visible on the log so a
 # reviewer sees that redaction HAPPENED (an absence would be ambiguous).
 REDACTED = "[REDACTED]"
@@ -43,8 +45,12 @@ _SECRET_HEADERS: frozenset[str] = frozenset({"authorization", "cookie", "set-coo
 # ``password`` key (see zu_shadow.capture._is_credential_target), which this list blanks.
 # The remaining tokens are a documented SECONDARY fallback for a value that arrived under
 # an already-credential-named key; they are English and so must never be the sole signal.
-_CREDENTIAL_FIELD_HINTS: tuple[str, ...] = ("password", "passwd", "secret", "token",
-                                            "api_key", "apikey", "otp", "cvv", "pin")
+#
+# F10: this is NO LONGER a divergent duplicate — it is the SAME tuple capture detects
+# on (``zu_shadow.capture.CREDENTIAL_FIELD_NAMES``), so a card/IBAN/security-code value
+# reaching the log via a NON-capture path (a key literally named ``iban``/``card number``
+# that capture never marked) is blanked here too. One source of truth for both paths.
+_CREDENTIAL_FIELD_HINTS: tuple[str, ...] = CREDENTIAL_FIELD_NAMES
 
 # Generic token/secret SHAPES — never a site-specific constant. Each is a class of
 # high-entropy credential string that should never be on the log even if it slips
