@@ -43,7 +43,9 @@ class FakeCdpTarget:
         self.effects: dict[int, Any] = {}
         self._obj_to_node: dict[str, Any] = {}
 
-    async def send(self, method: str, params: dict | None = None) -> dict:
+    async def send(
+        self, method: str, params: dict | None = None, *, session_id: str | None = None
+    ) -> dict:
         params = params or {}
         self.calls.append((method, params))
         if method == "Page.getFrameTree":
@@ -203,3 +205,111 @@ async def test_satisfier_sets_an_unnamed_select_end_to_end() -> None:
 
     assert [r.chosen_label for r in results] == ["Black"]
     assert ("DOM.resolveNode", {"backendNodeId": 50}) in target.calls
+
+
+class FakeOopifTarget:
+    """A CDP endpoint with a page target + one CROSS-ORIGIN iframe target (a separate
+    session), plus one ad-iframe target that must be skipped (#126). Models
+    Target.getTargets / attachToTarget and session-routed AX/resolve/callFn."""
+
+    _SESSION = "sess-iframe-1"
+
+    def __init__(self, page_nodes: list[dict], iframe_nodes: list[dict],
+                 *, iframe_url: str = "https://cmp.example/booking") -> None:
+        self.page_nodes = page_nodes
+        self.iframe_nodes = iframe_nodes
+        self.iframe_url = iframe_url
+        self.calls: list[tuple[str, dict, str | None]] = []
+        self.effects: dict[tuple[str | None, int], Any] = {}
+        self._obj: dict[str, tuple[str | None, Any]] = {}
+
+    async def send(self, method: str, params: dict | None = None,
+                   *, session_id: str | None = None) -> dict:
+        params = params or {}
+        self.calls.append((method, params, session_id))
+        if method == "Page.getFrameTree":
+            return {}
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"title": "Book", "url": "https://salon.example"}}
+        if method == "Target.getTargets":
+            return {"targetInfos": [
+                {"type": "iframe", "targetId": "tid-1", "url": self.iframe_url},
+                {"type": "iframe", "targetId": "ad-1", "url": "https://doubleclick.net/pixel"},
+                {"type": "page", "targetId": "p-0", "url": "https://salon.example"},
+            ]}
+        if method == "Target.attachToTarget":
+            return {"sessionId": self._SESSION} if params.get("targetId") == "tid-1" else {}
+        if method == "Accessibility.getFullAXTree":
+            return {"nodes": list(self.iframe_nodes if session_id == self._SESSION else self.page_nodes)}
+        if method == "DOM.resolveNode":
+            oid = f"obj-{session_id}-{params.get('backendNodeId')}"
+            self._obj[oid] = (session_id, params.get("backendNodeId"))
+            return {"object": {"objectId": oid}}
+        if method == "Runtime.callFunctionOn":
+            key = self._obj.get(params.get("objectId", ""))
+            effect = self.effects.get(key) if key is not None else None
+            if effect is not None:
+                effect(self)
+            return {"result": {"value": None}}
+        return {}
+
+
+class NoSessionTarget:
+    """A transport predating OOPIF support — its ``send`` has no ``session_id`` kwarg,
+    so session-routed calls raise TypeError; the surface must skip OOPIFs gracefully."""
+
+    def __init__(self, page_nodes: list[dict]) -> None:
+        self.page_nodes = page_nodes
+
+    async def send(self, method: str, params: dict | None = None) -> dict:
+        params = params or {}
+        if method == "Accessibility.getFullAXTree":
+            return {"nodes": list(self.page_nodes)}
+        if method == "Target.getTargets":
+            return {"targetInfos": [{"type": "iframe", "targetId": "t", "url": "https://x.example"}]}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "s"}
+        return {}
+
+
+async def test_perceive_includes_cross_origin_iframe_target_controls() -> None:
+    # The failing case (#126): the site chrome is a 'Log in' link; the real booking UI
+    # is a cross-origin widget in a separate iframe TARGET, invisible to the page tree.
+    target = FakeOopifTarget(
+        page_nodes=[ax("link", "Log in", node_id=1)],
+        iframe_nodes=[ax("button", "Book 9:30", node_id=50)],
+    )
+    view = await CdpConnectedSurface(target).perceive()
+    assert _labels(view) == ["Log in", "Book 9:30"]  # the OOPIF control is now present
+    # the ad iframe was never attached; the real one was
+    attached = [p.get("targetId") for m, p, _ in target.calls if m == "Target.attachToTarget"]
+    assert "tid-1" in attached and "ad-1" not in attached
+
+
+async def test_act_on_a_cross_origin_iframe_control_routes_to_its_session() -> None:
+    target = FakeOopifTarget(
+        page_nodes=[ax("link", "Home", node_id=1)],
+        iframe_nodes=[ax("button", "Book 9:30", node_id=50)],
+    )
+    def clear(t: FakeOopifTarget) -> None:
+        t.iframe_nodes[:] = []
+    target.effects[(FakeOopifTarget._SESSION, 50)] = clear
+    surface = CdpConnectedSurface(target)
+    view = await surface.perceive()
+    book = next(a for a in view.affordances if a.label == "Book 9:30")
+
+    after = await surface.act(SurfaceAction(handle=book.handle, kind="click"))
+
+    # resolveNode + callFunctionOn were routed to the iframe's session, and the click took.
+    assert ("DOM.resolveNode", {"backendNodeId": 50}, FakeOopifTarget._SESSION) in target.calls
+    assert any(m == "Runtime.callFunctionOn" and s == FakeOopifTarget._SESSION
+               for m, _, s in target.calls)
+    assert "Book 9:30" not in _labels(after)
+
+
+async def test_oopif_degrades_gracefully_when_transport_lacks_session_routing() -> None:
+    # A transport whose send() predates OOPIF has no session_id kwarg — deliberately
+    # NOT structurally a CdpTarget; the surface must still work over it.
+    surface = CdpConnectedSurface(NoSessionTarget([ax("button", "Buy", node_id=1)]))  # type: ignore[arg-type]
+    view = await surface.perceive()  # must not crash on the session-routed AX call
+    assert _labels(view) == ["Buy"]  # page path intact; OOPIF simply skipped

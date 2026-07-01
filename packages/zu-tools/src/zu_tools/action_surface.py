@@ -110,6 +110,16 @@ class AxNode(BaseModel):
     # ``None`` on the offline reduce path / a tree that omits it (fixtures and
     # existing producers are unaffected — it is purely additive).
     node_id: int | None = None
+    # The accessible name of this node's ENCLOSING container (a card/list-item/section
+    # heading), or ``None``. A name-class structural signal that disambiguates a row of
+    # identically-named controls (#127). Threaded onto the affordance; additive.
+    enclosing_label: str | None = None
+    # The CDP session this node was captured under, when it lives in a CROSS-ORIGIN
+    # iframe target (an OOPIF, a separate CDP target, #126) — ``None`` for the page's
+    # own root session. Harness-side: threaded into ``handle_map`` so ``act`` routes
+    # DOM.resolveNode / Runtime.callFunctionOn to the right session; never
+    # model-visible. Additive, ``None`` by default.
+    session_id: str | None = None
 
 
 class Affordance(BaseModel):
@@ -121,6 +131,7 @@ class Affordance(BaseModel):
     value: str | None = None
     states: list[str] = Field(default_factory=list)
     group: str | None = None  # the single-choice group this option belongs to (#120), or None
+    enclosing_label: str | None = None  # accessible name of the enclosing card/section (#127)
 
 
 class Surface(BaseModel):
@@ -231,14 +242,19 @@ def reduce_surface(
                     value=node.value,
                     states=list(node.states),
                     group=node.group,
+                    enclosing_label=node.enclosing_label,
                 )
             )
             # The durable locator the model never sees (role + accessible name),
             # plus the CDP backend node id when the tree carried one — #93 resolves
-            # a handle to its element across shadow/frame boundaries via that id.
+            # a handle to its element across shadow/frame boundaries via that id — and
+            # the CDP session id when the node lives in a cross-origin iframe target,
+            # so ``act`` routes to the right session (#126).
             locator: dict[str, Any] = {"role": role, "name": label}
             if node.node_id is not None:
                 locator["node_id"] = node.node_id
+            if node.session_id is not None:
+                locator["session_id"] = node.session_id
             handle_map[handle] = locator
 
     blind = False
@@ -309,7 +325,67 @@ def _group_ancestors(cdp_nodes: list[dict]) -> dict[str, str]:
     return groups
 
 
-def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
+# Container roles whose accessible name (or nearest descendant heading) labels a
+# CARD / list-item / section — the enclosing label that disambiguates a row of
+# identically-named controls (#127).
+_ENCLOSING_CONTAINER_ROLES: frozenset[str] = frozenset({
+    "article", "listitem", "group", "region", "row", "gridcell", "cell", "radiogroup",
+    "listbox", "tablist", "form", "section", "figure", "list", "table", "tabpanel",
+    "dialog", "rowgroup",
+})
+
+
+def _enclosing_labels(cdp_nodes: list[dict]) -> dict[str, str]:
+    """Map each AX ``nodeId`` to the accessible name of its nearest enclosing
+    labelled container — the container's own ``aria-label``/name, else the name of a
+    heading it directly encloses (a card heading). Rebuilt from ``childIds``, so it is
+    tree-structural; a name-class signal, never free page prose (#127)."""
+    by_id: dict[str, dict] = {}
+    parent: dict[str, str] = {}
+    for n in cdp_nodes:
+        nid = n.get("nodeId")
+        if not isinstance(nid, str):
+            continue
+        by_id[nid] = n
+        for child in n.get("childIds", []) or []:
+            if isinstance(child, str):
+                parent[child] = nid
+
+    def role_of(nid: str) -> str:
+        return _ax_string(by_id.get(nid, {}).get("role")).lower()
+
+    def name_of(nid: str) -> str:
+        return _ax_string(by_id.get(nid, {}).get("name")).strip()
+
+    # A container's label: its own name if set, else a heading it encloses.
+    container_label: dict[str, str] = {}
+    for nid in by_id:
+        if role_of(nid) in _ENCLOSING_CONTAINER_ROLES and name_of(nid):
+            container_label[nid] = name_of(nid)
+    for nid in by_id:
+        if role_of(nid) != "heading" or not name_of(nid):
+            continue
+        cur, seen = parent.get(nid), set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if role_of(cur) in _ENCLOSING_CONTAINER_ROLES:
+                container_label.setdefault(cur, name_of(nid))  # nearest container, if unset
+                break
+            cur = parent.get(cur)
+
+    out: dict[str, str] = {}
+    for nid in by_id:
+        cur, seen = parent.get(nid), set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if cur in container_label:
+                out[nid] = container_label[cur]
+                break
+            cur = parent.get(cur)
+    return out
+
+
+def normalize_axtree(cdp_nodes: list[dict], *, session_id: str | None = None) -> list[AxNode]:
     """Normalise the raw CDP ``Accessibility.getFullAXTree`` node list into
     :class:`AxNode` records, in document (pre-order) order as CDP returns them.
 
@@ -322,6 +398,7 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
     """
     out: list[AxNode] = []
     group_of = _group_ancestors(cdp_nodes)
+    enclosing_of = _enclosing_labels(cdp_nodes)
     state_props = {"disabled", "checked", "expanded", "required", "focused", "selected", "invalid"}
     for n in cdp_nodes:
         role = _ax_string(n.get("role"))
@@ -334,6 +411,7 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
         node_id = raw_node_id if isinstance(raw_node_id, int) else None
         nid = n.get("nodeId")
         group = group_of.get(nid) if isinstance(nid, str) else None
+        enclosing = enclosing_of.get(nid) if isinstance(nid, str) else None
         states: list[str] = []
         for sp in sorted(state_props):
             val = props.get(sp, {})
@@ -355,6 +433,8 @@ def normalize_axtree(cdp_nodes: list[dict]) -> list[AxNode]:
                 if isinstance(props.get("hidden"), dict) else True,
                 node_id=node_id,
                 group=group,
+                enclosing_label=enclosing,
+                session_id=session_id,
             )
         )
     return out

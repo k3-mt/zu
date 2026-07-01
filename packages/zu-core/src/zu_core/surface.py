@@ -62,6 +62,14 @@ class SurfaceAffordance(BaseModel):
     # ``fingerprint`` — it is stable structure, not a selection effect — so existing
     # fixtures/digests are unaffected (it is purely additive).
     group: str | None = None
+    # The accessible name of this control's ENCLOSING container — a card/list-item
+    # heading, an ``aria-labelledby`` group name, the nearest section heading (#127).
+    # A NAME-CLASS structural signal (the label OF a control's own group box), never
+    # free page prose, so it is content-free and injection-safe. It disambiguates a
+    # row of identically-named controls — a list of service cards whose buttons all
+    # read 'Select', selectable only by their card heading. ``None`` when there is no
+    # labelled enclosing container. Additive; out of ``fingerprint``.
+    enclosing_label: str | None = None
 
 
 class SurfaceView(BaseModel):

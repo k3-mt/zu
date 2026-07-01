@@ -7,6 +7,23 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — cross-origin iframe flattening + repeated-list disambiguation (#126, #127)
+Two booking-audit follow-ups that unblock the primitive family on real widget/aggregator sites.
+- **Cross-origin iframes (#126)** — `CdpConnectedSurface` flattened open shadow DOM + same-origin
+  frames, but a cross-origin OOPIF is a separate CDP target its page-side tree can't see (a Fresha /
+  Timely booking widget was invisible; the drive gave up). `perceive()` now also enumerates iframe
+  TARGETS (`Target.getTargets` → `attachToTarget` with flatten), pulls each one's AX tree in its own
+  session, and merges it — ad/tracker frames skipped, bounded to 8. Handles round-trip: an in-iframe
+  control carries its session id in the harness-side handle map, so `act` routes `DOM.resolveNode` /
+  `callFunctionOn` back to that session. A transport without session routing degrades gracefully
+  (OOPIFs skipped, page path intact).
+- **Repeated-card lists + name disambiguation (#127)** — a new content-free `enclosing_label` on
+  `SurfaceAffordance` (the accessible name of a control's enclosing card/section — its `aria-label`
+  or nearest heading, from the AX tree, never page prose). `choose_one` folds it into token matching
+  ON A GENUINE NAME COLLISION, so a list of service cards whose buttons all read 'Select' becomes
+  selectable by a hint (`"Cut & Finish"`, `"first"`) — without broadening a normal distinctive name.
+  Repeated-card lists (results / services) already read as a choosable group via the weak-run grouping.
+
 ### Added — the interaction-primitive family: one closed vocabulary generalises the funnel (#125)
 The connected-surface resolvers (consent #94, selection #95, checkout #117, cart #122) are each a
 VERTICAL-NAMED capability. Generalised, they are all instances of ONE shape — a PRIMITIVE that

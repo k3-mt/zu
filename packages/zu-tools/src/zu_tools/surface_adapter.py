@@ -33,6 +33,7 @@ def to_surface_view(s: Surface) -> SurfaceView:
                 value=a.value,
                 states=tuple(a.states),
                 group=a.group,
+                enclosing_label=a.enclosing_label,
             )
             for a in s.affordances
         ),

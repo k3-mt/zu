@@ -36,7 +36,7 @@ from typing import Any, Protocol, runtime_checkable
 from zu_core.ports import SurfaceAction
 from zu_core.surface import SurfaceView
 
-from .action_surface import normalize_axtree, reduce_surface
+from .action_surface import AxNode, normalize_axtree, reduce_surface
 from .surface_adapter import to_surface_view
 
 # The shipped verbs ``act()`` resolves. ``kind`` on a SurfaceAction is a free
@@ -110,15 +110,42 @@ _SELECT_FN = (
 )
 
 
+# Bound the cross-origin iframe targets we attach to per perceive (#126) — a page
+# can embed dozens of ad/tracker frames; we take the first few real ones only.
+_MAX_IFRAME_TARGETS = 8
+# Hosts whose iframes are ads / trackers / analytics — skipped so their noise never
+# enters the surface. A content-free URL-host heuristic (never page text).
+_AD_FRAME_HOST_MARKERS: tuple[str, ...] = (
+    "doubleclick", "googlesyndication", "googletagmanager", "google-analytics",
+    "googleadservices", "adservice", "/ads/", "adsystem", "amazon-adsystem",
+    "facebook.com/tr", "connect.facebook", "hotjar", "segment.io", "segment.com",
+    "amplitude", "mixpanel", "criteo", "taboola", "outbrain", "scorecardresearch",
+    "quantserve", "moatads", "adnxs", "casalemedia",
+)
+
+
+def _is_ad_frame(url: str) -> bool:
+    low = url.lower()
+    return any(m in low for m in _AD_FRAME_HOST_MARKERS)
+
+
 @runtime_checkable
 class CdpTarget(Protocol):
     """The one method a host's CDP connection must expose: send a Chrome DevTools
     Protocol command and await its JSON result — exactly a raw devtools client or
     Playwright's ``CDPSession.send(method, params)``. Kept minimal + injectable so
     the host wires its OWN browser in (Zu launches nothing) and so the surface is
-    tested over a fake transport at $0."""
+    tested over a fake transport at $0.
 
-    async def send(self, method: str, params: dict | None = None) -> dict: ...
+    ``session_id`` is the FLAT-protocol routing field: when the surface attaches to a
+    CROSS-ORIGIN iframe target (an OOPIF, #126) it passes that target's session id so
+    the command runs in that target. A transport that does not accept ``session_id``
+    simply does not support OOPIFs — the surface degrades gracefully (it skips them),
+    so the base ``send(method, params)`` contract is unchanged for existing hosts."""
+
+    async def send(
+        self, method: str, params: dict | None = None, *, session_id: str | None = None
+    ) -> dict: ...
 
 
 def _collect_child_frames(node: dict, out: list[str]) -> None:
@@ -150,11 +177,32 @@ class CdpConnectedSurface:
         self._handle_map: dict[str, dict] = {}
 
     async def perceive(self) -> SurfaceView:
+        # The page's own tree (root session) PLUS each cross-origin iframe target
+        # (an OOPIF is a separate CDP target the page tree cannot see, #126). Each
+        # source is normalised on its own so its group/enclosing structure is
+        # per-tree, and iframe nodes carry their session id for the act path.
+        ax_nodes = await self._page_ax_nodes()
+        ax_nodes.extend(await self._iframe_ax_nodes())
+        title, url = await self._title_url()
+        surface = reduce_surface(
+            ax_nodes, title=title, url=url,
+            unlabeled_ratio=self._unlabeled_ratio,
+            # A ConnectedSurface resolves handles by GLOBAL backend node id, so a
+            # self-addressing control (a <select> variant picker) is actionable even
+            # with no accessible name — keep it rather than drop it as blind (#110).
+            keep_unnamed_roles=_SELF_ADDRESSING_ROLES,
+        )
+        self._handle_map = dict(surface.handle_map)
+        return to_surface_view(surface)
+
+    async def _page_ax_nodes(self) -> list[AxNode]:
+        """The page target's AX nodes (root session): the main frame + same-origin
+        child frames, de-duplicated by global backend node id."""
         seen: set[int] = set()
-        nodes: list[dict] = []
+        raw: list[dict] = []
         for frame_id in await self._frame_ids():
             params: dict[str, Any] = {"frameId": frame_id} if frame_id else {}
-            resp = await self._target.send("Accessibility.getFullAXTree", params)
+            resp = await self._send("Accessibility.getFullAXTree", params)
             frame_nodes = resp.get("nodes") if isinstance(resp, dict) else None
             if not isinstance(frame_nodes, list):
                 continue
@@ -166,41 +214,90 @@ class CdpConnectedSurface:
                     if bid in seen:
                         continue  # already collected from the main tree / another frame
                     seen.add(bid)
-                nodes.append(n)
-        title, url = await self._title_url()
-        surface = reduce_surface(
-            normalize_axtree(nodes), title=title, url=url,
-            unlabeled_ratio=self._unlabeled_ratio,
-            # A ConnectedSurface resolves handles by GLOBAL backend node id, so a
-            # self-addressing control (a <select> variant picker) is actionable even
-            # with no accessible name — keep it rather than drop it as blind (#110).
-            keep_unnamed_roles=_SELF_ADDRESSING_ROLES,
-        )
-        self._handle_map = dict(surface.handle_map)
-        return to_surface_view(surface)
+                raw.append(n)
+        return normalize_axtree(raw)
+
+    async def _iframe_ax_nodes(self) -> list[AxNode]:
+        """The AX nodes of each CROSS-ORIGIN iframe target (#126): attach to the
+        target, pull its full AX tree in that session, and stamp its session id so
+        the act path routes ``DOM.resolveNode`` / ``callFunctionOn`` back to it."""
+        out: list[AxNode] = []
+        for target_id in await self._iframe_targets():
+            session_id = await self._attach(target_id)
+            if session_id is None:
+                continue  # transport can't attach / doesn't route sessions — skip it
+            resp = await self._send("Accessibility.getFullAXTree", {}, session_id=session_id)
+            nodes = resp.get("nodes") if isinstance(resp, dict) else None
+            if not isinstance(nodes, list):
+                continue
+            out.extend(
+                normalize_axtree(
+                    [n for n in nodes if isinstance(n, dict)], session_id=session_id
+                )
+            )
+        return out
 
     async def act(self, action: SurfaceAction) -> SurfaceView:
-        object_id = await self._resolve(action.handle)
+        object_id, session_id = await self._resolve(action.handle)
         if object_id is not None:
             if action.kind == _TYPE:
-                await self._call_fn(object_id, _TYPE_FN, [{"value": action.text or ""}])
+                await self._call_fn(object_id, _TYPE_FN, [{"value": action.text or ""}], session_id)
             elif action.kind == _SELECT:
-                await self._call_fn(object_id, _SELECT_FN, [{"value": action.text}])
+                await self._call_fn(object_id, _SELECT_FN, [{"value": action.text}], session_id)
             elif action.kind == _SUBMIT:
-                await self._call_fn(object_id, _SUBMIT_FN)
+                await self._call_fn(object_id, _SUBMIT_FN, session_id=session_id)
             else:  # click — the default verb
-                await self._call_fn(object_id, _CLICK_FN)
+                await self._call_fn(object_id, _CLICK_FN, session_id=session_id)
         # A stale/unresolvable handle is an escalation, not a crash (§11.3): we
         # simply re-perceive; the caller sees the handle gone and re-captures.
         return await self.perceive()
 
     # --- CDP plumbing --------------------------------------------------------
 
+    async def _send(
+        self, method: str, params: dict | None = None, session_id: str | None = None
+    ) -> dict:
+        """One send, optionally routed to an OOPIF session (#126). A transport that
+        does not accept ``session_id`` raises ``TypeError`` — we swallow it and return
+        empty, so an OOPIF is simply skipped rather than crashing the page path."""
+        if session_id is None:
+            return await self._target.send(method, params or {})
+        try:
+            return await self._target.send(method, params or {}, session_id=session_id)
+        except TypeError:
+            return {}
+
+    async def _iframe_targets(self) -> list[str]:
+        """The cross-origin iframe target ids to attach to (#126): CDP targets of type
+        'iframe', ad/tracker hosts skipped, bounded to :data:`_MAX_IFRAME_TARGETS`."""
+        resp = await self._send("Target.getTargets")
+        infos = resp.get("targetInfos") if isinstance(resp, dict) else None
+        if not isinstance(infos, list):
+            return []
+        out: list[str] = []
+        for t in infos:
+            if not isinstance(t, dict) or t.get("type") != "iframe":
+                continue
+            if _is_ad_frame(str(t.get("url", ""))):
+                continue
+            tid = t.get("targetId")
+            if isinstance(tid, str):
+                out.append(tid)
+            if len(out) >= _MAX_IFRAME_TARGETS:
+                break
+        return out
+
+    async def _attach(self, target_id: str) -> str | None:
+        """Attach to a child target with ``flatten`` and return its session id."""
+        resp = await self._send("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+        sid = resp.get("sessionId") if isinstance(resp, dict) else None
+        return sid if isinstance(sid, str) else None
+
     async def _frame_ids(self) -> list[str]:
         """``""`` (the main frame, no frameId — flattens its shadow roots + same-doc
-        iframes) plus each cross-origin child frame id. Falls back to just the main
+        iframes) plus each same-origin child frame id. Falls back to just the main
         frame when the target exposes no frame tree."""
-        resp = await self._target.send("Page.getFrameTree", {})
+        resp = await self._send("Page.getFrameTree", {})
         tree = resp.get("frameTree") if isinstance(resp, dict) else None
         ids: list[str] = [""]
         if isinstance(tree, dict):
@@ -208,31 +305,34 @@ class CdpConnectedSurface:
         return ids
 
     async def _title_url(self) -> tuple[str, str]:
-        resp = await self._target.send("Target.getTargetInfo", {})
+        resp = await self._send("Target.getTargetInfo", {})
         info = resp.get("targetInfo") if isinstance(resp, dict) else None
         if isinstance(info, dict):
             return str(info.get("title", "")), str(info.get("url", ""))
         return "", ""
 
-    async def _resolve(self, handle: str) -> str | None:
-        """Resolve an opaque handle to a live JS object id, ACROSS boundaries: the
-        handle map carries the element's GLOBAL backend DOM-node id, which
-        ``DOM.resolveNode`` turns into an objectId regardless of the shadow root /
-        frame it lives in. ``None`` (unknown handle, or a tree with no node id) is a
-        re-capture signal, handled by ``act`` re-perceiving."""
+    async def _resolve(self, handle: str) -> tuple[str | None, str | None]:
+        """Resolve an opaque handle to a live JS object id + its session, ACROSS
+        boundaries: the handle map carries the element's GLOBAL backend DOM-node id
+        (which ``DOM.resolveNode`` turns into an objectId regardless of shadow root /
+        frame) and, for an OOPIF control, the session it lives in (#126). ``(None,
+        None)`` (unknown handle / no node id) is a re-capture signal."""
         locator = self._handle_map.get(handle)
         node_id = locator.get("node_id") if isinstance(locator, dict) else None
+        session_id = locator.get("session_id") if isinstance(locator, dict) else None
+        session_id = session_id if isinstance(session_id, str) else None
         if not isinstance(node_id, int):
-            return None
-        resp = await self._target.send("DOM.resolveNode", {"backendNodeId": node_id})
+            return None, None
+        resp = await self._send("DOM.resolveNode", {"backendNodeId": node_id}, session_id=session_id)
         obj = resp.get("object") if isinstance(resp, dict) else None
         object_id = obj.get("objectId") if isinstance(obj, dict) else None
-        return object_id if isinstance(object_id, str) else None
+        return (object_id if isinstance(object_id, str) else None), session_id
 
     async def _call_fn(
-        self, object_id: str, declaration: str, args: list[dict] | None = None
+        self, object_id: str, declaration: str, args: list[dict] | None = None,
+        session_id: str | None = None,
     ) -> dict:
-        return await self._target.send(
+        return await self._send(
             "Runtime.callFunctionOn",
             {
                 "objectId": object_id,
@@ -240,4 +340,5 @@ class CdpConnectedSurface:
                 "arguments": args or [],
                 "returnByValue": True,
             },
+            session_id=session_id,
         )
