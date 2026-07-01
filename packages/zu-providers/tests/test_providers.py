@@ -257,6 +257,122 @@ async def test_openai_request_translation() -> None:
     assert body["tools"][0]["function"]["name"] == "http_fetch"
 
 
+# --- #65 F28: sampling params threaded through to BOTH adapters' SDK calls -----
+
+
+async def test_anthropic_threads_sampling_params() -> None:
+    # temperature/top_p/top_k/stop are carried onto the Anthropic wire body
+    # (stop -> stop_sequences); ``seed`` is dropped (no Messages API field for it).
+    # On old code only max_tokens was honoured and these were silently dropped.
+    captured: list = []
+    p = make_anthropic("text", captured)
+    await p.complete(
+        ModelRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            params={
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "top_k": 40,
+                "stop": ["STOP"],
+                "seed": 123,  # unsupported by this vendor -> omitted
+            },
+        )
+    )
+    body = captured[0]
+    assert body["temperature"] == 0.3
+    assert body["top_p"] == 0.9
+    assert body["top_k"] == 40
+    assert body["stop_sequences"] == ["STOP"]  # neutral 'stop' -> vendor wire name
+    assert "seed" not in body  # dropped: Anthropic has no seed field
+
+
+async def test_openai_threads_sampling_params() -> None:
+    # temperature/top_p/stop/seed are carried onto the Chat Completions body;
+    # ``top_k`` is dropped (no Chat Completions field for it). Mirror of the
+    # anthropic test with this vendor's supported set.
+    captured: list = []
+    p = make_openai("text", captured)
+    await p.complete(
+        ModelRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            params={
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "stop": ["STOP"],
+                "seed": 123,
+                "top_k": 40,  # unsupported by this vendor -> omitted
+            },
+        )
+    )
+    body = captured[0]
+    assert body["temperature"] == 0.3
+    assert body["top_p"] == 0.9
+    assert body["stop"] == ["STOP"]
+    assert body["seed"] == 123
+    assert "top_k" not in body  # dropped: Chat Completions has no top_k field
+
+
+@pytest.mark.parametrize("make", _PROVIDERS)
+async def test_unset_sampling_params_are_omitted_not_none(make) -> None:
+    # A request with no sampling params must not send temperature/top_p/etc. at
+    # all — never as None. (max_tokens is threaded separately and may appear.)
+    captured: list = []
+    p = make("text", captured)
+    await p.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    body = captured[0]
+    for k in ("temperature", "top_p", "top_k", "stop", "stop_sequences", "seed"):
+        assert k not in body
+
+
+# --- #65 F29: openai-compatible adapter guards a partial/None usage object -----
+
+
+async def test_openai_partial_usage_does_not_crash_or_misreport() -> None:
+    # A partial usage object (only prompt_tokens; completion/total missing) must
+    # degrade to the normalised shape with 0-filled fields and a computed total —
+    # the same defensive handling the anthropic adapter applies — not raise
+    # AttributeError or report None tokens. On old code ``raw.completion_tokens``
+    # / ``raw.total_tokens`` would blow up here.
+    captured: list = []
+    payload = {
+        "id": "c9", "object": "chat.completion", "created": 0, "model": "gpt-x",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 7},  # completion_tokens / total_tokens absent
+    }
+    client = openai.AsyncOpenAI(
+        api_key="test", base_url="http://test.local/v1",
+        http_client=httpx.AsyncClient(transport=_mock_transport(payload, captured)),
+    )
+    p = OpenAICompatibleProvider(model="gpt-x", client=client)
+    resp = await p.complete(ModelRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert resp.usage["input_tokens"] == 7
+    assert resp.usage["output_tokens"] == 0  # missing -> 0, not None
+    assert resp.usage["total_tokens"] == 7  # computed from the parts
+
+
+# --- #65 F33: the adapter's repr/str must not leak the resolved API key --------
+
+
+@pytest.mark.parametrize(
+    "make_provider",
+    [
+        pytest.param(lambda: AnthropicProvider(api_key="sk-super-secret"), id="anthropic"),
+        pytest.param(
+            lambda: OpenAICompatibleProvider(model="gpt-x", api_key="sk-super-secret"),
+            id="openai-compatible",
+        ),
+    ],
+)
+def test_repr_does_not_leak_api_key(make_provider) -> None:
+    p = make_provider()
+    for rendered in (repr(p), str(p), f"{p!r}", f"{p}", format(p)):
+        assert "sk-super-secret" not in rendered
+    # ...and the key must not sit under a PUBLIC attribute name (the surface a
+    # naive ``{k: v for k, v}`` config dump or an ORM/pydantic serializer walks).
+    # It lives under a private ``_api_key`` so it stays out of those paths.
+    assert not any(v == "sk-super-secret" for k, v in vars(p).items() if not k.startswith("_"))
+
+
 # --- the id-matching translation (pure, no SDK) -------------------------------
 
 _TOOL_HISTORY: list[dict] = [
