@@ -26,7 +26,13 @@ from typing import Any
 from zu_core.content import Audio, Image, Text
 from zu_core.ports import CAP_NET
 
-from .client import HfClient, InferenceClientBackend
+from .client import (
+    HfClient,
+    InferenceClientBackend,
+    MalformedModelOutput,
+    PipelineBackend,
+)
+from .supply_chain import ModelPin, SupplyChainPolicy
 
 
 def _decode_media(data_b64: str | None, path: str | None) -> bytes:
@@ -37,20 +43,77 @@ def _decode_media(data_b64: str | None, path: str | None) -> bytes:
     raise ValueError("provide media as 'data_b64' (base64) or a local 'path'")
 
 
+def _unparseable_obs(exc: MalformedModelOutput, model: str) -> dict:
+    """Turn a :class:`MalformedModelOutput` into a structured error observation the
+    loop treats as a failure (it honours the ``error`` key) — so a coerced-away
+    failure is never mistaken downstream for a clean empty result. The offending
+    raw value is surfaced (repr, bounded) so the failure is diagnosable."""
+    return {
+        "error": str(exc),
+        "unparseable": f"{exc.raw!r:.500}",
+        "model": model,
+    }
+
+
+def _build_backend(
+    backend: str,
+    *,
+    policy: SupplyChainPolicy | None,
+    pins: dict[str, ModelPin] | None,
+) -> HfClient:
+    """Construct the serving backend named by ``backend`` from config.
+
+    ``"hosted"`` builds an :class:`InferenceClientBackend` (the router / an
+    Endpoint); ``"local"`` builds a :class:`PipelineBackend`, threading the
+    supply-chain ``policy`` and per-model ``pins`` (cluster-5) through to it so an
+    air-gapped deployment can pin + hash-verify from config. The supply-chain
+    arguments are only meaningful for the local pipeline (the hosted router does
+    the fetch); passing them with ``hosted`` is a config error, surfaced loudly
+    rather than silently ignored."""
+    if backend == "hosted":
+        if policy is not None or pins is not None:
+            raise ValueError(
+                "supply-chain policy/pins apply to the local PipelineBackend only; "
+                "the hosted InferenceClientBackend fetches through the router"
+            )
+        return InferenceClientBackend()
+    if backend == "local":
+        return PipelineBackend(policy, pins=pins)
+    raise ValueError(f"unknown backend {backend!r}: expected 'hosted' or 'local'")
+
+
 class _HfTool:
     """Shared base: hold a model id + client, and derive the capability envelope
-    from the backend (hosted ⇒ net+router; local ⇒ nothing)."""
+    from the backend (hosted ⇒ net+router; local ⇒ nothing).
+
+    The backend is configurable (§4.5, cluster-5): an explicit ``client`` seam
+    wins (the test/injection path); otherwise ``backend`` selects hosted vs local
+    and — for the local pipeline — the supply-chain ``policy`` and per-model
+    ``pins`` thread through to its construction. Unset, the default is the hosted
+    router, identical to before."""
 
     tier = 1  # a specialised model the policy calls — cheap, not an escalation
 
-    def __init__(self, model: str, client: HfClient | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        client: HfClient | None = None,
+        *,
+        backend: str = "hosted",
+        policy: SupplyChainPolicy | None = None,
+        pins: dict[str, ModelPin] | None = None,
+    ) -> None:
         self.model = model
         self._client = client
-        backend = client if client is not None else InferenceClientBackend()
-        host = getattr(backend, "egress_host", "")
+        chosen = (
+            client
+            if client is not None
+            else _build_backend(backend, policy=policy, pins=pins)
+        )
+        host = getattr(chosen, "egress_host", "")
         self.capabilities = frozenset({CAP_NET}) if host else frozenset()
         self.egress = frozenset({host}) if host else frozenset()
-        self._backend = backend
+        self._backend = chosen
 
     def _c(self) -> HfClient:
         return self._client if self._client is not None else self._backend
@@ -163,7 +226,10 @@ class Classify(_HfTool):
     }
 
     async def __call__(self, ctx: Any, text: str) -> dict:
-        labels = self._c().text_classification(text, self.model)
+        try:
+            labels = self._c().text_classification(text, self.model)
+        except MalformedModelOutput as exc:
+            return _unparseable_obs(exc, self.model)
         return {"labels": labels, "top": labels[0]["label"] if labels else None, "model": self.model}
 
 
@@ -186,7 +252,10 @@ class ZeroShotClassify(_HfTool):
     }
 
     async def __call__(self, ctx: Any, text: str, labels: list[str]) -> dict:
-        scored = self._c().zero_shot(text, labels, self.model)
+        try:
+            scored = self._c().zero_shot(text, labels, self.model)
+        except MalformedModelOutput as exc:
+            return _unparseable_obs(exc, self.model)
         return {"labels": scored, "top": scored[0]["label"] if scored else None, "model": self.model}
 
 
@@ -314,7 +383,10 @@ class AskDocument(_HfTool):
         image = _decode_media(data_b64, path)
         _ = Image(data=image)
         _ = Text(text=question)
-        out = self._c().document_question_answering(image, question, self.model)
+        try:
+            out = self._c().document_question_answering(image, question, self.model)
+        except MalformedModelOutput as exc:
+            return _unparseable_obs(exc, self.model)
         return {**out, "model": self.model}
 
 
@@ -335,7 +407,10 @@ class AskImage(_HfTool):
         image = _decode_media(data_b64, path)
         _ = Image(data=image)
         _ = Text(text=question)
-        out = self._c().visual_question_answering(image, question, self.model)
+        try:
+            out = self._c().visual_question_answering(image, question, self.model)
+        except MalformedModelOutput as exc:
+            return _unparseable_obs(exc, self.model)
         return {**out, "model": self.model}
 
 
@@ -391,7 +466,10 @@ class ClassifyAudio(_HfTool):
     async def __call__(self, ctx: Any, data_b64: str | None = None, path: str | None = None) -> dict:
         audio = _decode_media(data_b64, path)
         _ = Audio(data=audio)
-        labels = self._c().audio_classification(audio, self.model)
+        try:
+            labels = self._c().audio_classification(audio, self.model)
+        except MalformedModelOutput as exc:
+            return _unparseable_obs(exc, self.model)
         return {"labels": labels, "top": labels[0]["label"] if labels else None, "model": self.model}
 
 
@@ -455,7 +533,10 @@ class AskTable(_HfTool):
 
     async def __call__(self, ctx: Any, table: dict[str, list[str]], question: str) -> dict:
         _ = Text(text=question)
-        out = self._c().table_question_answering(table, question, self.model)
+        try:
+            out = self._c().table_question_answering(table, question, self.model)
+        except MalformedModelOutput as exc:
+            return _unparseable_obs(exc, self.model)
         return {**out, "model": self.model}
 
 

@@ -18,6 +18,7 @@ import pytest
 from zu_huggingface import InferenceClientBackend, PipelineBackend
 from zu_huggingface.client import (
     HfClient,
+    MalformedModelOutput,
     _depth_magnitudes,
     _qa_top,
     _scores,
@@ -52,6 +53,46 @@ def test_segments_normaliser_attr_and_dict_shapes() -> None:
 def test_qa_top_normalises_list_and_dict() -> None:
     assert _qa_top([{"answer": "x", "score": 0.5}]) == {"answer": "x", "score": 0.5}
     assert _qa_top({"answer": "y"}) == {"answer": "y"}
+    assert _qa_top([]) == {"answer": ""}
+
+
+# --- F25: malformed model output is SURFACED, not silently coerced/dropped ----
+
+
+def test_scores_surfaces_unparseable_shape_instead_of_empty() -> None:
+    # A value that is neither a list nor the zero-shot dict is unparseable model
+    # output. Old code silently coerced it to [] (indistinguishable from a real
+    # "no labels"); now it is surfaced so a detector/validator can SEE the failure.
+    for bad in ("POSITIVE", 0.97, {"prediction": "POSITIVE"}, None):
+        with pytest.raises(MalformedModelOutput) as ei:
+            _scores(bad)
+        assert ei.value.raw == bad
+    # a legitimately empty container is still a real "no labels" (happy path)
+    assert _scores([]) == []
+    assert _scores({"labels": [], "scores": []}) == []
+
+
+def test_scores_surfaces_when_every_element_would_be_dropped() -> None:
+    # A non-empty list whose elements all lack a "label" used to be silently
+    # dropped to []; that hid the malformed response. Now it is surfaced.
+    with pytest.raises(MalformedModelOutput):
+        _scores([{"prediction": "POSITIVE"}, {"conf": 0.9}])
+    # a well-formed list still normalises (happy path preserved)
+    assert _scores([{"label": "A", "score": 0.2}, {"label": "B", "score": 0.8}])[0] == {
+        "label": "B",
+        "score": 0.8,
+    }
+
+
+def test_qa_top_surfaces_unparseable_element() -> None:
+    # An element that is neither a mapping-with-answer nor has an .answer attr was
+    # coerced to {"answer": ""} — indistinguishable from a real empty answer. Now
+    # surfaced. An honest empty response ([] / None) stays the legitimate no-answer.
+    with pytest.raises(MalformedModelOutput):
+        _qa_top("just a string")
+    with pytest.raises(MalformedModelOutput):
+        _qa_top([{"text": "no answer key here"}])
+    assert _qa_top(None) == {"answer": ""}
     assert _qa_top([]) == {"answer": ""}
 
 

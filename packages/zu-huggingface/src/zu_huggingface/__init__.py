@@ -21,7 +21,13 @@ modality. This package reaches it three ways, all behind configuration:
 
 from __future__ import annotations
 
-from .client import HF_ROUTER, HfClient, InferenceClientBackend, PipelineBackend
+from .client import (
+    HF_ROUTER,
+    HfClient,
+    InferenceClientBackend,
+    MalformedModelOutput,
+    PipelineBackend,
+)
 from .roles import HfClassifierDetector, HfClassifierValidator
 from .supply_chain import (
     ModelPin,
@@ -61,6 +67,7 @@ __all__ = [
     "HF_ROUTER",
     "InferenceClientBackend",
     "PipelineBackend",
+    "MalformedModelOutput",
     # tools
     "Transcribe",
     "ImageToText",

@@ -8,8 +8,11 @@ backend (hosted ⇒ net + router; local ⇒ nothing).
 from __future__ import annotations
 
 import base64
+from typing import cast
 
-from zu_core.ports import CAP_NET
+import pytest
+
+from zu_core.ports import CAP_NET, RunContext
 from zu_huggingface import (
     AskDocument,
     AskImage,
@@ -20,16 +23,24 @@ from zu_huggingface import (
     DetectObjects,
     Embed,
     EstimateDepth,
+    HfClassifierDetector,
+    HfClient,
     ImageToText,
+    InferenceClientBackend,
+    MalformedModelOutput,
+    ModelPin,
+    PipelineBackend,
     PredictTable,
     SegmentImage,
     Speak,
     Summarize,
+    SupplyChainPolicy,
     Transcribe,
     Translate,
     VlmDescribe,
     ZeroShotClassify,
 )
+from zu_huggingface.client import _qa_top, _scores
 
 _B64 = base64.b64encode(b"\x00\x01\x02media").decode()
 
@@ -181,4 +192,123 @@ async def test_new_tool_envelope_hosted_and_local(fake_client) -> None:
     local = Speak("m", client=fake_client.__class__(egress_host=""))
     assert local.capabilities == frozenset()
     assert local.egress == frozenset()
+
+
+# --- F25: classifier/QA tools SURFACE malformed model output -------------------
+
+
+class _MalformedClient:
+    """A fake HfClient whose classifier/QA methods route through the REAL
+    normalisers with an unparseable raw payload — so the tools exercise the
+    surface-not-coerce path exactly as a live backend would."""
+
+    egress_host = "router.huggingface.co"
+
+    def text_classification(self, text: str, model: str) -> list[dict]:
+        return _scores("totally-not-a-classification")  # unparseable → raises
+
+    def zero_shot(self, text: str, labels: list[str], model: str) -> list[dict]:
+        return _scores(42)  # unparseable → raises
+
+    def audio_classification(self, audio: bytes, model: str) -> list[dict]:
+        return _scores({"prediction": "speech"})  # unparseable → raises
+
+    def visual_question_answering(self, image: bytes, question: str, model: str) -> dict:
+        return _qa_top("not-a-qa-element")  # unparseable → raises
+
+    def document_question_answering(self, image: bytes, question: str, model: str) -> dict:
+        return _qa_top([{"text": "no answer key"}])  # unparseable → raises
+
+
+def _mal() -> HfClient:
+    # only the classifier/QA methods matter here; cast to the seam so the tool
+    # constructors (which want a full HfClient) type-check.
+    return cast(HfClient, _MalformedClient())
+
+
+async def test_classify_surfaces_malformed_output() -> None:
+    tool = Classify("distilbert/sst2", client=_mal())
+    out = await tool(None, text="great!")
+    # Old code coerced to {"top": None} (a clean-looking empty). Now the failure is
+    # visible: the loop's error convention (obs["error"]) fires downstream.
+    assert "error" in out and "unparseable" in out
+    assert "top" not in out  # not coerced to a default label
+    assert out["model"] == "distilbert/sst2"
+
+
+async def test_zero_shot_and_audio_classify_surface_malformed() -> None:
+    zs = await ZeroShotClassify("bart-mnli", client=_mal())(
+        None, text="x", labels=["a", "b"]
+    )
+    assert "error" in zs and "unparseable" in zs
+    ac = await ClassifyAudio("MIT/ast", client=_mal())(None, data_b64=_B64)
+    assert "error" in ac and "unparseable" in ac
+
+
+async def test_qa_tools_surface_malformed_output() -> None:
+    vqa = await AskImage("vilt", client=_mal())(None, question="q?", data_b64=_B64)
+    assert "error" in vqa and "unparseable" in vqa
+    assert "answer" not in vqa  # not coerced to {"answer": ""}
+    doc = await AskDocument("layoutlm", client=_mal())(
+        None, question="q?", data_b64=_B64
+    )
+    assert "error" in doc and "unparseable" in doc
+
+
+def test_classifier_detector_surfaces_malformed_instead_of_clean_pass() -> None:
+    # A detector previously saw [] from a malformed response and returned None (a
+    # CLEAN pass — the coerced-away failure was invisible). Now the normaliser
+    # raises, so inspect() raises and the loop surfaces it (harness.check.crashed)
+    # rather than a silent, misleading "no flag".
+    det = HfClassifierDetector(
+        _mal(), "m", escalate_on=["toxic"], candidate_labels=None
+    )
+    ctx = RunContext(spec=None, observation={"text": "some content to classify"})
+    with pytest.raises(MalformedModelOutput):
+        det.inspect(ctx)
+
+
+# --- F26: backend + supply-chain policy + pins configurable from config --------
+
+
+def test_default_backend_is_hosted_router_unchanged() -> None:
+    # Unset config ⇒ identical to before: hosted InferenceClientBackend, net+router.
+    tool = Classify("distilbert/sst2")
+    assert isinstance(tool._backend, InferenceClientBackend)
+    assert tool.capabilities == frozenset({CAP_NET})
+    assert tool.egress == frozenset({"router.huggingface.co"})
+
+
+def test_local_backend_selected_from_config_threads_policy_and_pins() -> None:
+    # backend='local' builds a PipelineBackend (no egress) and threads the
+    # supply-chain policy + per-model pins (cluster-5) through to it — from config,
+    # no client injection, no transformers import (the pipeline is lazy).
+    policy = SupplyChainPolicy(require_pinned_revision=False)
+    pins = {"acme/clf": ModelPin(repo_id="acme/clf", revision="a" * 40)}
+    tool = Classify("acme/clf", backend="local", policy=policy, pins=pins)
+    assert isinstance(tool._backend, PipelineBackend)
+    # local ⇒ zero egress envelope
+    assert tool.capabilities == frozenset()
+    assert tool.egress == frozenset()
+    # policy + pins reached the backend construction
+    assert tool._backend._policy is policy
+    assert tool._backend._pin_for("acme/clf").revision == "a" * 40
+
+
+def test_hosted_rejects_supply_chain_args_loudly() -> None:
+    # The supply-chain policy/pins only apply to the local pipeline; asking for them
+    # on the hosted router is a config error, surfaced rather than silently dropped.
+    with pytest.raises(ValueError, match="local PipelineBackend only"):
+        Classify("m", backend="hosted", policy=SupplyChainPolicy())
+
+
+def test_unknown_backend_selector_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown backend"):
+        Classify("m", backend="serverless")  # not 'hosted' or 'local'
+
+
+def test_explicit_client_still_wins_over_backend_selector(fake_client) -> None:
+    # The injected client seam (the test/DI path) takes precedence, unchanged.
+    tool = Classify("m", client=fake_client, backend="local")
+    assert tool._c() is fake_client
 
