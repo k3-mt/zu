@@ -11,6 +11,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import STRONG, TENTATIVE
 from .rail import surface_shows
 
 
@@ -30,7 +31,7 @@ class SearchBox:
         if any(m.has_state(a, "password") for a in m.of_role(surface, "textbox")):
             return None
         submit = m.first(surface, roles=("button",), tokens=m.SEARCH_TOKENS + ("go",))
-        confidence = 0.85 if box.role.lower() == "searchbox" else 0.62
+        confidence = STRONG if box.role.lower() == "searchbox" else TENTATIVE
         script = [
             PatternStep(op="fill", role=box.role, label_hint=m.norm(box.label), note="query")
         ]

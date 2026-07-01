@@ -11,6 +11,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import STRONG, TENTATIVE
 from .rail import surface_shows
 
 _EXPAND_STATES = ("expanded", "haspopup", "autocomplete")
@@ -34,7 +35,7 @@ class Autocomplete:
             return None
         options = m.of_role(surface, "option")
         # An expanded combobox with options present is the strong case.
-        confidence = 0.85 if options else 0.62
+        confidence = STRONG if options else TENTATIVE
         script = [PatternStep(op="fill", role=box.role, label_hint=m.norm(box.label), note="type")]
         handles = [box.handle]
         if options:

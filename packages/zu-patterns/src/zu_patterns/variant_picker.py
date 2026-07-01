@@ -25,6 +25,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceAffordance, SurfaceView
 
 from . import _match as m
+from .confidence import MODERATE, STRONG, WEAK
 from .rail import surface_shows
 
 
@@ -60,11 +61,11 @@ class VariantPicker:
         # a picker; a role-group alone (nothing selected yet) is a solid match; a
         # bare state-only group (styled swatches, no semantic role) is weaker.
         if role_group and any_selected:
-            confidence = 0.85
+            confidence = STRONG
         elif role_group:
-            confidence = 0.75
+            confidence = MODERATE
         else:
-            confidence = 0.65
+            confidence = WEAK
         # Propose selecting the FIRST not-yet-selected option (a reversible pick).
         target = next(
             (a for a in options if not m.has_state(a, *m.SELECTED_STATES)), options[0]

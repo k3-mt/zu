@@ -11,6 +11,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import GOOD, LOW
 from .rail import surface_shows
 
 
@@ -26,7 +27,7 @@ class PaginatedList:
         if nxt is None and prev is None:
             return None
         # Pagination is strongest with a list AND a next control.
-        confidence = 0.8 if (has_list and nxt is not None) else 0.6
+        confidence = GOOD if (has_list and nxt is not None) else LOW
         target = nxt or prev
         assert target is not None
         return RecognitionResult(

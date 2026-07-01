@@ -22,6 +22,8 @@ from zu_core import events as ev
 from zu_core.ports import Pattern, RecognitionResult
 from zu_core.surface import SurfaceView
 
+from .confidence import MIN_CONFIDENCE
+
 
 @dataclass(frozen=True)
 class Recognition:
@@ -40,7 +42,7 @@ def recognize(
     surface: SurfaceView,
     patterns: Sequence[Pattern],
     *,
-    min_confidence: float = 0.6,
+    min_confidence: float = MIN_CONFIDENCE,
 ) -> Recognition:
     """Run every pattern's ``recognize`` over ``surface`` and pick the best hit.
 

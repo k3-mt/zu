@@ -13,6 +13,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import BASE, STATE_BONUS, SUBMIT_BONUS
 from .rail import surface_shows
 
 _ACCOUNT_TOKENS = ("logout", "log out", "sign out", "account", "profile", "my account")
@@ -46,11 +47,11 @@ class LoginForm:
         if user is None or pw is None:
             return None
         # Confidence rises with a submit button present and a password state.
-        confidence = 0.7
+        confidence = BASE
         if submit is not None:
-            confidence += 0.15
+            confidence += SUBMIT_BONUS
         if m.has_state(pw, "password"):
-            confidence += 0.1
+            confidence += STATE_BONUS
         confidence = min(1.0, confidence)
         handles = tuple(h for h in (user.handle, pw.handle, submit.handle if submit else None) if h)
         script = [

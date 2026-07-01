@@ -18,6 +18,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceAffordance, SurfaceView
 
 from . import _match as m
+from .confidence import STRONG, WEAK
 from .rail import surface_shows
 from .reversibility import ActionPrior, Commitment
 
@@ -63,9 +64,9 @@ class NewsletterSignup:
         # A worded subscribe/join button is the strong tell; subscribe CONTEXT
         # alone (no worded button) is a weaker, still-actionable signal.
         if button is not None:
-            confidence = 0.85
+            confidence = STRONG
         elif ctx:
-            confidence = 0.65
+            confidence = WEAK
         else:
             return None
         script: list[PatternStep] = [

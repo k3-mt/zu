@@ -44,8 +44,51 @@ def test_reversible_op_and_role() -> None:
 
 
 def test_committing_op() -> None:
-    assert classify_action(op="pay") is Commitment.COMMITTING
-    assert classify_action(op="place_order") is Commitment.COMMITTING
+    # Generic INTERACTION primitives are committing-leaning — NOT commerce verbs.
+    assert classify_action(op="submit") is Commitment.COMMITTING
+    assert classify_action(op="confirm") is Commitment.COMMITTING
+    assert classify_action(op="delete") is Commitment.COMMITTING
+
+
+def test_no_commerce_verb_blocklist_in_classifier() -> None:
+    # #65 F16: the classifier no longer hardcodes a commerce-verb blocklist. A bare
+    # commerce verb carries NO op-signal of its own (it is not an interaction
+    # primitive) — it falls to the default-committing FLOOR (so still safe), but is
+    # NOT committing BECAUSE of a "pay"/"checkout"/"place_order" keyword. The proof
+    # a keyword blocklist is gone: pairing the verb with a reversible role/method
+    # that WOULD have been overridden by a committing op-keyword now lands REVERSIBLE.
+    from zu_patterns.reversibility import _COMMITTING_OPS
+
+    for verb in ("pay", "checkout", "place_order", "purchase"):
+        assert verb not in _COMMITTING_OPS
+        # a "pay" GET (a reversible method) is reversible — no keyword forces commit.
+        assert classify_action(op=verb, http_method="GET") is Commitment.REVERSIBLE
+    # the commerce commit boundary is instead declared by the cart pattern's prior.
+    prior = CartCheckout.commit_prior()
+    assert (
+        classify_action(op="place_order", http_method="GET", priors=(prior,))
+        is Commitment.COMMITTING
+    )
+
+
+def test_submits_is_primary_structural_irreversibility_signal() -> None:
+    # #65 F16: a control that STRUCTURALLY declares a side effect (submits — a
+    # button[type=submit]/form-submit) is committing by SHAPE, no label word needed.
+    assert classify_action(submits=True) is Commitment.COMMITTING
+    # it dominates a single reversible role hint: a SUBMIT control rendered as a
+    # link/tab is still committing (this is the F16 replacement for the verb list).
+    assert classify_action(role="link", submits=True) is Commitment.COMMITTING
+    assert classify_action(role="tab", submits=True) is Commitment.COMMITTING
+
+
+def test_link_tab_reversible_only_for_plain_navigation() -> None:
+    # #65 F18: a link/tab is reversible for PLAIN navigation …
+    assert classify_action(role="link") is Commitment.REVERSIBLE
+    assert classify_action(role="tab") is Commitment.REVERSIBLE
+    # … but a committing navigation (a logout/delete link/tab that submits) is NOT
+    # assumed reversible — decided by the structural ``submits`` signal, no words.
+    assert classify_action(role="link", submits=True) is Commitment.COMMITTING
+    assert classify_action(role="tab", submits=True) is Commitment.COMMITTING
 
 
 def test_idempotent_flag_shifts_reversible() -> None:

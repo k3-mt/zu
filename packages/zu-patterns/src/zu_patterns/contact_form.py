@@ -19,6 +19,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceAffordance, SurfaceView
 
 from . import _match as m
+from .confidence import STRONG
 from .rail import surface_shows
 from .reversibility import ActionPrior, Commitment
 
@@ -63,7 +64,7 @@ class ContactForm:
         # fillables but no contact form, and typing into the stray email box can
         # spring an anti-bot challenge (#67). No genuine vocabulary → not us.
         if shipping or otp:
-            confidence = 0.85
+            confidence = STRONG
         else:
             return None
         # The proposed script fills each slot, then submits — submit is COMMITTING.

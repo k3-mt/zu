@@ -11,6 +11,7 @@ from zu_core.ports import PatternStep, RecognitionResult
 from zu_core.surface import SurfaceView
 
 from . import _match as m
+from .confidence import GOOD, LOW
 from .rail import surface_shows
 
 _SORT_STATES = ("sort-asc", "sort-desc", "ascending", "descending", "sortable")
@@ -33,7 +34,7 @@ class SortableTable:
         )
         if header is None:
             return None
-        confidence = 0.8 if has_table else 0.6
+        confidence = GOOD if has_table else LOW
         return RecognitionResult(
             archetype=self.archetype,
             confidence=confidence,
