@@ -71,17 +71,53 @@ class HfClient(Protocol):
     def tabular_regression(self, table: dict[str, list[str]], model: str) -> list[float]: ...
 
 
-def _scores(raw: Any) -> list[dict]:
+class MalformedModelOutput(ValueError):
+    """A task model returned output that the normaliser cannot interpret.
+
+    Raised instead of silently coercing the value to a default label/score or an
+    empty answer, so a downstream detector/validator can tell a *real* result
+    (legitimately empty) apart from a *coerced-away failure* (unparseable model
+    output). Carries the offending ``raw`` value so the surfaced signal is
+    diagnosable. The tools catch this and return a structured error observation
+    (``{"error": …, "unparseable": …}``); a detector/validator lets it propagate,
+    where the loop surfaces it as a counted ``harness.check.crashed`` event —
+    either way the failure is visible, never swallowed."""
+
+    def __init__(self, task: str, raw: Any) -> None:
+        self.task = task
+        self.raw = raw
+        super().__init__(
+            f"{task}: model output is unparseable — the normaliser cannot read "
+            f"a {{label,score}} / answer from {type(raw).__name__} {raw!r:.200}"
+        )
+
+
+def _scores(raw: Any, *, task: str = "classification") -> list[dict]:
     """Normalise a classifier response to ``[{"label","score"}, …]`` sorted by
-    score desc — the shape every classification tool/detector reads."""
-    out: list[dict] = []
+    score desc — the shape every classification tool/detector reads.
+
+    An *empty* recognised container (``[]`` or a zero-shot dict with no labels) is
+    a legitimate "no labels" result and returns ``[]``. But an *unrecognisable*
+    shape — a value that is neither a list nor the zero-shot dict, or a non-empty
+    list whose every element lacks a ``label`` — is a malformed response, not a
+    real empty: it is SURFACED via :class:`MalformedModelOutput` rather than
+    silently coerced to ``[]``."""
     if isinstance(raw, dict) and "labels" in raw and "scores" in raw:  # zero-shot shape
         out = [{"label": str(lbl), "score": float(sc)}
                for lbl, sc in zip(raw["labels"], raw["scores"], strict=False)]
     elif isinstance(raw, list):
-        for item in raw:
-            if isinstance(item, dict) and "label" in item:
-                out.append({"label": str(item["label"]), "score": float(item.get("score", 0.0))})
+        out = [
+            {"label": str(item["label"]), "score": float(item.get("score", 0.0))}
+            for item in raw
+            if isinstance(item, dict) and "label" in item
+        ]
+        # A non-empty list that yielded nothing usable was silently dropped before;
+        # that hides a real failure, so surface it instead.
+        if raw and not out:
+            raise MalformedModelOutput(task, raw)
+    else:
+        # Neither a list nor a zero-shot dict: unrecognisable, not "no result".
+        raise MalformedModelOutput(task, raw)
     return sorted(out, key=lambda d: d["score"], reverse=True)
 
 
@@ -179,11 +215,20 @@ def _depth_to_b64(depth: Any, raw: Any = None) -> dict:
     return {"depth_png_b64": _pil_to_png_b64(depth), **_depth_magnitudes(raw)}
 
 
-def _qa_top(raw: Any) -> dict:
-    """The top element of a (document/visual) QA response as ``{answer, score}``."""
+def _qa_top(raw: Any, *, task: str = "qa") -> dict:
+    """The top element of a (document/visual) QA response as ``{answer, score}``.
+
+    A genuinely empty response (``[]`` / ``None``) is a legitimate "no answer" and
+    returns ``{"answer": ""}``. But an element that is neither a mapping nor
+    carries an ``answer`` attribute is unparseable model output — previously it was
+    silently coerced to an empty answer (indistinguishable from a real one), so it
+    is now SURFACED via :class:`MalformedModelOutput`."""
     el = raw[0] if isinstance(raw, list) and raw else raw
-    if el is None:
+    if el is None or (isinstance(raw, list) and not raw):
         return {"answer": ""}
+    has_answer = isinstance(el, dict) and "answer" in el or hasattr(el, "answer")
+    if not has_answer:
+        raise MalformedModelOutput(task, raw)
     answer = el.get("answer") if isinstance(el, dict) else getattr(el, "answer", None)
     score = el.get("score") if isinstance(el, dict) else getattr(el, "score", None)
     out: dict[str, Any] = {"answer": str(answer) if answer is not None else ""}

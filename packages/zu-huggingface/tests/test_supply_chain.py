@@ -123,6 +123,10 @@ class _PipelineSpy:
                 return [{"generated_text": "g"}]
             if task == "table-question-answering":
                 return {"answer": "a", "cells": ["c"], "aggregator": "SUM"}
+            if task in ("text-classification", "zero-shot-classification"):
+                # a VALID classifier shape — so the offline-kwargs / hash paths are
+                # exercised without tripping the F25 malformed-output guard.
+                return [{"label": "POSITIVE", "score": 0.9}]
             return None
 
         return _model
