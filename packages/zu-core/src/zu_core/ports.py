@@ -1193,7 +1193,9 @@ class ConnectedSurface(Protocol):
     is exactly what "resolve across a shadow/frame boundary" needs) and performs
     the verb, returning the RE-PERCEIVED view so a caller can confirm the effect.
     Lets a host reuse Zu's reduction + blind/unlabeled detectors instead of
-    re-implementing a shadow-piercing walk."""
+    re-implementing a shadow-piercing walk. CLOSED shadow roots stay unreachable
+    to any page script (a browser security boundary) — only a pixel/vision
+    producer could see those, which is what the ``blind`` signal escalates to."""
 
     async def perceive(self) -> SurfaceView: ...
 
