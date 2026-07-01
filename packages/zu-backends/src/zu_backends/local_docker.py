@@ -213,6 +213,12 @@ def _image_registry(image: str) -> str:
     ``.`` or ``:``, or is ``localhost``), matching Docker's own reference grammar.
     A ``@sha256:`` digest or ``:tag`` on the final segment does not affect this."""
     ref = image.split("@", 1)[0]  # drop any digest before splitting on '/'
+    if "/" not in ref:
+        # A bare ``name`` or ``name:tag`` (a Docker Hub library image like
+        # ``ubuntu:22.04``, or a locally-built tag like ``zu:ci``) has NO registry
+        # component — the ``:`` is a tag separator, not registry:port. Implicit
+        # docker.io. Only a reference WITH a '/' can carry a registry host.
+        return ""
     head = ref.split("/", 1)[0]
     if head == "localhost" or "." in head or ":" in head:
         return head

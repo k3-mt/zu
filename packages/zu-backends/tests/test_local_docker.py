@@ -179,6 +179,11 @@ def test_image_registry_parsing_is_lexical() -> None:
     # A bare name / ns/name is implicit docker.io (registry ""); a host-looking
     # first segment is the registry; a digest doesn't confuse the split.
     assert _image_registry("img") == ""
+    # A bare name:tag has NO registry — the ':' is a tag separator, not
+    # registry:port (regression: 'zu:ci'/'ubuntu:22.04' were misread as a registry
+    # because a ':' was present, breaking the docker-tier tests that build zu:ci).
+    assert _image_registry("zu:ci") == ""
+    assert _image_registry("ubuntu:22.04") == ""
     assert _image_registry("library/nginx:latest") == ""
     assert _image_registry("zu/render-chromium:latest") == ""
     assert _image_registry("ghcr.io/k3-mt/zu-render:latest") == "ghcr.io"
