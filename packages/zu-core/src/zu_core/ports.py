@@ -1259,6 +1259,9 @@ class SelectionSatisfier(Protocol):
     so a caller can confirm each took via the #39 invariant. Until every required
     option is set, add-to-basket is disabled and the click is a silent no-op —
     the single biggest hidden cause of 'couldn't add to basket'. Pairs with the
-    #39 ``VariantPicker`` pattern + 'control became selected' invariant."""
+    #39 ``VariantPicker`` pattern + 'control became selected' invariant. Here
+    'required' means funnel-REQUIRED (the shop won't let you buy without it), NOT
+    the HTML ``required`` attribute — real variant selects gate via the shop's JS,
+    not the attribute (#110)."""
 
     async def satisfy_required(self, surface: ConnectedSurface) -> list[RequiredSelection]: ...

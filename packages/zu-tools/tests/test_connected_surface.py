@@ -171,3 +171,35 @@ async def test_act_on_stale_handle_is_a_reperceive_not_a_crash() -> None:
 
     assert _labels(view) == ["Buy"]  # unchanged, current truth
     assert not any(m == "DOM.resolveNode" for m, _ in target.calls)  # nothing resolved
+
+
+async def test_perceive_keeps_an_unnamed_select_variant() -> None:
+    # #110: a WooCommerce variant <select> has no accessible name. perceive() must
+    # still surface it as a combobox (resolvable by node id), not drop it as blind.
+    frames = {"": [ax("combobox", "", node_id=50, value="Choose an option"),
+                   ax("button", "Add to basket", node_id=51)]}
+    surface = CdpConnectedSurface(FakeCdpTarget(frames))
+    view = await surface.perceive()
+    combos = [a for a in view.affordances if a.role == "combobox"]
+    assert len(combos) == 1
+    assert combos[0].value == "Choose an option"
+    assert not view.blind
+
+
+async def test_satisfier_sets_an_unnamed_select_end_to_end() -> None:
+    # The full #110 regression: a nameless required-by-JS variant select is
+    # perceived AND satisfied over the connected surface (0 before this fix).
+    from zu_tools.selection import FirstOptionSelectionSatisfier
+
+    frames = {"": [ax("combobox", "", node_id=50, value="Choose an option")]}
+    target = FakeCdpTarget(frames)
+
+    def choose_black(t: FakeCdpTarget, _params: dict) -> None:
+        t.frames[""][0]["value"] = {"value": "Black"}
+    target.effects[50] = choose_black
+    surface = CdpConnectedSurface(target)
+
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+
+    assert [r.chosen_label for r in results] == ["Black"]
+    assert ("DOM.resolveNode", {"backendNodeId": 50}) in target.calls

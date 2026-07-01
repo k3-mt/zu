@@ -45,6 +45,12 @@ from .surface_adapter import to_surface_view
 _TYPE = "type"
 _SELECT = "select"
 
+# Roles that are actionable by their own structure/options rather than an
+# accessible name — a native <select> (combobox) or an ARIA listbox. A variant
+# picker routinely has no accessible name, and we resolve it by backend node id,
+# so we keep it in the surface instead of dropping it as blind (#110).
+_SELF_ADDRESSING_ROLES: frozenset[str] = frozenset({"combobox", "listbox"})
+
 # A click that crosses shadow/frame boundaries: the element is resolved to a
 # global objectId first, so ``this.click()`` fires inside whatever root it lives
 # in. (The pointer tool handles the isTrusted/hover case separately, §12.)
@@ -147,7 +153,12 @@ class CdpConnectedSurface:
                 nodes.append(n)
         title, url = await self._title_url()
         surface = reduce_surface(
-            normalize_axtree(nodes), title=title, url=url, unlabeled_ratio=self._unlabeled_ratio
+            normalize_axtree(nodes), title=title, url=url,
+            unlabeled_ratio=self._unlabeled_ratio,
+            # A ConnectedSurface resolves handles by GLOBAL backend node id, so a
+            # self-addressing control (a <select> variant picker) is actionable even
+            # with no accessible name — keep it rather than drop it as blind (#110).
+            keep_unnamed_roles=_SELF_ADDRESSING_ROLES,
         )
         self._handle_map = dict(surface.handle_map)
         return to_surface_view(surface)

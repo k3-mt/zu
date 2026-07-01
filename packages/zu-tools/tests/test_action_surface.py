@@ -293,3 +293,22 @@ def test_blind_detector_silent_on_good_surface() -> None:
     det = ActionSurfaceBlindDetector()
     assert det.inspect(RunContext(spec=None, observation={"surface_blind": False})) is None
     assert det.inspect(RunContext(spec=None, observation={"text": "a page"})) is None
+
+
+def test_unnamed_select_dropped_by_default_kept_via_keep_unnamed_roles() -> None:
+    # A variant <select> routinely has NO accessible name; its options are the
+    # signal (#110). The default reduction drops it (name-based tool/pointer path);
+    # opting the role in keeps it, using its current value as the fallback label.
+    nodes = [
+        AxNode(role="combobox", name="", value="Choose an option", node_id=7),
+        AxNode(role="button", name="Add to basket"),
+    ]
+    dropped = reduce_surface(nodes)
+    assert [a.role for a in dropped.affordances] == ["button"]  # select dropped by default
+
+    kept = reduce_surface(nodes, keep_unnamed_roles=frozenset({"combobox"}))
+    combos = [a for a in kept.affordances if a.role == "combobox"]
+    assert len(combos) == 1
+    assert combos[0].label == "Choose an option"           # fell back to its value
+    assert kept.handle_map[combos[0].handle]["node_id"] == 7  # still addressable by node id
+    assert not kept.blind                                    # a kept select is not blindness

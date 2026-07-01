@@ -158,6 +158,7 @@ def reduce_surface(
     title: str = "",
     url: str = "",
     unlabeled_ratio: float = 0.5,
+    keep_unnamed_roles: frozenset[str] = frozenset(),
 ) -> Surface:
     """Reduce an accessibility tree to the action surface — pure, deterministic.
 
@@ -167,6 +168,16 @@ def reduce_surface(
     page had content but yielded no affordances, or too large a fraction of the
     interactive elements have no resolvable label (a canvas/icon-heavy page the
     accessibility tree describes poorly).
+
+    ``keep_unnamed_roles`` names roles that are SELF-ADDRESSING — actionable by
+    their own structure, not their accessible name (a ``<select>``/``listbox``
+    variant picker: the OPTION labels are the signal, and the element routinely
+    has no accessible name, #110). For those roles an unnamed element is EMITTED
+    (falling back to its current value as the label) instead of dropped and
+    counted as blindness — because a consumer that resolves handles by backend
+    DOM-node id (a :class:`~zu_core.ports.ConnectedSurface`) can still act on it.
+    The default is empty, so the name-based tool/pointer path is unchanged (there,
+    an unnamed control is genuinely unaddressable and the blind signal is right).
     """
     affordances: list[Affordance] = []
     handle_map: dict[str, dict] = {}
@@ -191,10 +202,16 @@ def reduce_surface(
             interactive_seen += 1
             label = _label_of(node)
             if not label:
-                # Enumerated as possible, but unaddressable — a blindness signal,
-                # not a meaningless handle handed to the model.
-                unlabeled += 1
-                continue
+                if role in keep_unnamed_roles:
+                    # A self-addressing control (a <select>/listbox variant picker):
+                    # actionable by option structure regardless of name (#110). Emit it
+                    # with its current value as a fallback label, addressable by node id.
+                    label = node.value or ""
+                else:
+                    # Enumerated as possible, but unaddressable — a blindness signal,
+                    # not a meaningless handle handed to the model.
+                    unlabeled += 1
+                    continue
             handle = f"a{len(affordances) + 1}"
             affordances.append(
                 Affordance(
