@@ -48,7 +48,12 @@ if TYPE_CHECKING:
 _CLICKABLE = frozenset({"button", "link", "checkbox", "radio", "switch", "tab",
                         "menuitem", "option", "row", "gridcell"})
 _FIELDS = frozenset({"textbox", "searchbox", "combobox"})
-# Steps whose name names an irreversible money/commit action — never auto-crossed.
+# The commit decision is driven PRIMARILY by STRUCTURAL, locale-independent signals
+# (a form-submit / commit control, or a payment-card autocomplete token — see
+# ``_is_committing`` below), so a German "Bezahlen" / French "Payer" submit button is
+# recognised regardless of its label language. The English regexes below are kept only
+# as a documented SECONDARY fallback for a recording that carries no structural signal;
+# they are locale-specific and silently miss on a non-English site — never the sole guard.
 _COMMIT = re.compile(r"(?i)\b(place order|pay now|pay$|buy now|complete (order|purchase|"
                      r"payment)|confirm (and )?pay|submit order|checkout & pay)\b")
 # A payment-card field — the agent must NEVER type a card; a real payment is a §8 brokered
@@ -56,6 +61,32 @@ _COMMIT = re.compile(r"(?i)\b(place order|pay now|pay$|buy now|complete (order|p
 _PAYMENT_FIELD = re.compile(r"(?i)\b(card number|cardnumber|card no|credit card|debit card|"
                             r"expiration|expiry|cvv|cvc|security code|iban|sort code|"
                             r"account number)\b")
+
+
+def _is_cc_autocomplete(token: str) -> bool:
+    """A payment-card autocomplete token (cc-number/cc-csc/cc-exp/…), locale-independent."""
+    return token.lower().startswith("cc-")
+
+
+def _is_committing(kind: str, name: str, value: str | None,
+                   *, submits: bool, autocomplete: str) -> bool:
+    """Does this step cross the irreversible commit / payment boundary? Decided from
+    STRUCTURAL signals first — a submit/commit control (``submits``), a payment-card
+    field (``autocomplete=cc-*``), or a step needing a secret the agent lacks
+    (``value == REDACTED``) — none of which depend on the label's language. The English
+    ``_COMMIT``/``_PAYMENT_FIELD`` phrase lists are layered on top ONLY as a fallback for
+    a recording with no structural signal, so a non-English pay button is still caught."""
+    if value == REDACTED:                               # a redacted secret the agent doesn't hold
+        return True
+    # --- structural (primary, locale-independent) ---
+    if kind == "click" and submits:                     # a form-submit / commit control
+        return True
+    if _is_cc_autocomplete(autocomplete):               # a payment-card field (cc-number/cc-csc/…)
+        return True
+    # --- English phrase fallback (secondary, locale-specific) ---
+    if kind == "click" and bool(_COMMIT.search(name)):
+        return True
+    return bool(_PAYMENT_FIELD.search(name))
 
 
 @dataclass(frozen=True)
@@ -133,11 +164,11 @@ def steps_from_recording(events: list[Any]) -> list[Step]:
         value = p.get("value")
         if value is None:
             value = p.get("password")  # a credential field's (redacted) value lives under this key
-        committing = (
-            (kind == "click" and bool(_COMMIT.search(name)))  # an irreversible order/pay click
-            or value == REDACTED                              # a step needing a secret the agent lacks
-            or bool(_PAYMENT_FIELD.search(name))              # a payment-card field — brokered (§8)
-        )
+        # Structural signals threaded from the harness/CDP layer (locale-independent);
+        # absent (None/False) for a recording that predates them → the English fallback.
+        submits = bool(tgt.get("submits"))
+        autocomplete = str(tgt.get("autocomplete") or "")
+        committing = _is_committing(kind, name, value, submits=submits, autocomplete=autocomplete)
         raw.append(Step(kind=kind, role=tgt.get("role", ""), name=name,
                         value=value, intent=p.get("intent"), committing=committing))
     # R2: drop a focus-click immediately followed by a type on the same target. R1: collapse

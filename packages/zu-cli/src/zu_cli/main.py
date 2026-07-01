@@ -844,10 +844,17 @@ def capture(
     p = Path(agent)
     out = bundle_path(p if p.is_dir() else p.parent)
     out.parent.mkdir(parents=True, exist_ok=True)
-    bundle.save(out)
+    from .offline import fixture_codec
+
+    codec = fixture_codec()  # None unless ZU_FIXTURE_KEY / ZU_EVENT_KEY is set
+    bundle.save(out, codec=codec)
     obs_n = sum(len(v) for v in bundle.observations.values())
+    enc = " (encrypted at rest, AES-256-GCM)" if codec is not None else ""
     typer.echo(f"capture: recorded {len(bundle.moves)} moves + {obs_n} tool observations "
-               f"→ {out}")
+               f"→ {out}{enc}")
+    if codec is None:
+        typer.echo("note   : set ZU_FIXTURE_KEY (or ZU_EVENT_KEY) to encrypt the capture "
+                   "at rest — it holds real recorded content.", err=True)
     typer.echo("next   : `zu run --offline` replays it at ~$0 (no model, no network).")
 
 

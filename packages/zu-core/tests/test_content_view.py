@@ -490,10 +490,17 @@ def test_surface_view_has_no_new_fields() -> None:
         "blind",
         "blind_reason",
     }
+    # The affordance carries perception STRUCTURE only — role/label/value/states plus the
+    # locale-independent structural signals (input type / autocomplete token / submit-ness)
+    # the safety guards drive off. These are control metadata, never page PROSE, so the
+    # action view stays content-free (Issue #45 added the three structural signals).
     assert set(SurfaceAffordance.model_fields) == {
         "handle",
         "role",
         "label",
         "value",
         "states",
+        "input_type",
+        "autocomplete",
+        "submits",
     }

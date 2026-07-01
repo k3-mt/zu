@@ -14,12 +14,15 @@ from zu_shadow.live import _cdp_to_raw, ax_node_to_target
 
 def test_ax_node_to_target_is_semantic_and_drops_coordinates() -> None:
     node = {"role": "button", "name": "Place order", "label": "Submit",
+            "input_type": "text", "autocomplete": "cc-number", "submits": True,  # structural signals
             "x": 412, "y": 880, "selector": "#order-btn"}  # the brittle bits...
     t = ax_node_to_target(node)
     assert (t.role, t.name, t.label) == ("button", "Place order", "Submit")
-    # ...are dropped: a SemanticTarget carries no selector/coordinate.
+    # The locale-independent structural signals carry through...
+    assert (t.input_type, t.autocomplete, t.submits) == ("text", "cc-number", True)
+    # ...but selectors/coordinates are dropped: a SemanticTarget carries neither.
     blob = t.model_dump()
-    assert set(blob) == {"role", "name", "label"}
+    assert set(blob) == {"role", "name", "label", "input_type", "autocomplete", "submits"}
     assert "x" not in blob and "selector" not in blob
 
 

@@ -66,6 +66,49 @@ async def test_scroll_is_recorded_as_context_not_an_action_step() -> None:
     await bus.aclose()
 
 
+async def test_credential_field_detected_structurally_by_input_type() -> None:
+    # A secret typed into an <input type=password> is marked credential STRUCTURALLY —
+    # even when its visible label is a non-English, non-"password" word — so its value
+    # is blanked (recorded under the credential key), never under `value`.
+    bus = EventBus()
+    rec = Recorder(bus, site="https://x.example.de")
+    stream = [RawInput(kind="type", value="hunter2", target=SemanticTarget(
+        role="textbox", name="Kennwort", label="Kennwort", input_type="password"))]  # "password" in German
+    session = await rec.record_stream(stream)
+    ty = next(e for e in session.events if e.type == ev.SHADOW_USER_TYPE)
+    assert ty.payload.get("password") == "[REDACTED]"  # blanked by redaction
+    assert "value" not in ty.payload  # NOT recorded under the plain value key
+    await bus.aclose()
+
+
+async def test_cc_csc_field_detected_structurally_and_blanked() -> None:
+    # A CVV field labeled non-English ("Prüfziffer"), non-Luhn value, is marked credential
+    # from autocomplete=cc-csc — the structural-only case the English phrase list misses.
+    bus = EventBus()
+    rec = Recorder(bus, site="https://x.example.de")
+    stream = [RawInput(kind="type", value="123", target=SemanticTarget(
+        role="textbox", name="Prüfziffer", label="Prüfziffer", autocomplete="cc-csc"))]
+    session = await rec.record_stream(stream)
+    ty = next(e for e in session.events if e.type == ev.SHADOW_USER_TYPE)
+    assert ty.payload.get("password") == "[REDACTED]"
+    assert "value" not in ty.payload
+    await bus.aclose()
+
+
+async def test_benign_text_field_with_incidental_word_is_not_flagged() -> None:
+    # A benign non-credential text field (a normal search box) is NOT flagged just because
+    # its content mentions an incidental word — its value rides under `value`, uncredentialed.
+    bus = EventBus()
+    rec = Recorder(bus, site="https://x.example.com")
+    stream = [RawInput(kind="type", value="how to reset my password", target=SemanticTarget(
+        role="searchbox", name="Search", label="Search", input_type="text"))]
+    session = await rec.record_stream(stream)
+    ty = next(e for e in session.events if e.type == ev.SHADOW_USER_TYPE)
+    assert "password" not in ty.payload  # not credential-marked
+    assert ty.payload.get("value") == "how to reset my password"  # recorded under value, as a query
+    await bus.aclose()
+
+
 async def test_all_shadow_events_are_namespaced_data() -> None:
     bus = EventBus()
     rec = Recorder(bus, site="s")

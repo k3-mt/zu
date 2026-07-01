@@ -39,13 +39,20 @@ def _require_browser() -> None:
 
 def ax_node_to_target(node: dict) -> SemanticTarget:
     """Resolve one CDP accessibility node to a SEMANTIC target — its role, accessible
-    name, and label. The single place selectors/coordinates are deliberately DROPPED
-    (a live click's pixel position never becomes part of the record)."""
+    name, and label, plus the locale-independent STRUCTURAL signals (the raw input
+    ``type``, the ``autocomplete`` token, and whether it ``submits``) that the
+    credential/commit guards drive off. The single place selectors/coordinates are
+    deliberately DROPPED (a live click's pixel position never becomes part of the record)."""
     name = str(node.get("name", "") or "")
+    it = node.get("input_type")
+    ac = node.get("autocomplete")
     return SemanticTarget(
         role=str(node.get("role", "") or "generic"),
         name=name,
         label=str(node.get("label", "") or name),
+        input_type=str(it) if it else None,
+        autocomplete=str(ac) if ac else None,
+        submits=bool(node.get("submits", False)),
     )
 
 
