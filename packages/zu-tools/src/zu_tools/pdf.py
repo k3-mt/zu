@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from zu_core.content import Text
+from zu_core.ports import CAP_FS_READ
 
 if TYPE_CHECKING:  # avoid a hard import at module top — the extra may be absent.
     from pypdf import PdfReader
@@ -34,6 +37,46 @@ if TYPE_CHECKING:  # avoid a hard import at module top — the extra may be abse
 # straight from the model/task with no fetch cap in front of it, and a hostile
 # document is a CPU/memory DoS in-process. Mirror the fetch byte cap (5 MB).
 _MAX_PDF_BYTES = 5_000_000
+
+# The env var that names the ONE root the ``path`` arm may read under. Generic and
+# config/env-derived — never a hardcoded site path. Unset ⇒ fall back to the run's
+# working directory (``os.getcwd()``): a caller that wants a different jail exports
+# ``ZU_PDF_READ_ROOT`` (e.g. the run's workspace). The read is confined to this
+# root; an absolute path outside it or a ``..`` traversal that escapes it is refused
+# WITHOUT disclosing whether the target exists (issue #43).
+_READ_ROOT_ENV = "ZU_PDF_READ_ROOT"
+
+
+def _read_root() -> Path:
+    """The resolved allowed root for the ``path`` arm: ``$ZU_PDF_READ_ROOT`` when set,
+    else the current working directory. ``resolve()`` canonicalises it (symlinks,
+    ``..``) so the prefix check below compares two canonical paths."""
+    raw = os.environ.get(_READ_ROOT_ENV) or os.getcwd()
+    return Path(raw).resolve()
+
+
+def _jail_path(path: str) -> Path | None:
+    """Confine ``path`` to the allowed root. Returns the resolved path when it is a
+    regular file WITHIN the root; returns ``None`` (refuse — do not leak existence)
+    for anything else: an absolute/relative target that resolves outside the root, a
+    ``..`` traversal that escapes it, or a non-file (directory, device, symlink to
+    outside). ``resolve()`` canonicalises before the prefix check so ``../`` and
+    symlinks cannot smuggle the read out of the jail."""
+    root = _read_root()
+    try:
+        resolved = (root / path).resolve() if not os.path.isabs(path) else Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # Prefix check on the CANONICAL paths: the resolved target must be at or under
+    # the root. ``is_relative_to`` is the exact "is a prefix of" test.
+    if not resolved.is_relative_to(root):
+        return None
+    # Reject non-regular targets (directories, devices, FIFOs) — only a real file is
+    # a readable PDF; ``is_file`` follows symlinks but the resolved path is already
+    # inside the root, so a symlink pointing out was rejected above.
+    if not resolved.is_file():
+        return None
+    return resolved
 
 # The PDF action/active-content keys we DETECT (and never execute). These are the
 # primitives §9.5 calls out: embedded JS, document-open and additional actions
@@ -260,10 +303,15 @@ def _collect_name_labels(js_tree: Any) -> list[str]:
 class PdfExtract:
     name = "pdf_extract"
     tier = 1  # pure CPU on bytes it is handed; no escalation needed to use it
-    # Pure CPU on local bytes: no network (NO CAP_NET), no filesystem write, no
-    # subprocess. The empty envelope is least privilege made explicit — and the
-    # §9.5 point: the tool has no way to egress what a hostile doc points at.
-    capabilities: frozenset[str] = frozenset()
+    # The ``path`` arm reads the HOST filesystem, so the envelope must DECLARE it:
+    # CAP_FS_READ. Declaring it is what makes the audit-logged privilege TRUTHFUL and
+    # what puts the tool on the containment floor — ``_needs_containment`` treats an
+    # empty-envelope tier-1 tool as host-safe, so an empty declaration would exempt a
+    # host read from ``containment='required'`` (issue #43). Still NO CAP_NET / no
+    # write / no subprocess: it never fetches a URL and never egresses what a hostile
+    # doc points at (the §9.5 point). The ``path`` read itself is jailed to a
+    # configured root (``_jail_path``); ``pdf_b64`` stays the egress-governed way in.
+    capabilities: frozenset[str] = frozenset({CAP_FS_READ})
     egress: frozenset[str] = frozenset()
     schema = {
         "name": "pdf_extract",
@@ -277,7 +325,13 @@ class PdfExtract:
             "type": "object",
             "properties": {
                 "pdf_b64": {"type": "string", "description": "the PDF bytes, base64"},
-                "path": {"type": "string", "description": "a local path to the PDF"},
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "a local path to the PDF, confined to the configured read "
+                        "root (ZU_PDF_READ_ROOT, else cwd); paths outside it are refused"
+                    ),
+                },
             },
         },
     }
@@ -303,11 +357,23 @@ class PdfExtract:
             except (binascii.Error, ValueError):
                 return {"error": "pdf_b64 is not valid base64", "blocked": "bad_base64"}
         elif path is not None:
+            # Jail the read to the configured allowed root: realpath + prefix check.
+            # A path outside the root (absolute or via ``..``) or a non-file target is
+            # REFUSED without disclosing whether it exists (issue #43) — a hostile
+            # model cannot read ``/etc/passwd`` or ``../../secrets`` off the host.
+            jailed = _jail_path(path)
+            if jailed is None:
+                return {
+                    "error": "path is not within the allowed read root",
+                    "blocked": "path_not_allowed",
+                }
             try:
-                with open(path, "rb") as fh:
+                with open(jailed, "rb") as fh:
                     data = fh.read(_MAX_PDF_BYTES + 1)
-            except OSError as exc:
-                return {"error": f"cannot read {path!r}: {exc}", "blocked": "unreadable_path"}
+            except OSError:
+                # Do not echo the path or the OS error — a refusal must not leak
+                # existence/permission detail about a target outside the caller's reach.
+                return {"error": "path is not readable", "blocked": "unreadable_path"}
         else:
             return {"error": "pass pdf_b64 or path", "blocked": "no_input"}
 

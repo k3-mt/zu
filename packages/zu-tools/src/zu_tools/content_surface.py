@@ -29,9 +29,13 @@ Three extraction strategies, one per kind of substance:
   accessibility tree: the input-role nodes already carry ``required``/``invalid``
   in their states and the current ``value`` (``action_surface.normalize_axtree``),
   keyed by role + name/label, with the field's own error text read from its AX
-  ``description`` (the aria-describedby association). ``errors`` come from
-  ``role=alert`` / ``aria-live=assertive`` / toast / modal nodes — both AX alert
-  nodes and the HTML toast/modal regions.
+  ``description`` (the aria-describedby association). ``errors`` come ONLY from
+  regions that carry a genuine error SIGNAL — ``role=alert`` / ``role=alertdialog``
+  / ``aria-live=assertive`` (AX or HTML) or an error-classed region. A benign
+  dismissible modal/toast (a Quick View dialog, a cookie/promo toast) carries no
+  error signal and is deliberately NOT routed to ``errors`` (issue #73): a modal is
+  a container, not a verdict, so lumping every dialog into ``errors`` would read an
+  ordinary page as failing.
 
 Every unit's ``region`` is a GENERIC descriptor (``'main'``, ``'form#checkout'``,
 ``'modal'``, ``'toast'``, ``'table:0'``) — NEVER a raw CSS/XPath selector, the
@@ -72,10 +76,32 @@ _CHROME_TAGS: tuple[str, ...] = (
     "nav", "header", "footer", "aside", "script", "style", "noscript", "template",
 )
 
-# Generic region descriptors for the HTML-side error regions — toast/modal, NEVER
-# the element's selector. Keyed by the structural pattern they match.
-_TOAST_HINTS: tuple[str, ...] = ("toast", "snackbar", "notification", "flash")
-_MODAL_HINTS: tuple[str, ...] = ("modal", "dialog")
+# The STRUCTURAL error signal (issue #73): a modal/toast/dialog is a CONTAINER, not a
+# verdict. Only an actual error signal makes a region an ``errors`` entry — an ARIA
+# assertive/alert role, or an error-classed region. A bare ``class="…modal…"`` /
+# ``class="…toast…"`` with none of these is a BENIGN notice (Quick View, cookie
+# consent, promo dialog) and must NOT pollute ``errors``. Matched by STRUCTURE, never
+# by product/site strings.
+_ERROR_ROLE_SELECTOR = '[role="alert"], [aria-live="assertive"], [role="alertdialog"]'
+_ERROR_CLASS_HINTS: tuple[str, ...] = ("error", "danger", "invalid", "alert")
+
+
+def _carries_error_signal(node: Node) -> bool:
+    """True iff a node carries a genuine error signal — an ARIA alert/assertive role,
+    or an error-classed region. This is the STRUCTURE that separates an error modal
+    ('Payment failed') from a content modal (Quick View): the container class alone is
+    not a verdict (issue #73)."""
+    attrs = node.attributes or {}
+    role = (attrs.get("role") or "").lower()
+    if role in ("alert", "alertdialog"):
+        return True
+    if (attrs.get("aria-live") or "").lower() == "assertive":
+        return True
+    cls = (attrs.get("class") or "").lower()
+    # An error-classed region (``…-error``, ``form-error``, ``alert-danger``). Guard
+    # against ``modal``/``toast`` container classes that merely CONTAIN the letters:
+    # require an error-family token, not just any substring on the modal itself.
+    return any(h in cls for h in _ERROR_CLASS_HINTS)
 
 
 def _label_of(node: AxNode) -> str:
@@ -234,9 +260,17 @@ def _extract_kv(html: str, *, url: str) -> tuple[ContentUnit, ...]:
 
 
 def _extract_html_errors(html: str, *, url: str) -> list[ContentUnit]:
-    """Toast/modal error regions from the HTML: an ``aria-live="assertive"`` or
-    ``role="alert"`` region, or an element whose class/role names a toast/modal.
-    The region is the GENERIC kind (``'toast'``/``'modal'``), never the selector."""
+    """GENUINE error regions from the HTML — the ``errors`` channel (issue #73).
+
+    Only a region that carries an actual error SIGNAL enters ``errors``: an
+    ``aria-live="assertive"`` / ``role="alert"`` / ``role="alertdialog"`` region, or
+    an error-classed region. A bare ``class="…modal…"`` / ``class="…toast…"`` with no
+    error semantics (a Quick View modal, a cookie/promo toast) is BENIGN and is NOT an
+    error — lumping every dialog into ``errors`` guarantees false positives on
+    ordinary pages. The region kind is the GENERIC ``'modal'``/``'toast'``/``'alert'``
+    descriptor, never the selector; the KIND that lands here is always error-shaped
+    (``'error'`` for an assertive/alert region; ``'modal'`` only for an
+    ``alertdialog``, i.e. an error dialog)."""
     if not html:
         return []
     tree = HTMLParser(html)
@@ -251,24 +285,24 @@ def _extract_html_errors(html: str, *, url: str) -> list[ContentUnit]:
                 ContentUnit.make(kind, text=text, provenance=Provenance(url=url, region=region))
             )
 
-    # role=alert / aria-live=assertive — the ARIA live-region error channel.
-    for node in tree.css('[role="alert"], [aria-live="assertive"], [role="alertdialog"]'):
-        attrs = node.attributes
-        cls = (attrs.get("class") or "") if attrs else ""
-        if any(h in cls for h in _MODAL_HINTS) or "dialog" in (node.tag or ""):
+    for node in tree.css(_ERROR_ROLE_SELECTOR):
+        attrs = node.attributes or {}
+        role = (attrs.get("role") or "").lower()
+        # An ``alertdialog`` IS an error dialog (e.g. 'Payment failed') — an error
+        # kind. ``role=alert`` / ``aria-live=assertive`` is the live-region error
+        # channel. Both are genuine errors; a plain ``role=dialog`` never reaches
+        # here (it is not in the error-role selector).
+        if role == "alertdialog":
             _add(node, "modal", "modal")
-        elif any(h in cls for h in _TOAST_HINTS):
-            _add(node, "toast", "toast")
         else:
             _add(node, "error", "alert")
-    # class-named toast/modal regions that did not also carry an ARIA role.
+    # Error-CLASSED regions that did not also carry an ARIA role (a ``form-error`` /
+    # ``field-error`` block). Still gated on the structural error signal — a bare
+    # modal/toast class is NOT swept in.
     for node in tree.css("[class]"):
-        attrs = node.attributes
-        cls = (attrs.get("class") or "") if attrs else ""
-        if any(h in cls for h in _TOAST_HINTS):
-            _add(node, "toast", "toast")
-        elif any(h in cls for h in _MODAL_HINTS):
-            _add(node, "modal", "modal")
+        if not _carries_error_signal(node):
+            continue
+        _add(node, "error", "alert")
     return units
 
 
