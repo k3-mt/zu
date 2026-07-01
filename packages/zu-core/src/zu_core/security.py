@@ -19,7 +19,63 @@ from .ports import declared_envelope
 # Env var the sandboxed launcher sets *inside* the container, marking "this run is
 # executing within the Zu sandbox — the container (default-DROP network + egress
 # proxy + dropped caps) is the boundary, so tools may run." Absent on a bare host.
+#
+# TRUST ASSUMPTION (F81 — READ THIS). ``ZU_SANDBOXED`` is a plain environment
+# variable with NO cryptographic attestation: any process that can set its own
+# environment can set ``ZU_SANDBOXED=1`` and thereby claim to be contained, so the
+# ``containment='required'`` floor ULTIMATELY RESTS ON A FORGEABLE SIGNAL. This is
+# a deliberate, documented residual: real, unforgeable containment attestation
+# (a TPM/TEE quote, a signed launcher token verified against a harness-held key, a
+# kernel-attested namespace) belongs to the sandbox BACKEND (ZU-NET-5 carries the
+# measurement seam) and cannot be manufactured honestly inside zu-core, which
+# imports nothing but pydantic. What zu-core CAN do — and now does — is:
+#   1. CORROBORATE the env signal with the OTHER harness-controlled signals the
+#      REAL launcher always sets alongside it (the egress-proxy env + the internal
+#      network name — see zu_cli.sandbox). A bare forged ``ZU_SANDBOXED=1`` with no
+#      proxy configured does not look like a launcher-established boundary; the
+#      mismatch is ``corroborated=False`` in ``containment_basis``.
+#   2. RECORD the basis on the audit log (``harness.containment.attested``) so a
+#      forged env is at least DETECTABLE/recorded after the fact — a run claiming
+#      containment on an uncorroborated signal is a reviewable anomaly, not a
+#      silent bypass. Corroboration RAISES the forgery bar (an attacker must now
+#      also fake the proxy wiring) but does NOT close it; only backend attestation
+#      does. The floor stays fail-CLOSED regardless — this only hardens the
+#      contained→"trusted" direction.
 SANDBOX_ENV = "ZU_SANDBOXED"
+
+# The other environment signals the REAL sandboxed launcher (zu_cli.sandbox) sets
+# ALONGSIDE ``ZU_SANDBOXED`` when it establishes the boundary: the egress proxy the
+# container must route through, and the internal default-DROP network name. Their
+# presence corroborates that a launcher — not a bare ``export ZU_SANDBOXED=1`` —
+# established the environment. Read defensively; a launcher change adds a signal
+# here (each is necessary-not-sufficient — corroboration, never proof).
+_CONTAINMENT_COORROBORATING_ENV = ("HTTPS_PROXY", "ZU_SANDBOX_NETWORK")
+
+
+def containment_basis(policy: str) -> dict[str, Any]:
+    """The auditable BASIS for a run's containment judgement (F81).
+
+    Returns ``{"policy", "sandboxed", "corroborated", "signals"}``: whether the
+    (forgeable) ``ZU_SANDBOXED`` signal is set, whether the harness-controlled
+    structural signals the real launcher sets alongside it AGREE (so a bare forged
+    env is distinguishable from a launcher-established boundary), and the per-signal
+    breakdown. Pure (reads the environment only); the loop emits it as
+    ``harness.containment.attested`` at run start so the basis is on the log and a
+    forged env is at least recorded/detectable. This does NOT make the signal
+    unforgeable — see the SANDBOX_ENV trust-assumption note — it makes the basis
+    transparent and the anomaly auditable."""
+    sandboxed = bool(os.environ.get(SANDBOX_ENV))
+    signals = {name: bool(os.environ.get(name)) for name in _CONTAINMENT_COORROBORATING_ENV}
+    # Corroborated only when the sandbox signal is set AND every structural signal
+    # the real launcher establishes is present — a bare ``ZU_SANDBOXED=1`` with no
+    # proxy wiring is uncorroborated (a forged-signal candidate).
+    corroborated = sandboxed and all(signals.values())
+    return {
+        "policy": policy,
+        "sandboxed": sandboxed,
+        "corroborated": corroborated,
+        "signals": signals,
+    }
 
 
 class ContainmentRequired(RuntimeError):

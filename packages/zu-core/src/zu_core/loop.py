@@ -32,7 +32,7 @@ import random
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID, uuid5
 
 from . import events as ev
@@ -44,21 +44,32 @@ from .ledger import InMemoryExecutionLedger
 from .monitors import fold_monitors, worst_verdict
 from .ports import (
     EGRESS_OPEN,
+    Detector,
     Finish,
+    InvocationGate,
     ModelProvider,
     ModelRequest,
+    Monitor,
     MonitorState,
+    ReplayArbiter,
     ReplayDecision,
     RunContext,
     Scope,
     Severity,
+    Tool,
     ToolCall,
+    Validator,
     Verdict,
     declared_envelope,
 )
 from .registry import REGISTRY, Registry
 from .runlifecycle import close_run as _run_cleanup
-from .security import SecurityBlock, _needs_containment, enforce_containment
+from .security import (
+    SecurityBlock,
+    _needs_containment,
+    containment_basis,
+    enforce_containment,
+)
 from .surface import SurfaceView
 from .track import MAX_REPLAY_WAIT_MS, Track, TrackStep, replay_extra_delay_ms
 
@@ -144,14 +155,113 @@ def _within_size(obj: Any, max_bytes: int = _MAX_OBSERVATION_BYTES) -> bool:
     return True
 
 
-def _materialize(obj: Any) -> Any:
+# The kind → protocol-check map (C3). After a registry entry is instantiated, the
+# loop verifies the instance actually satisfies the port's structural contract, so
+# a plugin registered under the WRONG kind (or missing its defining member) fails
+# loudly at load — naming the plugin + kind — instead of blowing up cryptically
+# deep in a checkpoint.
+#
+# The check is against a MINIMAL runtime_checkable Protocol per kind (below), not
+# the full port Protocol: the full ``Tool``/``Detector``/… shapes declare
+# attributes the loop reads DEFENSIVELY with getattr-defaults (a tool's
+# ``tier``/``capabilities``/``egress``/``untrusted``/``schema``/``prompt_fragment``
+# are all optional at runtime), so an ``isinstance`` against the full Protocol would
+# reject a legitimately-minimal plugin. The minimal Protocols capture exactly the
+# DEFINING member(s) the loop actually calls — the behavioural contract that
+# distinguishes one kind from another — so a Monitor misregistered as a tool (no
+# ``__call__``) or a class registered as a detector without ``inspect`` is caught,
+# while a lean-but-valid plugin passes.
+
+
+@runtime_checkable
+class _ToolLike(Protocol):
+    name: str
+
+    async def __call__(self, ctx: RunContext, **kwargs: Any) -> dict: ...
+
+
+@runtime_checkable
+class _DetectorLike(Protocol):
+    def inspect(self, ctx: RunContext) -> Any: ...
+
+
+@runtime_checkable
+class _ValidatorLike(Protocol):
+    def check(self, result: Any, ctx: RunContext) -> Any: ...
+
+
+@runtime_checkable
+class _GateLike(Protocol):
+    def check(self, call: Any, ctx: RunContext) -> Any: ...
+
+
+@runtime_checkable
+class _ArbiterLike(Protocol):
+    def decide(self, step: Any, observation: Any, ctx: RunContext) -> Any: ...
+
+
+@runtime_checkable
+class _MonitorLike(Protocol):
+    def evaluate(self, ctx: RunContext) -> Any: ...
+
+
+# kind -> (minimal check Protocol, the full port Protocol named in the error).
+_KIND_PROTOCOL: dict[str, tuple[type, type]] = {
+    "tools": (_ToolLike, Tool),
+    "detectors": (_DetectorLike, Detector),
+    "validators": (_ValidatorLike, Validator),
+    "gates": (_GateLike, InvocationGate),
+    "replay_arbiters": (_ArbiterLike, ReplayArbiter),
+    "monitors": (_MonitorLike, Monitor),
+}
+
+
+class PluginProtocolError(TypeError):
+    """A materialized plugin does not satisfy its port's runtime Protocol (C3).
+
+    Raised by ``_materialize`` when a registered entry, once instantiated, fails
+    the ``isinstance`` check against the ``runtime_checkable`` Protocol its kind
+    maps to — e.g. a class registered as a ``detector`` that lacks ``inspect``, or
+    an object registered under the wrong kind. Names the plugin + kind + the
+    Protocol so the misconfiguration is obvious, instead of surfacing as an
+    ``AttributeError`` deep inside a checkpoint."""
+
+    def __init__(self, *, kind: str, name: str | None, plugin: Any, protocol: type) -> None:
+        self.kind = kind
+        self.name = name
+        self.plugin = plugin
+        label = f"{name!r} " if name else ""
+        super().__init__(
+            f"{kind[:-1]} plugin {label}({type(plugin).__name__}) does not satisfy the "
+            f"{protocol.__name__} Protocol its kind requires — it is missing a required "
+            f"member or is registered under the wrong kind. Register an instance that "
+            f"implements {protocol.__name__}, or register it under the correct kind."
+        )
+
+
+def _materialize(obj: Any, *, kind: str | None = None, name: str | None = None) -> Any:
     """Registry entries may be classes (entry-point discovery) or already-built
     instances (config in step 8, or a test). The loop needs a usable instance.
 
     Note: a discovered class is instantiated with no arguments, so a plugin
     that needs constructor config can only be used by registering an instance
-    (the configured-instance path that build step 8 formalises)."""
-    return obj() if isinstance(obj, type) else obj
+    (the configured-instance path that build step 8 formalises).
+
+    When ``kind`` is given, the built instance is protocol-checked (C3): it MUST
+    satisfy the minimal Protocol its kind maps to, else a ``PluginProtocolError``
+    naming the plugin + kind is raised. This catches a plugin registered under the
+    wrong kind, or one missing its defining member, loudly at load — rather than
+    as a confusing crash mid-run."""
+    instance = obj() if isinstance(obj, type) else obj
+    if kind is not None:
+        entry = _KIND_PROTOCOL.get(kind)
+        if entry is not None:
+            check_proto, port_proto = entry
+            if not isinstance(instance, check_proto):
+                raise PluginProtocolError(
+                    kind=kind, name=name, plugin=instance, protocol=port_proto
+                )
+    return instance
 
 
 def _as_int(value: Any) -> int:
@@ -588,6 +698,91 @@ def _tool_untrusted(tool: Any) -> bool:
     )
 
 
+# The JSON-schema ``type`` tokens this validator understands, mapped to the Python
+# type(s) that satisfy them. Deliberately the common subset a tool's ``parameters``
+# actually uses; an unknown/absent type is not checked (permissive — see residue in
+# ``_validate_args_against_schema``). ``bool`` is excluded from ``integer``/``number``
+# because ``isinstance(True, int)`` is True in Python and a bool is not a number here.
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "object": (dict,),
+    "array": (list, tuple),
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "null": (type(None),),
+}
+
+
+def _type_ok(value: Any, json_type: str) -> bool:
+    """True iff ``value`` satisfies a JSON-schema ``type`` token (generic subset)."""
+    expected = _JSON_TYPES.get(json_type)
+    if expected is None:
+        return True  # unknown type token: not checked (permissive residue)
+    if json_type in ("integer", "number") and isinstance(value, bool):
+        return False  # a bool is not a number, despite bool <: int in Python
+    return isinstance(value, expected)
+
+
+def _tool_parameters(tool: Any) -> dict | None:
+    """The tool's declared JSON-schema for its arguments — the ``parameters`` object
+    of its ``schema`` (the OpenAI-style function shape the loop already offers the
+    model), or ``schema`` itself if it is directly a JSON-schema object. ``None``
+    when the tool declares no usable schema (nothing to validate against)."""
+    schema = getattr(tool, "schema", None)
+    if not isinstance(schema, dict):
+        return None
+    params = schema.get("parameters")
+    if isinstance(params, dict):
+        return params
+    # A tool whose ``schema`` is itself the parameters object (``type: object``).
+    if schema.get("type") == "object" and isinstance(schema.get("properties"), dict):
+        return schema
+    return None
+
+
+def _validate_args_against_schema(tool: Any, args: dict) -> str | None:
+    """Validate model-supplied ``args`` against ``tool``'s declared JSON schema
+    (C8), returning an error string on mismatch or ``None`` when they conform (or
+    when the tool declares no schema to check). GENERIC over any tool's schema.
+
+    Covers the subset a tool's ``parameters`` object actually uses: ``required``
+    presence, per-property ``type`` (incl. ``enum`` membership), and
+    ``additionalProperties: false`` (unknown keys). This is deliberately a
+    minimal, dependency-free check (zu-core imports only pydantic) — it is NOT a
+    full JSON-Schema implementation: nested object/array item schemas, ``anyOf``/
+    ``$ref``, format/pattern/numeric bounds are NOT enforced (documented residue).
+    It catches the common malformed-args cases — wrong type, missing required
+    field, stray key — which is what stops bad untrusted args reaching the tool."""
+    if not isinstance(args, dict):
+        return f"args must be a JSON object, got {type(args).__name__}"
+    params = _tool_parameters(tool)
+    if params is None:
+        return None  # nothing declared to validate against
+    properties = params.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required = params.get("required")
+    required = required if isinstance(required, list) else []
+    for key in required:
+        if key not in args:
+            return f"missing required argument {key!r}"
+    if params.get("additionalProperties") is False:
+        unknown = sorted(set(args) - set(properties))
+        if unknown:
+            return f"unexpected argument(s) {unknown} (additionalProperties: false)"
+    for key, value in args.items():
+        spec = properties.get(key)
+        if not isinstance(spec, dict):
+            continue  # no per-property schema to check
+        declared = spec.get("type")
+        if isinstance(declared, str) and not _type_ok(value, declared):
+            return f"argument {key!r} must be {declared}, got {type(value).__name__}"
+        enum = spec.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            return f"argument {key!r}={value!r} is not one of the allowed values {enum}"
+    return None
+
+
 def _worst(verdicts: list[Verdict]) -> Verdict | None:
     return max(verdicts, key=lambda v: _RANK[v.severity], default=None)
 
@@ -611,47 +806,72 @@ class _EventsView(Sequence):
     It wraps the loop's event list *by reference*, so it reflects the log as it
     grows with no per-checkpoint copy, but a detector/validator/tool cannot
     append, replace, or delete records through it — the canonical log stays the
-    loop's alone. ``RunContext.events`` holds this view, not the raw list."""
+    loop's alone. ``RunContext.events`` holds this view, not the raw list.
 
-    __slots__ = ("_events",)
+    The read-only contract is ENFORCED, not convention (C11): the backing list is
+    held under a name-mangled ``__events`` slot (no public ``_events`` attribute a
+    plugin can reach and mutate), and the ``Sequence`` ABC supplies no mutating
+    members — ``append``/``__setitem__``/``__delitem__`` are absent, so an attempt
+    to mutate through the view raises ``AttributeError``/``TypeError`` rather than
+    silently corrupting the canonical log.
 
-    def __init__(self, events: list) -> None:
-        self._events = events
+    ``start`` scopes the window to a SUFFIX of the log (C14): a detector declaring
+    PER_OBSERVATION scope is handed a view starting at the current observation's
+    first event, so it cannot read events outside its declared scope. ``start=0``
+    (the default) is the whole log — the ON_FINAL / unscoped case. The window still
+    reflects growth by reference (no copy): only its lower bound is pinned."""
+
+    __slots__ = ("__events", "__start")
+
+    def __init__(self, events: list, start: int = 0) -> None:
+        self.__events = events
+        self.__start = start
 
     def __getitem__(self, index: Any) -> Any:
-        return self._events[index]
+        # Present the scoped suffix as its own 0-based sequence: slice off the
+        # pinned prefix first, then index/slice into the visible window.
+        return self.__events[self.__start :][index]
 
     def __len__(self) -> int:
-        return len(self._events)
+        return max(0, len(self.__events) - self.__start)
 
 
-def _safe_inspect(detector: Any, ctx: RunContext) -> Verdict | None:
-    """Run a detector in isolation: a raising third-party detector is logged and
-    skipped, never allowed to crash the run — the same isolation the bus gives
-    its subscribers and the loop gives its tools."""
+def _safe_inspect(
+    detector: Any, ctx: RunContext
+) -> tuple[Verdict | None, Exception | None]:
+    """Run a detector in isolation and REPORT the outcome as ``(verdict, crash)``
+    — mirroring ``_safe_gate`` (C10). A raising third-party detector is still
+    isolated (never halts the run) and logged, but the crash is no longer
+    swallowed into a silent ``None``: it is returned so the checkpoint can surface
+    it as a ``harness.check.crashed`` event AND count it, exactly as the gate path
+    surfaces a crashed gate. A clean run returns ``(verdict, None)``."""
     try:
         verdict: Verdict | None = detector.inspect(ctx)
-        return verdict
+        return verdict, None
     except Exception as exc:  # noqa: BLE001 - a broken detector must not halt the run
         log.warning(
             "detector %r raised %s: %s — skipping it",
             getattr(detector, "name", detector), type(exc).__name__, exc,
         )
-        return None
+        return None, exc
 
 
-def _safe_check(validator: Any, result: Result, ctx: RunContext) -> Verdict | None:
-    """Run a validator in isolation: a raising validator is logged and skipped,
-    so a buggy third-party validator cannot take down every run."""
+def _safe_check(
+    validator: Any, result: Result, ctx: RunContext
+) -> tuple[Verdict | None, Exception | None]:
+    """Run a validator in isolation and REPORT the outcome as ``(verdict, crash)``
+    (C10). A raising validator is isolated + logged, and the crash is returned so
+    the ON_FINAL ladder surfaces it as a counted ``harness.check.crashed`` event —
+    a silently-broken validator is visible on the audit log, never swallowed."""
     try:
         verdict: Verdict | None = validator.check(result, ctx)
-        return verdict
+        return verdict, None
     except Exception as exc:  # noqa: BLE001 - a broken validator must not halt the run
         log.warning(
             "validator %r raised %s: %s — skipping it",
             getattr(validator, "name", validator), type(exc).__name__, exc,
         )
-        return None
+        return None, exc
 
 
 class _GateEscalation(Exception):
@@ -782,6 +1002,11 @@ class _Run:
         # (no copy) but a misbehaving plugin cannot mutate or corrupt the
         # canonical record through it. The loop appends to ``self.events``.
         self.events: list[Event] = []
+        # Count of detector/monitor/validator/replay-arbiter CRASHES this run (C10):
+        # mirrors how the gate path surfaces + counts a crashed gate. Each increment
+        # rides a ``harness.check.crashed`` event, so a silently-broken check is both
+        # visible on the audit log and tallied for a run-health projection.
+        self.check_crashes = 0
         # Monotonic per-run dispatch counter — the deterministic basis for the
         # idempotency key (ZU-CORE-4). It depends only on call position, not on a
         # random event_id, so a replay of the same trace mints the same keys.
@@ -817,9 +1042,26 @@ class _Run:
         self.events.append(event)
         return event.event_id
 
+    async def emit_crash(
+        self, kind: str, name: str, exc: Exception, checkpoint: str, *, parent: UUID | None = None
+    ) -> None:
+        """Surface AND count a crashed detector/monitor/validator/replay-arbiter
+        (C10), mirroring the gate path's crash visibility. Increments the run's
+        crash tally and emits ``harness.check.crashed`` so a silently-broken check
+        is on the audit log, not just a log line."""
+        self.check_crashes += 1
+        await self.emit(
+            ev.CHECK_CRASHED,
+            {"kind": kind, "name": name, "error": f"{type(exc).__name__}: {exc}",
+             "checkpoint": checkpoint},
+            parent=parent if parent is not None else self.root,
+            source=name,
+        )
+
     def ctx(
         self, observation: Any = None, *, invocation: Any = None,
         idempotency_key: str | None = None, annotations: dict | None = None,
+        events_from: int | None = None,
     ) -> RunContext:
         # Reuse the single context object; just point it at the current
         # observation. Detectors/validators read it as a read-only view. The gate
@@ -834,7 +1076,26 @@ class _Run:
         self._ctx.tainted = self.tainted
         self._ctx.mode = self.mode
         self._ctx.quarantined = self.quarantined
+        # Scoped events window (C14): a per-observation/per-turn checkpoint pins the
+        # view's lower bound to ``events_from`` so a scope-declared check cannot read
+        # events outside its scope. ``None`` restores the whole-log view (ON_FINAL /
+        # gate / tool). The window still reflects growth by reference (no copy).
+        self._ctx.events = (
+            _EventsView(self.events, events_from) if events_from is not None
+            else _EventsView(self.events)
+        )
         return self._ctx
+
+    def turn_start_index(self, turn: UUID | None) -> int:
+        """The log index of ``turn``'s TURN_STARTED event — the lower bound of the
+        current observation/turn window (C14). Falls back to 0 (whole log) when the
+        turn is unknown, so scoping degrades safely to the existing behaviour."""
+        if turn is None:
+            return 0
+        for i, e in enumerate(self.events):
+            if e.event_id == turn:
+                return i
+        return 0
 
     def raise_taint(self, source: str, detail: str | None = None) -> bool:
         """Flip the run-level taint flag on (ZU-CD-3). Returns True if it changed
@@ -960,11 +1221,19 @@ def _step_annotations(step: TrackStep) -> dict | None:
     return ann or None
 
 
-def _arbitrate(arbiters: list | tuple, step: TrackStep, observation: Any, ctx: RunContext) -> ReplayDecision:
+def _arbitrate(
+    arbiters: list | tuple, step: TrackStep, observation: Any, ctx: RunContext,
+    *, crashes: list[tuple[str, Exception]] | None = None,
+) -> ReplayDecision:
     """Ask every ReplayArbiter and take the *strongest* decision (STOP > ESCALATE >
     HANDOFF > CONTINUE). A raising arbiter is isolated (logged, treated as CONTINUE)
     so a buggy arbiter cannot crash a replay — its job is to *raise* the bar, never
-    to be load-bearing for safety on its own."""
+    to be load-bearing for safety on its own.
+
+    ``crashes`` (C10): when a list is supplied, a raising arbiter's ``(name,
+    exception)`` is appended so the caller surfaces + counts it as a
+    ``harness.check.crashed`` event — a silently-broken arbiter is visible on the
+    audit log, mirroring the gate path, not just a log line."""
     worst = ReplayDecision.CONTINUE
     for a in arbiters:
         try:
@@ -972,6 +1241,8 @@ def _arbitrate(arbiters: list | tuple, step: TrackStep, observation: Any, ctx: R
         except Exception as exc:  # noqa: BLE001 - a broken arbiter must not crash replay
             log.warning("replay arbiter %r raised %s: %s", getattr(a, "name", a),
                         type(exc).__name__, exc)
+            if crashes is not None:
+                crashes.append((getattr(a, "name", "replay_arbiter"), exc))
             continue
         if _REPLAY_DECISION_RANK.get(d, 0) > _REPLAY_DECISION_RANK[worst]:
             worst = d
@@ -1032,7 +1303,13 @@ async def _replay_track(
         # consequential action runs (and resume executes that exact approved step).
         annotations = _step_annotations(step)
         if arbiters:
-            decision = _arbitrate(arbiters, step, last_obs, run.ctx(observation=last_obs, annotations=annotations))
+            arb_crashes: list[tuple[str, Exception]] = []
+            decision = _arbitrate(
+                arbiters, step, last_obs,
+                run.ctx(observation=last_obs, annotations=annotations), crashes=arb_crashes,
+            )
+            for aname, exc in arb_crashes:  # C10: surface + count a crashed arbiter
+                await run.emit_crash("replay_arbiter", aname, exc, "replay", parent=run.root)
             if decision is ReplayDecision.STOP:
                 return False, await run.terminal("replay.arbiter.stop")
             if decision is ReplayDecision.ESCALATE:
@@ -1238,19 +1515,40 @@ async def _run_task(
     replaying = track is not None and track.matches(spec.query) and bool(track.steps)
     budget = replay_budget if (replaying and replay_budget is not None) else spec.budget
 
-    tools = {name: _materialize(registry.get("tools", name)) for name in registry.names("tools")}
-    detectors = [_materialize(registry.get("detectors", n)) for n in registry.names("detectors")]
-    validators = [_materialize(registry.get("validators", n)) for n in registry.names("validators")]
+    # Each plugin is protocol-checked after instantiation (C3): a built instance
+    # must satisfy the Protocol its kind maps to, or _materialize raises
+    # PluginProtocolError naming the plugin + kind. A misregistered plugin then
+    # fails loudly at load, not as a cryptic crash inside a checkpoint.
+    tools = {
+        name: _materialize(registry.get("tools", name), kind="tools", name=name)
+        for name in registry.names("tools")
+    }
+    detectors = [
+        _materialize(registry.get("detectors", n), kind="detectors", name=n)
+        for n in registry.names("detectors")
+    ]
+    validators = [
+        _materialize(registry.get("validators", n), kind="validators", name=n)
+        for n in registry.names("validators")
+    ]
     # The pre-execution gate set (ZU-CORE-2). Empty by default, so a run with no
     # registered gate behaves exactly as before — the seam is inert until used.
-    gates = [_materialize(registry.get("gates", n)) for n in registry.names("gates")]
+    gates = [
+        _materialize(registry.get("gates", n), kind="gates", name=n)
+        for n in registry.names("gates")
+    ]
     # The replay-divergence arbiters (ZU-RAIL-3). Empty by default ⇒ the navigator's
     # existing challenge/soft-miss → hand-to-model behaviour is unchanged.
-    arbiters = [_materialize(registry.get("replay_arbiters", n))
-                for n in registry.names("replay_arbiters")]
+    arbiters = [
+        _materialize(registry.get("replay_arbiters", n), kind="replay_arbiters", name=n)
+        for n in registry.names("replay_arbiters")
+    ]
     # The stateful, history-aware monitors (ZU-RAIL-5). Empty by default ⇒ the
     # monitor checkpoint short-circuits and the event sequence is unchanged.
-    monitors = [_materialize(registry.get("monitors", n)) for n in registry.names("monitors")]
+    monitors = [
+        _materialize(registry.get("monitors", n), kind="monitors", name=n)
+        for n in registry.names("monitors")
+    ]
 
     # Fail-closed containment floor: refuse before anything runs if a tool needs a
     # sandbox we're not inside. Raised (not a Result) — a misconfigured posture is
@@ -1303,6 +1601,18 @@ async def _run_task(
             envelope_payload,
             parent=run.root,
         )
+        # Record the containment BASIS on the log (F81) when the fail-closed floor
+        # is in force. ``enforce_containment`` (above) already refused if a
+        # sandbox-needing tool would run uncontained; this makes the SIGNAL the
+        # decision rested on auditable — a run claiming ``sandboxed`` on an
+        # UNCORROBORATED env (the forgeable ZU_SANDBOXED set but the launcher's
+        # proxy/network wiring absent) is a reviewable forged-signal candidate. Only
+        # under 'required' (the sole posture where the signal is load-bearing), so
+        # every other run's event sequence is unchanged.
+        if containment == "required":
+            await run.emit(
+                ev.CONTAINMENT_ATTESTED, containment_basis(containment), parent=run.root
+            )
         messages = _initial_messages(spec, ladder.active().values())
     else:
         # --- resume a paused run from its log (ZU-CD-5) -----------------------
@@ -1545,7 +1855,7 @@ async def _run_task(
             return await run.terminal("model finalised with no answer")
 
         candidate = Result(status=Status.SUCCESS, value=value)
-        verdict = _finalise_verdict(run, detectors, validators, candidate)
+        verdict = await _finalise_verdict(run, detectors, validators, candidate)
         if verdict is not None:
             await run.emit(
                 ev.VALIDATION_FAILED,
@@ -1743,6 +2053,28 @@ async def _invoke(
                "detail": "capability-bearing call disarmed in explore mode (ZU-RAIL-2)"}
         await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
         return obs
+    # Schema validation of the model-supplied args BEFORE dispatch (C8). The model
+    # is untrusted output: args that violate the tool's DECLARED JSON schema (wrong
+    # type, missing a required field, an unknown key) are exactly the malformed
+    # untrusted input we must not hand to the tool body. Validate generically over
+    # the tool's own ``schema`` (``parameters``); on mismatch emit a defense.blocked
+    # {kind: "schema_mismatch"} and return an error observation — the tool never
+    # runs on bad args, mirroring the gate-deny path. Skipped when the tool declares
+    # no schema (nothing to validate against) — behaviour-preserving.
+    if tool is not None:
+        schema_error = _validate_args_against_schema(tool, args)
+        if schema_error is not None:
+            await run.emit(
+                ev.DEFENSE_BLOCKED,
+                {"kind": "schema_mismatch", "tool": name, "detail": schema_error},
+                parent=invoked_id,
+                source=name,
+            )
+            log.warning("tool %r rejected: args violate declared schema (%s)", name, schema_error)
+            obs = {"error": f"tool args violate declared schema: {schema_error}",
+                   "blocked": "schema_mismatch"}
+            await run.emit(ev.TOOL_RETURNED, {"tool": name, "observation": obs}, parent=turn, source=name)
+            return obs
     if tool is None:
         obs = {"error": f"unknown tool: {name}"}
     else:
@@ -1847,13 +2179,29 @@ async def _detector_checkpoint(
     so a page that is both fatal and escalatable — e.g. a 404 with an empty body
     firing both ``error`` (TERMINAL) and ``empty`` (ESCALATE) — must terminate,
     never waste a tier climb just because ``empty`` happened to sort first. This
-    mirrors the ON_FINAL ladder, which already takes the worst verdict."""
-    ctx = run.ctx(observation)
+    mirrors the ON_FINAL ladder, which already takes the worst verdict.
+
+    Scope is ENFORCED, not merely selected (C14): a PER_OBSERVATION/PER_TURN
+    detector is handed a ``ctx.events`` window scoped to the current turn — its
+    events since TURN_STARTED — so it can only read within its declared scope, not
+    the whole prior log. A crashing detector is surfaced + counted (C10)."""
+    # C14: scope the events window to the current turn for the narrower scopes; an
+    # ON_FINAL pass (never mixed with them in practice) or an unknown turn keeps the
+    # whole log.
+    scoped = bool(scopes & {Scope.PER_OBSERVATION, Scope.PER_TURN}) and Scope.ON_FINAL not in scopes
+    events_from = run.turn_start_index(turn) if scoped else None
+    ctx = run.ctx(observation, events_from=events_from)
     verdicts: list[Verdict] = []
     for d in detectors:
         if getattr(d, "scope", None) not in scopes:
             continue
-        verdict = _safe_inspect(d, ctx)
+        verdict, crash = _safe_inspect(d, ctx)
+        if crash is not None:
+            await run.emit_crash(
+                "detector", getattr(d, "name", "detector"), crash,
+                "|".join(sorted(s.value for s in scopes)), parent=turn,
+            )
+            continue
         if verdict is None:
             continue
         await run.emit(
@@ -1890,7 +2238,11 @@ async def _monitor_checkpoint(
     # which ``run_monitors`` also drives). Emission of ``harness.monitor.fired`` per
     # fired verdict and the VIOLATION→TERMINAL bridge stay HERE: the loop owns what a
     # verdict MEANS for the run; the helper owns only evaluation and ranking.
-    fired = fold_monitors(monitors, ctx)
+    crashes: list[tuple[str, Exception]] = []
+    fired = fold_monitors(monitors, ctx, crashes=crashes)
+    # C10: a crashed monitor is surfaced + counted, mirroring the gate path.
+    for mname, exc in crashes:
+        await run.emit_crash("monitor", mname, exc, "monitor", parent=turn)
     for mv in fired:
         await run.emit(
             ev.MONITOR_FIRED,
@@ -2358,20 +2710,30 @@ def _escalation_notice(tier: int, active: dict, verdict: Verdict) -> str:
     )
 
 
-def _finalise_verdict(
+async def _finalise_verdict(
     run: _Run, detectors: list, validators: list, candidate: Result
 ) -> Verdict | None:
     """The ON_FINAL ladder: ON_FINAL detectors then validators. Returns the
-    single worst verdict (or None if everything passed)."""
+    single worst verdict (or None if everything passed). ON_FINAL is the
+    whole-log scope, so ctx.events is the full log (no C14 window). A crashing
+    ON_FINAL detector/validator is surfaced + counted (C10)."""
     ctx = run.ctx()
     verdicts: list[Verdict] = []
     for d in detectors:
         if getattr(d, "scope", None) == Scope.ON_FINAL:
-            v = _safe_inspect(d, ctx)
-            if v is not None:
+            v, crash = _safe_inspect(d, ctx)
+            if crash is not None:
+                await run.emit_crash(
+                    "detector", getattr(d, "name", "detector"), crash, "on_final", parent=run.root
+                )
+            elif v is not None:
                 verdicts.append(v)
     for val in validators:
-        v = _safe_check(val, candidate, ctx)
-        if v is not None:
+        v, crash = _safe_check(val, candidate, ctx)
+        if crash is not None:
+            await run.emit_crash(
+                "validator", getattr(val, "name", "validator"), crash, "on_final", parent=run.root
+            )
+        elif v is not None:
             verdicts.append(v)
     return _worst(verdicts)

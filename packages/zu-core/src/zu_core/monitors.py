@@ -34,19 +34,24 @@ _MONITOR_RANK: dict[MonitorState, int] = {
 }
 
 
-def _safe_evaluate(monitor: Any, ctx: RunContext) -> MonitorVerdict | None:
-    """Run a Monitor in isolation (ZU-RAIL-5): a raising third-party monitor is
-    logged and skipped, never allowed to crash the fold — mirrors the loop's
-    ``_safe_evaluate``. A Monitor is pure, but a buggy one must not take down the run."""
+def _safe_evaluate(
+    monitor: Any, ctx: RunContext
+) -> tuple[MonitorVerdict | None, Exception | None]:
+    """Run a Monitor in isolation (ZU-RAIL-5) and REPORT the outcome as
+    ``(verdict, crash)`` — mirroring the loop's ``_safe_gate`` (C10). A raising
+    third-party monitor is still isolated (never crashes the fold) and logged, but
+    the crash is returned so the loop's checkpoint can surface it as a counted
+    ``harness.check.crashed`` event; a Monitor is pure, but a buggy one must be
+    visible, not swallowed. A clean evaluate returns ``(verdict, None)``."""
     try:
         verdict: MonitorVerdict | None = monitor.evaluate(ctx)
-        return verdict
+        return verdict, None
     except Exception as exc:  # noqa: BLE001 - a broken monitor must not halt the run
         log.warning(
             "monitor %r raised %s: %s — skipping it",
             getattr(monitor, "name", monitor), type(exc).__name__, exc,
         )
-        return None
+        return None, exc
 
 
 def worst_verdict(verdicts: Sequence[MonitorVerdict]) -> MonitorVerdict | None:
@@ -56,15 +61,28 @@ def worst_verdict(verdicts: Sequence[MonitorVerdict]) -> MonitorVerdict | None:
 
 
 def fold_monitors(
-    monitors: Sequence[Monitor], ctx: RunContext
+    monitors: Sequence[Monitor],
+    ctx: RunContext,
+    *,
+    crashes: list[tuple[str, Exception]] | None = None,
 ) -> list[MonitorVerdict]:
     """Evaluate every monitor against ``ctx`` under crash-isolation and return the
     non-OK verdicts in monitor order. The ONE "evaluate each monitor" implementation
     the loop's checkpoint also drives (it then emits + bridges each); ``run_monitors``
-    builds the ctx and reduces. No emission, no I/O — pure."""
+    builds the ctx and reduces. No emission, no I/O — pure.
+
+    ``crashes`` (C10): when a list is supplied, each raising monitor's
+    ``(name, exception)`` is appended to it so the caller (the loop's checkpoint)
+    can surface + count the crash as a ``harness.check.crashed`` event. The
+    standalone ``run_monitors`` leaves it ``None`` (crashes are still isolated +
+    logged, just not collected) — behaviour-preserving for the pure path."""
     fired: list[MonitorVerdict] = []
     for m in monitors:
-        mv = _safe_evaluate(m, ctx)
+        mv, crash = _safe_evaluate(m, ctx)
+        if crash is not None:
+            if crashes is not None:
+                crashes.append((getattr(m, "name", "monitor"), crash))
+            continue
         if mv is None or mv.state == MonitorState.OK:
             continue
         fired.append(mv)
