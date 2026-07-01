@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from .reputation import (
     DeterministicReputationScorer,
+    LiveSignalSource,
+    Signals,
     SignalSource,
     StaticSignalSource,
     score_signals,
@@ -28,6 +30,8 @@ __all__ = [
     "domain_of",
     # ReputationProvider — deterministic merchant trust (#84)
     "DeterministicReputationScorer",
+    "LiveSignalSource",
+    "Signals",
     "SignalSource",
     "StaticSignalSource",
     "score_signals",
