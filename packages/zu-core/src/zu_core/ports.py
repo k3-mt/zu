@@ -74,6 +74,12 @@ INTERFACE_VERSION: dict[str, int] = {
     "checkout_proceeders": 1,  # CheckoutProceeder — advance add-to-cart -> checkout, short of commit (#117)
     "cart_adders": 1,  # CartAdder — deterministic product -> cart, recognise/click/verify (#122)
     "funnel_phase_classifiers": 1,  # FunnelPhaseClassifier — where a page sits in the funnel (#121)
+    # The interaction-primitive family (#125): ONE closed vocabulary of generic,
+    # self-locating, verified moves (dismiss/search/choose_one/advance/commit_stop)
+    # the vertical resolvers above reduce to, plus the composition layer that drives
+    # them. Port shapes below; reference impls are plugins in zu-tools.
+    "interaction_primitives": 1,  # InteractionPrimitive — one generic verified move (#125)
+    "primitive_runtimes": 1,  # PrimitiveRuntime — dispatch {kind,hint} over the family (#125)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -1169,16 +1175,17 @@ class SurfaceAction(BaseModel):
     (``a1``, ``a2`` … — the same handle the reducer assigned; the caller never
     sees or supplies a selector, §11.3).
 
-    ``kind`` is a free string — ``"click"`` / ``"type"`` / ``"select"`` are the
-    shipped verbs, but a producer may add one without a core edit. ``text``
+    ``kind`` is a free string — ``"click"`` / ``"type"`` / ``"select"`` / ``"submit"``
+    are the shipped verbs, but a producer may add one without a core edit. ``text``
     carries the payload for ``type`` (the string to enter) and ``select`` (the
     option label to choose; ``None`` means "the first VALID option", the
-    deterministic default a :class:`SelectionSatisfier` drives)."""
+    deterministic default a :class:`SelectionSatisfier` drives). ``submit`` presses
+    Enter on the field (a search-on-enter box with no visible submit button)."""
 
     model_config = {"frozen": True}
 
     handle: str
-    kind: str  # "click" | "type" | "select"
+    kind: str  # "click" | "type" | "select" | "submit"
     text: str | None = None
 
 
@@ -1370,3 +1377,121 @@ class FunnelPhaseClassifier(Protocol):
     regardless (#121)."""
 
     def classify(self, view: SurfaceView) -> FunnelPhase: ...
+
+
+# --- the interaction-primitive family — ONE closed vocabulary of generic,
+#     self-locating, verified moves that compose to cover ANY funnel (#125) -------
+#
+# The connected-surface resolvers above (consent #94, selection #95, checkout #117,
+# cart #122) are each a VERTICAL-NAMED capability. Generalised, they are all
+# instances of ONE shape: a PRIMITIVE that (1) self-LOCATES its affordance(s) on a
+# content-free :class:`~zu_core.surface.SurfaceView`, (2) APPLIES the move over a
+# :class:`ConnectedSurface`, and (3) checks a SUCCESS INVARIANT (an option became
+# selected, the funnel advanced, the banner cleared). A funnel then stops being
+# bespoke code and becomes a TRAJECTORY through a fixed vocabulary:
+#
+#   dismiss     — clear an interstitial (consent / modal / popup)      [wraps #94]
+#   search      — type a query into the recognised search box + submit
+#   choose_one  — pick ONE from a group of equivalent options (+ a content-free
+#                 hint); UNIFIES select-variant (#95), pick-slot, pick-service,
+#                 pick-search-result — one 'choose from a group' call for all
+#   advance     — click the primary move-forward control; UNIFIES add-to-cart (#122)
+#                 + proceed-to-checkout (#117) + 'view times' / continue / next
+#   commit_stop — the IRREVERSIBLE terminal (pay / place-order / confirm-booking) —
+#                 recognised and STOPPED for human approval; NEVER crossed
+#
+# The hint is a content-free NUDGE — a position ('earliest' / 'last') or a token to
+# match against option NAMES — so it is injection-immune: option names are DATA the
+# primitive matches, never instructions it obeys. The model's per-step job shrinks
+# to {primitive, hint}; every mechanic (locate, execute, verify, report) is
+# deterministic here — 'the model isn't strong enough' is never the fix.
+
+#: The closed primitive vocabulary. A consumer switches on ``kind``; adding a verb
+#: is a deliberate edit here, not an open-ended string space.
+PRIMITIVE_KINDS: tuple[str, ...] = ("dismiss", "search", "choose_one", "advance", "commit_stop")
+
+#: The generic PROGRESS verdict a primitive reports — the content-free signal a
+#: composition runtime routes on. ``advance`` moved the funnel forward; ``regress``
+#: moved it backward (a wander); ``no_op`` changed nothing (the affordance was
+#: absent or the click was silent); ``blocked`` reached a self-resolvable wall (a
+#: required field, a login); ``commit_stop`` reached the irreversible boundary and
+#: STOPPED for approval.
+PrimitiveProgress = Literal["advance", "regress", "no_op", "blocked", "commit_stop"]
+
+
+class PrimitivePlan(BaseModel):
+    """What a primitive's content-free ``inspect`` reports about the CURRENT surface:
+    whether it is APPLICABLE here, the affordance handle(s) it would act on, and the
+    (bound) content-free ``hint``. Pure structure — derived from role/name/group/state
+    only, never page prose, and no I/O. A plan is a PROPOSAL confirmed by ``apply``'s
+    invariant, never ground truth."""
+
+    model_config = {"frozen": True}
+
+    kind: str
+    applicable: bool
+    handles: tuple[str, ...] = ()
+    hint: str | None = None
+    detail: str = ""
+
+
+class PrimitiveOutcome(BaseModel):
+    """What a primitive's ``apply`` DID: the generic :data:`PrimitiveProgress` verdict
+    (the content-free routing signal) and the handle(s) it actually acted on. A host
+    routes on ``progress`` — advance forward, treat regress/no_op as a wall to recover
+    from, and hand a ``commit_stop`` to human approval — without reading page meaning."""
+
+    model_config = {"frozen": True}
+
+    kind: str
+    progress: PrimitiveProgress
+    handles: tuple[str, ...] = ()
+    detail: str = ""
+
+
+@runtime_checkable
+class InteractionPrimitive(Protocol):
+    """One generic, self-locating, VERIFIED interaction — the uniform contract the
+    consent (#94) / selection (#95) / cart (#122) / checkout (#117) resolvers all
+    reduce to (#125).
+
+    ``inspect`` is CHEAP + content-free over a core :class:`~zu_core.surface.SurfaceView`:
+    it self-locates the primitive's affordance(s) and reports a :class:`PrimitivePlan`
+    (applicable? which handles?), taking an optional content-free ``hint``. ``apply``
+    drives the :class:`ConnectedSurface` to EXECUTE the move and VERIFY its success
+    invariant, returning a :class:`PrimitiveOutcome`. A primitive NEVER crosses the
+    commit boundary: ``commit_stop`` recognises it (and reports ``commit_stop``);
+    ``advance`` excludes committing controls by construction. ``kind`` is one of
+    :data:`PRIMITIVE_KINDS`."""
+
+    name: str
+    kind: str
+
+    def inspect(self, view: SurfaceView, *, hint: str | None = None) -> PrimitivePlan: ...
+
+    async def apply(
+        self, surface: ConnectedSurface, *, hint: str | None = None
+    ) -> PrimitiveOutcome: ...
+
+
+@runtime_checkable
+class PrimitiveRuntime(Protocol):
+    """The thin COMPOSITION layer over the primitive family: given a SurfaceView +
+    the model's ``{kind, hint}`` step, dispatch to the right primitive, apply, verify,
+    and report — so a host drives ONE uniform loop instead of N hardcoded capability
+    blocks (#125).
+
+    ``free`` reports the applicable SELF-GATING primitives (the ones that fire WITHOUT
+    the model — dismiss a banner, satisfy required variants via ``choose_one`` with no
+    hint, ``advance`` the funnel) as content-free :class:`PrimitivePlan`\\ s, in the
+    order a host should try them. ``step`` runs ONE named primitive (a model-directed
+    ``{kind, hint}`` or a free plan's kind) over the surface and returns its outcome.
+    ``get`` resolves a kind to its primitive (``None`` for an unknown kind)."""
+
+    def free(self, view: SurfaceView) -> tuple[PrimitivePlan, ...]: ...
+
+    def get(self, kind: str) -> InteractionPrimitive | None: ...
+
+    async def step(
+        self, surface: ConnectedSurface, kind: str, *, hint: str | None = None
+    ) -> PrimitiveOutcome: ...

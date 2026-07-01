@@ -69,6 +69,11 @@ GROUPS = {
     "checkout_proceeders": "zu.checkout_proceeders",
     "cart_adders": "zu.cart_adders",
     "funnel_phase_classifiers": "zu.funnel_phase_classifiers",
+    # The interaction-primitive family (#125): the closed vocabulary of generic
+    # verified moves + the composition layer that drives them. Ports in
+    # zu_core.ports; reference impls are plugins in zu-tools.
+    "interaction_primitives": "zu.interaction_primitives",
+    "primitive_runtimes": "zu.primitive_runtimes",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind

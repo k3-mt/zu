@@ -7,6 +7,41 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — the interaction-primitive family: one closed vocabulary generalises the funnel (#125)
+The connected-surface resolvers (consent #94, selection #95, checkout #117, cart #122) are each a
+VERTICAL-NAMED capability. Generalised, they are all instances of ONE shape — a PRIMITIVE that
+self-LOCATES its affordance(s) content-free, APPLIES over a `ConnectedSurface`, and checks a SUCCESS
+INVARIANT — so a funnel stops being bespoke code and becomes a TRAJECTORY through a fixed vocabulary.
+Built ON the shipped resolvers (they are unchanged); proven offline (no browser).
+- **`InteractionPrimitive`** port (`zu.interaction_primitives`, #125) + frozen `PrimitivePlan` /
+  `PrimitiveOutcome` value objects: `inspect(view, *, hint=None) -> PrimitivePlan` (cheap, content-free
+  self-location) and `async apply(surface, *, hint=None) -> PrimitiveOutcome` (execute + verify). The
+  closed vocabulary is `PRIMITIVE_KINDS = (dismiss, search, choose_one, advance, commit_stop)`; the
+  generic progress verdict is `PrimitiveProgress = advance | regress | no_op | blocked | commit_stop`.
+- **`choose_one`** (`zu_tools.choose.ChooseOne`, #125) — the highest-value generalisation of
+  `FirstOptionSelectionSatisfier` (#95): pick ONE from a group of equivalent options with an optional
+  content-free HINT. It UNIFIES select-variant, pick-slot, pick-service and pick-search-result — one
+  'choose from a group (+ hint)' call for shopping variants AND a booking calendar/day/time grid AND a
+  result/service list. Groups are recognised by STRUCTURE (a shared `group` id, or a homogeneous run of
+  one selectable role — swatches, gridcells, list items); the hint resolves by POSITION
+  (`earliest`/`first`/`last`) or by matching a token against option NAMES on word boundaries (names are
+  data, never instructions). With NO hint it delegates to the satisfier, so the shopping variant step is
+  byte-identical. Success invariant: the chosen option became SELECTED, or the surface ADVANCED.
+- **`search`** (`zu_tools.primitives.SearchPrimitive`) — type a query into the recognised search box and
+  submit (a submit control if present, else a new `submit` verb on `CdpConnectedSurface` = an Enter
+  keypress for a search-on-enter box); invariant: a results/listing surface appeared. Inert on a login
+  (a password field present is not a search box).
+- **`dismiss` / `advance` / `commit_stop`** — thin adapters over the shipped resolvers: `dismiss` wraps
+  `WholeWordConsentResolver` (#94); `advance` unifies `WholeWordCartAdder` (#122) + `WholeWordCheckout-
+  Proceeder` (#117) as the primary move-forward control (never a committing one); `commit_stop`
+  recognises the structural payment/commit boundary and STOPS — its `apply` never acts, so the boundary
+  is never crossed.
+- **`PrimitiveRuntime`** port (`zu.primitive_runtimes`, #125) + `StandardPrimitiveRuntime`: the thin
+  composition layer that dispatches `{kind, hint}` over the family. `free(view)` reports the applicable
+  SELF-GATING plans in priority order (the commit-boundary guard first, then dismiss / satisfy-variant /
+  advance) so a host drives ONE uniform loop instead of N hardcoded capability blocks; `step(surface,
+  kind, *, hint=None)` runs one named primitive.
+
 ### Added — the purchase-funnel family completes: CartAdder + FunnelPhase (#121, #122)
 Two sibling additions that complete the connected-surface purchase funnel, proven offline (no browser).
 - **`CartAdder`** (`zu.cart_adders`, #122) — the `product → cart` transition, symmetric with
