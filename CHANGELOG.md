@@ -7,6 +7,23 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — connected-surface variant selects: perceive + satisfy real WooCommerce products (#110)
+Adopting the connected-surface family downstream surfaced a perception regression vs a DOM walk:
+`CdpConnectedSurface` set **zero** variant selects on a real WooCommerce product. Two causes, two fixes.
+- **Perception.** `reduce_surface` dropped an interactive control with no accessible *name* (counting
+  it toward blindness), so a variant `<select>` — which routinely has no accessible name — never
+  became an affordance. New `reduce_surface(keep_unnamed_roles=…)`: a SELF-ADDRESSING role (a
+  `<select>`/`listbox`, actionable by option structure, resolved by backend node id) is kept, with its
+  current value as the fallback label. `CdpConnectedSurface.perceive()` opts `combobox`/`listbox` in;
+  the name-based tool/pointer path is unchanged (default empty).
+- **Satisfier scope.** `FirstOptionSelectionSatisfier` gated on the HTML `required` attribute, but real
+  variant selects (WooCommerce `attribute_pa_*`) are gated by the shop's JS, not the attribute — so it
+  set zero. It now targets every enabled single-choice `<select>`; over-inclusion is safe because the
+  browser-side picker only sets a control the DOM reports as unset and only actual changes are reported
+  (a sort/already-chosen dropdown is a no-op, never a clobber). The satisfy loop is now positional, so
+  it survives the two real-page hazards: many selects sharing one 'Choose an option' label, and handle
+  renumbering between acts.
+
 ### Added — the connected-surface family: web Action Surfaces over an external CDP target
 Reuse zu's accessibility-tree reduction (which already flattens OPEN shadow roots + child frames)
 over a browser a HOST owns, instead of a hand-rolled DOM walk that goes blind at every boundary.

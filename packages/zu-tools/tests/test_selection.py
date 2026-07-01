@@ -1,11 +1,12 @@
-"""#95 — FirstOptionSelectionSatisfier: satisfy required, unset variant selects.
+"""#95/#110 — FirstOptionSelectionSatisfier: satisfy unset variant selects.
 
 The browser-side option picker (only-set-if-unset, first valid option) is JS that
 cannot run offline, so the fake ConnectedSurface models exactly that DOM contract:
-a ``select`` act sets a control only while it is unset. The tests then verify the
-satisfier's orchestration — it targets required single-choice controls, sets each
-unset one, reports what changed, and leaves the rest alone — plus direct unit
-tests of the content-free candidate/took predicates.
+a ``select`` act sets a control only while it is unset. The tests verify the
+satisfier's orchestration — it targets single-choice selects regardless of the
+HTML ``required`` flag (#110), sets each unset one, reports what changed, and is
+robust to real-page hazards: many selects sharing one placeholder label, and
+handle renumbering between acts.
 """
 
 from __future__ import annotations
@@ -20,21 +21,22 @@ from zu_tools.selection import FirstOptionSelectionSatisfier, _is_candidate, _to
 class VariantSurface:
     """In-memory ConnectedSurface over native <select>s. A ``select`` act sets a
     control's value to its first option ONLY while it is unset — mirroring
-    ``_SELECT_FN``'s DOM check (a placeholder has ``value === ''``)."""
+    ``_SELECT_FN``'s DOM check (a placeholder has ``value === ''``). Handles are
+    stable (the control's own key)."""
 
     def __init__(self, controls: list[dict[str, Any]]) -> None:
         self._controls = controls
         self.selected: list[str] = []  # handles that received a select act
 
     async def perceive(self) -> SurfaceView:
-        affs = tuple(
-            SurfaceAffordance(
-                handle=c["handle"], role=c["role"], label=c["label"], value=c["value"],
-                states=tuple(c.get("states", ())),
-            )
-            for c in self._controls
+        return SurfaceView(affordances=tuple(self._affordance(c) for c in self._controls))
+
+    @staticmethod
+    def _affordance(c: dict[str, Any]) -> SurfaceAffordance:
+        return SurfaceAffordance(
+            handle=c["handle"], role=c["role"], label=c["label"], value=c["value"],
+            states=tuple(c.get("states", ())),
         )
-        return SurfaceView(affordances=affs)
 
     async def act(self, action: SurfaceAction) -> SurfaceView:
         if action.kind == "select":
@@ -46,52 +48,95 @@ class VariantSurface:
         return await self.perceive()
 
 
-def _required(handle: str, label: str, *, unset: bool, value: str, first: str,
-              disabled: bool = False) -> dict[str, Any]:
-    states = ["required"] + (["disabled"] if disabled else [])
-    return {"handle": handle, "role": "combobox", "label": label, "value": value,
-            "states": states, "unset": unset, "first": first}
+class RenumberingVariantSurface(VariantSurface):
+    """Like VariantSurface, but the FIRST successful select enables an add-to-basket
+    button that is prepended to the surface — so every subsequent perceive
+    RENUMBERS the selects' handles. A satisfier that snapshots handles from the
+    first perceive would then act on the wrong control; one that re-reads the
+    current handle each pass survives."""
+
+    def __init__(self, controls: list[dict[str, Any]]) -> None:
+        super().__init__(controls)
+        self._button = False
+
+    async def perceive(self) -> SurfaceView:
+        affs = [VariantSurface._affordance(c) for c in self._controls]
+        if self._button:
+            affs.insert(0, SurfaceAffordance(handle="_", role="button", label="Add to basket"))
+        # Reassign handles a1..aN in current document order — the renumber.
+        renumbered = tuple(a.model_copy(update={"handle": f"a{i + 1}"}) for i, a in enumerate(affs))
+        return SurfaceView(affordances=renumbered)
+
+    async def act(self, action: SurfaceAction) -> SurfaceView:
+        # Resolve the CURRENT handle to a control via the latest perceive, then set.
+        view = await self.perceive()
+        target = next((a for a in view.affordances if a.handle == action.handle), None)
+        if action.kind == "select" and target is not None:
+            for c in self._controls:
+                if c["label"] == target.label and c["value"] == target.value and c.get("unset"):
+                    c["value"] = c["first"]
+                    c["unset"] = False
+                    self._button = True
+                    break
+        return await self.perceive()
+
+
+def sel(handle: str, label: str = "Choose an option", *, first: str,
+        unset: bool = True, value: str | None = None, disabled: bool = False) -> dict[str, Any]:
+    return {"handle": handle, "role": "combobox", "label": label,
+            "value": value if value is not None else ("" if unset else first),
+            "states": (["disabled"] if disabled else []), "unset": unset, "first": first}
 
 
 def test_satisfier_conforms_to_protocol() -> None:
     assert isinstance(FirstOptionSelectionSatisfier(), SelectionSatisfier)
 
 
-async def test_sets_every_unset_required_select_and_reports_them() -> None:
+async def test_sets_unset_selects_regardless_of_required_flag() -> None:
+    # #110: none of these carry the HTML `required` state, yet all unset ones must
+    # be satisfied. Already-set and disabled selects and non-selects are left alone.
     surface = VariantSurface([
-        _required("a1", "Colour", unset=True, value="Choose an option", first="Red"),
-        _required("a2", "Size", unset=True, value="Choose an option", first="S"),
-        # Not required -> not a candidate, never touched.
-        {"handle": "a3", "role": "combobox", "label": "Gift wrap", "value": "No",
-         "states": (), "unset": True, "first": "Yes"},
-        # Already set -> acted (idempotent) but reports no change.
-        _required("a4", "Style", unset=False, value="Modern", first="Classic"),
-        {"handle": "a5", "role": "button", "label": "Add to basket", "value": None,
-         "states": (), "unset": False, "first": ""},
+        sel("a1", "Colour", first="Red"),
+        sel("a2", "Size", first="Small"),
+        sel("a3", "Style", unset=False, value="Modern", first="Classic"),   # already chosen
+        sel("a4", "Locked", first="X", disabled=True),                      # disabled
+        {"handle": "a5", "role": "button", "label": "Add to basket", "value": None},
     ])
 
     results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
 
-    chosen = {r.handle: r.chosen_label for r in results}
-    assert chosen == {"a1": "Red", "a2": "S"}      # only the unset required selects
-    assert "a3" not in surface.selected            # non-required never acted
-    assert "a4" in surface.selected                # required-but-set acted, reported nothing
+    assert {r.handle: r.chosen_label for r in results} == {"a1": "Red", "a2": "Small"}
+    assert "a3" in surface.selected and "a4" not in surface.selected  # set acted (no-op), disabled skipped
 
 
-async def test_disabled_required_select_is_not_a_candidate() -> None:
+async def test_sets_four_variant_selects_that_share_one_placeholder_label() -> None:
+    # The real WooCommerce shape: four required variant selects, every one showing
+    # the same 'Choose an option' placeholder. Addressing by (role,label) would keep
+    # re-finding the first; the positional pass must set all four.
     surface = VariantSurface([
-        _required("a1", "Colour", unset=True, value="Choose", first="Red", disabled=True),
+        sel("a1", first="Black"),
+        sel("a2", first="Brass"),
+        sel("a3", first="13mm"),
+        sel("a4", first="25cm"),
+    ])
+
+    results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
+
+    assert [r.chosen_label for r in results] == ["Black", "Brass", "13mm", "25cm"]
+    assert surface.selected == ["a1", "a2", "a3", "a4"]
+
+
+async def test_survives_handle_renumbering_between_acts() -> None:
+    surface = RenumberingVariantSurface([
+        sel("c1", first="Black"),
+        sel("c2", first="Brass"),
     ])
     results = await FirstOptionSelectionSatisfier().satisfy_required(surface)
-    assert results == []
-    assert surface.selected == []  # disabled control is skipped entirely
+    assert sorted(r.chosen_label for r in results) == ["Black", "Brass"]
 
 
-async def test_no_required_selects_returns_empty() -> None:
-    surface = VariantSurface([
-        {"handle": "a1", "role": "button", "label": "Buy", "value": None,
-         "states": (), "unset": False, "first": ""},
-    ])
+async def test_no_selects_returns_empty() -> None:
+    surface = VariantSurface([{"handle": "a1", "role": "button", "label": "Buy", "value": None}])
     assert await FirstOptionSelectionSatisfier().satisfy_required(surface) == []
 
 
@@ -101,12 +146,12 @@ def _aff(role: str, *, states: tuple[str, ...] = (), value: str | None = None) -
     return SurfaceAffordance(handle="h", role=role, label="Colour", value=value, states=states)
 
 
-def test_is_candidate_requires_native_select_role_and_required_and_enabled() -> None:
+def test_is_candidate_is_any_enabled_native_select_not_gated_on_required() -> None:
+    assert _is_candidate(_aff("combobox"))                     # #110: no `required` needed
     assert _is_candidate(_aff("combobox", states=("required",)))
-    assert not _is_candidate(_aff("combobox"))                       # not required
-    assert not _is_candidate(_aff("textbox", states=("required",)))  # wrong role
-    assert not _is_candidate(_aff("listbox", states=("required",)))  # ARIA listbox: follow-up
-    assert not _is_candidate(_aff("combobox", states=("required", "disabled")))
+    assert not _is_candidate(_aff("textbox"))                  # wrong role
+    assert not _is_candidate(_aff("listbox"))                  # ARIA listbox: follow-up
+    assert not _is_candidate(_aff("combobox", states=("disabled",)))
 
 
 def test_took_is_a_nonempty_changed_value() -> None:
