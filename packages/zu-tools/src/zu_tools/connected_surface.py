@@ -44,6 +44,7 @@ from .surface_adapter import to_surface_view
 # verb is never a crash.
 _TYPE = "type"
 _SELECT = "select"
+_SUBMIT = "submit"
 
 # Roles that are actionable by their own structure/options rather than an
 # accessible name — a native <select> (combobox) or an ARIA listbox. A variant
@@ -64,6 +65,21 @@ _TYPE_FN = (
     " if (d && d.set) { d.set.call(this, v); } else { this.value = v; }"
     " this.dispatchEvent(new Event('input', {bubbles: true}));"
     " this.dispatchEvent(new Event('change', {bubbles: true})); }"
+)
+
+# Submit a field the way a keyboard would: focus it, fire an Enter key sequence
+# (keydown/keypress/keyup), and — if it lives in a form — requestSubmit()/submit(). This
+# is what a 'search on Enter' box needs when there is no visible submit button; it is the
+# ``submit`` verb the ``search`` primitive issues. Content-free — it presses Enter, never
+# reads the field.
+_SUBMIT_FN = (
+    "function(){ this.focus();"
+    " const ev = function(t){ return new KeyboardEvent(t, {key:'Enter', code:'Enter',"
+    " keyCode:13, which:13, bubbles:true, cancelable:true}); };"
+    " this.dispatchEvent(ev('keydown')); this.dispatchEvent(ev('keypress'));"
+    " this.dispatchEvent(ev('keyup'));"
+    " const f = this.form || (this.closest ? this.closest('form') : null);"
+    " if (f) { if (f.requestSubmit) { f.requestSubmit(); } else { f.submit(); } } }"
 )
 
 # The deterministic option-picker (#95's mechanic, executed browser-side): choose
@@ -170,6 +186,8 @@ class CdpConnectedSurface:
                 await self._call_fn(object_id, _TYPE_FN, [{"value": action.text or ""}])
             elif action.kind == _SELECT:
                 await self._call_fn(object_id, _SELECT_FN, [{"value": action.text}])
+            elif action.kind == _SUBMIT:
+                await self._call_fn(object_id, _SUBMIT_FN)
             else:  # click — the default verb
                 await self._call_fn(object_id, _CLICK_FN)
         # A stale/unresolvable handle is an escalation, not a crash (§11.3): we

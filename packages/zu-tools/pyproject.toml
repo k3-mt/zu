@@ -60,6 +60,19 @@ whole_word = "zu_tools.cart:WholeWordCartAdder"
 [project.entry-points."zu.funnel_phase_classifiers"]
 web = "zu_tools.funnel:WebFunnelPhaseClassifier"
 
+# The interaction-primitive family (#125): the closed vocabulary of generic verified
+# moves (dismiss/search/choose_one/advance/commit_stop) the vertical resolvers reduce to.
+[project.entry-points."zu.interaction_primitives"]
+dismiss = "zu_tools.primitives:DismissPrimitive"
+search = "zu_tools.primitives:SearchPrimitive"
+choose_one = "zu_tools.choose:ChooseOne"
+advance = "zu_tools.primitives:AdvancePrimitive"
+commit_stop = "zu_tools.primitives:CommitStopPrimitive"
+
+# The composition layer that dispatches {kind, hint} over the family (#125).
+[project.entry-points."zu.primitive_runtimes"]
+standard = "zu_tools.primitives:StandardPrimitiveRuntime"
+
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
 Repository = "https://github.com/k3-mt/zu"
