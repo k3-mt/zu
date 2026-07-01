@@ -4,13 +4,17 @@
 #
 # SECURITY (the issue body is attacker-controllable — anyone can open an issue):
 #   * This file is a TEMPLATE. The workflow renders task.query from the issue via
-#     `python -m zu_cli.gap_triage render` — STRUCTURALLY (YAML parser, the issue is a
-#     string value), so issue content can never overwrite the keys below.
+#     `python automation/gap-triage/triage.py render` — STRUCTURALLY (YAML parser, the
+#     issue is a string value), so issue content can never overwrite the keys below.
 #   * NO egress tools (tier 1 = recall only) + containment: required ⇒ even a fully
 #     prompt-injected model has no tool that can reach the network. Nothing to exfiltrate
 #     a secret through. The only network is the model API call itself.
-#   * The issue text is spotlighted as <<UNTRUSTED_ISSUE>> data, never instructions.
-# See packages/zu-cli/src/zu_cli/gap_triage.py and the workflow for the full model.
+#   * The issue text is spotlighted as <<UNTRUSTED_ISSUE>> data, never instructions; the
+#     delimiter tokens are neutralised in the issue so it can't forge a break-out.
+#   * ONLY the schema-validated structured result below is posted back — never the raw
+#     `zu run` transcript / arbitrary model prose.
+# See automation/gap-triage/triage.py (the GitHub-specific boundary) and the generic
+# zu_cli.gap_triage.render_agent hook + the workflow for the full model.
 #
 # Offline ($0, no model, no network) — replays the shipped fixtures bundle:
 #   zu run automation/gap-triage/ --offline
@@ -23,7 +27,7 @@ provider:
   api_key_env: ZU_MODEL_API_KEY       # just a key — generic; consumed by the adapter, never in the prompt
   base_url_env: ZU_MODEL_BASE_URL     # optional: your endpoint (adapter default used if unset)
   # Placeholder so the agent constructs for offline replay; the workflow OVERRIDES it with
-  # the operator's real model id from the ZU_MODEL env var at render (see gap_triage.render_agent).
+  # the operator's real model id from the ZU_MODEL env var at render (see triage.render_from_issue).
   model: set-via-ZU_MODEL
 
 tiers:
