@@ -71,6 +71,7 @@ INTERFACE_VERSION: dict[str, int] = {
     "connected_surfaces": 1,  # ConnectedSurface — perceive/act over an external CDP target (#93)
     "consent_resolvers": 1,  # ConsentResolver — deterministic cookie/consent dismissal (#94)
     "selection_satisfiers": 1,  # SelectionSatisfier — satisfy required variant selects (#95)
+    "checkout_proceeders": 1,  # CheckoutProceeder — advance add-to-cart -> checkout, short of commit (#117)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -1267,3 +1268,44 @@ class SelectionSatisfier(Protocol):
     not the attribute (#110)."""
 
     async def satisfy_required(self, surface: ConnectedSurface) -> list[RequiredSelection]: ...
+
+
+class CheckoutState(BaseModel):
+    """What a :class:`CheckoutProceeder` reads off one surface.
+
+    ``in_cart`` — add-to-cart took (a cart-count / 'added to cart' / mini-cart
+    drawer signal). ``at_checkout`` — the checkout/shipping page is reached, still
+    SHORT of place-order/pay. ``proceed_handle`` — the control that advances one
+    step toward checkout (a drawer/mini-cart 'Checkout', or a 'View cart'), if one
+    is present AND we are not already at checkout; it is NEVER a committing
+    (place-order/pay) control."""
+
+    model_config = {"frozen": True}
+
+    in_cart: bool
+    at_checkout: bool
+    proceed_handle: str | None = None
+
+
+@runtime_checkable
+class CheckoutProceeder(Protocol):
+    """After add-to-cart, ADVANCE the funnel to the checkout page deterministically
+    — the post-add step the model stalls on (add succeeds, a mini-cart drawer pops,
+    its 'Checkout' is never clicked). The natural third sibling of
+    :class:`ConsentResolver` / :class:`SelectionSatisfier`.
+
+    ``inspect()`` reports the :class:`CheckoutState`. ``proceed()`` clicks the
+    post-add drawer / mini-cart 'Checkout' (or 'View cart' → 'Checkout'), chosen by
+    WHOLE-WORD accessible name, advancing ONE step and returning whether it moved
+    toward checkout. It STOPS at the checkout page: the place-order/pay step is
+    COMMITTING (already classified by ``zu_patterns.cart_checkout``) and is NEVER
+    crossed — the host's approval/vault owns that boundary; ``proceed`` will not
+    click any control a commit-label check would flag. Content-free; a bounded,
+    structural funnel step, not goal orchestration (broader cross-surface
+    orchestration stays with the host's model-driven drive). Builds on
+    ``cart_checkout`` (recognition + commit boundary) and drives the
+    :class:`ConnectedSurface` (#93). (#117)"""
+
+    def inspect(self, view: SurfaceView) -> CheckoutState: ...
+
+    async def proceed(self, surface: ConnectedSurface) -> bool: ...

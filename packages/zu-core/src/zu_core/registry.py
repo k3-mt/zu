@@ -66,6 +66,7 @@ GROUPS = {
     "connected_surfaces": "zu.connected_surfaces",
     "consent_resolvers": "zu.consent_resolvers",
     "selection_satisfiers": "zu.selection_satisfiers",
+    "checkout_proceeders": "zu.checkout_proceeders",
 }
 
 # The reserved entry-point group a package uses to declare a brand-new kind

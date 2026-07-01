@@ -51,6 +51,9 @@ whole_word = "zu_tools.consent:WholeWordConsentResolver"
 [project.entry-points."zu.selection_satisfiers"]
 first_option = "zu_tools.selection:FirstOptionSelectionSatisfier"
 
+[project.entry-points."zu.checkout_proceeders"]
+whole_word = "zu_tools.checkout:WholeWordCheckoutProceeder"
+
 [project.urls]
 Homepage = "https://github.com/k3-mt/zu"
 Repository = "https://github.com/k3-mt/zu"
