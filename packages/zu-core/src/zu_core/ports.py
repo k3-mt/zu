@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -251,7 +251,7 @@ class ReputationVerdict(BaseModel):
 
     model_config = {"frozen": True}
 
-    band: str  # "trusted" | "caution" | "refuse"
+    band: Literal["trusted", "caution", "refuse"]
     score: int  # 0..100
     gate: str | None = None  # the veto reason if band == "refuse"
     signals: dict = Field(default_factory=dict)  # per-signal value + weight

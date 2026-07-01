@@ -44,7 +44,7 @@ hard-to-forge domain signals — never page content, so it is injection-immune.
 
 | Name | Class | Notes |
 |------|-------|-------|
-| `deterministic` | `DeterministicReputationScorer` | Forge-resistance-weighted scoring with hard gates (blocklist / no-HTTPS / parked → refuse) and two axes (is-it-malicious vs. is-it-a-real-shop). Pure scoring over a pluggable `SignalSource` seam (`StaticSignalSource` for $0 tests; network fetchers drop in behind the same shape). |
+| `deterministic` | `DeterministicReputationScorer` | Forge-resistance-weighted scoring with hard gates (blocklist / no-HTTPS / parked → refuse) and two axes (is-it-malicious vs. is-it-a-real-shop). Pure `score_signals(Signals)` over a pluggable `SignalSource` seam: `StaticSignalSource` for $0 tests, and `LiveSignalSource` — a network-gated stub declaring its envelope honestly (`{CAP_NET}` + the free-signal hosts, never `*`) that refuses offline unless a real `fetch` is injected. `Signals` is the documented per-domain catalogue. |
 
 ## Extend
 

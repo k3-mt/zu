@@ -8,9 +8,13 @@ positives are hard-to-fake), and the two-axis split (malicious vs. real-shop).
 
 from __future__ import annotations
 
-from zu_core.ports import ReputationProvider, ReputationVerdict
+import pytest
+
+from zu_core.ports import CAP_NET, ReputationProvider, ReputationVerdict
 from zu_providers.reputation import (
+    LIVE_SIGNAL_HOSTS,
     DeterministicReputationScorer,
+    LiveSignalSource,
     StaticSignalSource,
     score_signals,
 )
@@ -79,6 +83,24 @@ def test_clean_but_unknown_shop_is_caution_two_axis() -> None:
     assert v.band == "caution"
 
 
+def test_clean_malware_checks_but_no_real_shop_axis_is_not_trusted() -> None:
+    # Passes EVERY malware/aggregator check (no blocklist, clean aggregator) and
+    # carries the cheap positives a scam can fake, but the real-shop axis is empty
+    # (no registry, no review depth, very young) — the two-axis requirement means
+    # this must NOT reach "trusted".
+    v = _score(
+        {
+            "on_blocklist": False,
+            "aggregator_risk": 0,
+            "https_valid": True,
+            "dmarc": True,
+            "spf": True,
+            "domain_age_days": 7,
+        }
+    )
+    assert v.band != "trusted" and v.score < 70
+
+
 def test_young_abused_tld_is_dragged_down() -> None:
     v = _score({"domain_age_days": 10, "abused_tld": True, "https_valid": True})
     assert v.band == "caution" and v.score < 30
@@ -119,3 +141,29 @@ async def test_later_source_wins_on_a_signal_clash() -> None:
 
 def test_scorer_satisfies_the_port() -> None:
     assert isinstance(DeterministicReputationScorer([]), ReputationProvider)
+
+
+# --- the live source: a network-gated stub with an honest capability envelope ---
+
+
+def test_live_source_declares_its_capability_envelope() -> None:
+    src = LiveSignalSource()
+    assert src.capabilities == frozenset({CAP_NET})
+    assert src.egress == LIVE_SIGNAL_HOSTS and "*" not in src.egress
+
+
+async def test_live_source_refuses_offline_unless_a_fetcher_is_injected() -> None:
+    # No `fetch` ⇒ it never opens a socket; the offline suite cannot reach the net.
+    with pytest.raises(RuntimeError):
+        await LiveSignalSource().collect("shop.com")
+
+
+async def test_live_source_composes_with_the_scorer_via_an_injected_fetch() -> None:
+    async def fake_fetch(domain: str, hosts: frozenset[str]) -> dict:
+        assert hosts == LIVE_SIGNAL_HOSTS  # the declared envelope is what it reaches
+        return {"domain_age_days": 3000, "company_registry_match": True,
+                "review": {"count": 300, "age_days": 700}}
+
+    scorer = DeterministicReputationScorer([LiveSignalSource(fetch=fake_fetch)])
+    v = await scorer.assess("shop.com")
+    assert v.band == "trusted" and v.provenance["domain_age_days"] == "live"

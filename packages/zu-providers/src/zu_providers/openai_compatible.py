@@ -24,6 +24,13 @@ import logging
 import os
 from typing import Any
 
+from zu_core.errors import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimited,
+    ProviderTimeout,
+    ProviderUnavailable,
+)
 from zu_core.ports import Capabilities, Finish, ModelRequest, ModelResponse, ToolCall
 
 from ._messages import openai_tool, to_openai_messages
@@ -113,8 +120,38 @@ class OpenAICompatibleProvider:
         max_tokens = req.params.get("max_tokens", self.max_tokens)
         if max_tokens is not None:
             kwargs["max_tokens"] = int(max_tokens)
-        resp = await client.chat.completions.create(**kwargs)
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+        except Exception as exc:  # translate SDK errors -> neutral port surface
+            raise _translate_error(exc) from exc
         return _to_model_response(resp)
+
+
+def _translate_error(exc: Exception) -> ProviderError:
+    """Map an ``openai`` SDK exception to the neutral provider-error taxonomy.
+
+    The SDK class names appear in exactly this one place per package, so the rest
+    of the runtime imports no model SDK on the error path either. Order matters:
+    the most specific classes are checked first (a ``RateLimitError`` IS an
+    ``APIStatusError``). An unrecognised exception wraps in the base
+    ``ProviderError`` so nothing vendor-specific escapes the port. The mapping is
+    the mirror of the anthropic adapter's, so both ports present one surface."""
+    try:
+        import openai
+    except ModuleNotFoundError:  # pragma: no cover - SDK present whenever a call ran
+        return ProviderError(str(exc))
+    msg = str(exc)
+    if isinstance(exc, openai.AuthenticationError | openai.PermissionDeniedError):
+        return ProviderAuthError(msg)
+    if isinstance(exc, openai.RateLimitError):
+        return ProviderRateLimited(msg)
+    if isinstance(exc, openai.APITimeoutError):
+        return ProviderTimeout(msg)
+    if isinstance(exc, openai.APIConnectionError | openai.InternalServerError):
+        return ProviderUnavailable(msg)
+    if isinstance(exc, openai.OpenAIError):
+        return ProviderError(msg)
+    return ProviderError(msg)
 
 
 def _to_model_response(resp: Any) -> ModelResponse:

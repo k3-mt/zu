@@ -23,6 +23,56 @@ immediately followed by its results, in order.
 from __future__ import annotations
 
 import json
+from typing import Any
+
+
+def _anthropic_content(content: Any) -> Any:
+    """Translate a neutral user ``content`` into Anthropic's wire shape.
+
+    A plain string passes through unchanged (the common text-only case). A list of
+    neutral blocks (``{"type": "text", ...}`` / ``{"type": "image", "mime", "data"}``)
+    is translated block-by-block: a neutral ``image`` becomes Anthropic's
+    ``{"type": "image", "source": {"type": "base64", "media_type", "data"}}``.
+    The vendor wire-format is produced HERE, at the adapter boundary — never in
+    the policy-neutral layer."""
+    if not isinstance(content, list):
+        return content
+    out: list[dict] = []
+    for block in content:
+        if block.get("type") == "image":
+            out.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": block["mime"],
+                    "data": block["data"],
+                },
+            })
+        else:
+            out.append(block)
+    return out
+
+
+def _openai_content(content: Any) -> Any:
+    """Translate a neutral user ``content`` into the OpenAI Chat Completions shape.
+
+    A plain string passes through unchanged. A list of neutral blocks is
+    translated block-by-block: a neutral ``image`` becomes OpenAI's
+    ``{"type": "image_url", "image_url": {"url": "data:<mime>;base64,<data>"}}``.
+    Produced HERE, at the adapter boundary, so the neutral layer carries no
+    vendor wire-format."""
+    if not isinstance(content, list):
+        return content
+    out: list[dict] = []
+    for block in content:
+        if block.get("type") == "image":
+            out.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{block['mime']};base64,{block['data']}"},
+            })
+        else:
+            out.append(block)
+    return out
 
 
 class _ToolIds:
@@ -97,7 +147,7 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
             system_parts.append(str(m.get("content", "")))
         elif role == "user":
             flush()
-            out.append({"role": "user", "content": m.get("content", "")})
+            out.append({"role": "user", "content": _anthropic_content(m.get("content", ""))})
         elif role == "assistant":
             flush()
             calls = m.get("tool_calls")
@@ -133,8 +183,10 @@ def to_openai_messages(messages: list[dict]) -> list[dict]:
 
     for m in messages:
         role = m.get("role")
-        if role in ("system", "user"):
+        if role == "system":
             out.append({"role": role, "content": m.get("content", "")})
+        elif role == "user":
+            out.append({"role": role, "content": _openai_content(m.get("content", ""))})
         elif role == "assistant":
             calls = m.get("tool_calls")
             if calls:

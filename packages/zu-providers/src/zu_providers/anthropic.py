@@ -18,6 +18,13 @@ import logging
 import os
 from typing import Any
 
+from zu_core.errors import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimited,
+    ProviderTimeout,
+    ProviderUnavailable,
+)
 from zu_core.ports import Capabilities, Finish, ModelRequest, ModelResponse, ToolCall
 
 from ._messages import anthropic_tool, to_anthropic_messages
@@ -72,10 +79,11 @@ class AnthropicProvider:
         # client is a testability/config seam (an AsyncAnthropic, possibly with a
         # mock transport); None -> construct from the resolved key on first use.
         self._client = client
-        # vision=False: the neutral ModelRequest has no image channel yet, so the
-        # adapter never sends or handles image blocks — multimodal is deferred
-        # until the neutral request grows one. Declaring it would be decorative.
-        self.capabilities = Capabilities(native_tools=True, vision=False, max_context=1_000_000)
+        # vision=True: the neutral request carries image blocks (LlmPolicy builds
+        # them) and this adapter translates them to Anthropic's image/source wire
+        # shape in to_anthropic_messages, so the model genuinely receives images.
+        # LlmPolicy gates image content on this flag, so it must reflect reality.
+        self.capabilities = Capabilities(native_tools=True, vision=True, max_context=1_000_000)
 
     def _ensure_client(self) -> Any:
         if self._client is None:
@@ -110,8 +118,37 @@ class AnthropicProvider:
             kwargs["system"] = system
         if req.tools:
             kwargs["tools"] = [anthropic_tool(t) for t in req.tools]
-        resp = await client.messages.create(**kwargs)
+        try:
+            resp = await client.messages.create(**kwargs)
+        except Exception as exc:  # translate SDK errors -> neutral port surface
+            raise _translate_error(exc) from exc
         return _to_model_response(resp)
+
+
+def _translate_error(exc: Exception) -> ProviderError:
+    """Map an ``anthropic`` SDK exception to the neutral provider-error taxonomy.
+
+    The SDK class names appear in exactly this one place per package, so the rest
+    of the runtime imports no model SDK on the error path either. Order matters:
+    the most specific classes are checked first (a ``RateLimitError`` IS an
+    ``APIStatusError``). An unrecognised exception wraps in the base
+    ``ProviderError`` so nothing vendor-specific escapes the port."""
+    try:
+        import anthropic
+    except ModuleNotFoundError:  # pragma: no cover - SDK present whenever a call ran
+        return ProviderError(str(exc))
+    msg = str(exc)
+    if isinstance(exc, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+        return ProviderAuthError(msg)
+    if isinstance(exc, anthropic.RateLimitError):
+        return ProviderRateLimited(msg)
+    if isinstance(exc, anthropic.APITimeoutError):
+        return ProviderTimeout(msg)
+    if isinstance(exc, anthropic.APIConnectionError | anthropic.InternalServerError):
+        return ProviderUnavailable(msg)
+    if isinstance(exc, anthropic.AnthropicError):
+        return ProviderError(msg)
+    return ProviderError(msg)
 
 
 def _to_model_response(resp: Any) -> ModelResponse:

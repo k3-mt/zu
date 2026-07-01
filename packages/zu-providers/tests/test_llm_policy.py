@@ -65,12 +65,38 @@ async def test_text_only_observation_collapses_to_a_string() -> None:
     assert msgs[1] == {"role": "user", "content": "hello"}
 
 
-async def test_image_observation_becomes_base64_blocks() -> None:
+async def test_image_observation_becomes_neutral_image_blocks() -> None:
+    # The policy-neutral layer emits a NEUTRAL image block (mime + base64 data),
+    # NOT a vendor wire-format. Each provider adapter translates it to its own
+    # shape (image_url / image+source) at the adapter boundary — proven in
+    # test_providers.py. This pins that the neutral seam carries no OpenAI shape.
     provider = _FakeProvider(ModelResponse(text="a cat"))
     obs = Observation(content=[Text(text="what is this?"), Image(data=b"\x89PNG", mime="image/png")])
     await LlmPolicy(provider).act(obs, [])
     content = provider.seen.messages[-1]["content"]  # type: ignore[union-attr]
     assert isinstance(content, list)
     kinds = [c["type"] for c in content]
-    assert kinds == ["text", "image_url"]
-    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert kinds == ["text", "image"]  # neutral, not "image_url"
+    import base64
+
+    assert content[1] == {
+        "type": "image",
+        "mime": "image/png",
+        "data": base64.b64encode(b"\x89PNG").decode(),
+    }
+    # No vendor-specific key leaked into the neutral layer.
+    assert "image_url" not in content[1] and "source" not in content[1]
+
+
+async def test_image_to_vision_incapable_provider_raises_clear_error() -> None:
+    # A provider that advertises no vision must never receive image blocks it
+    # cannot encode; the policy gates locally and clearly before any request.
+    class _NoVision(_FakeProvider):
+        capabilities = Capabilities(vision=False)
+
+    provider = _NoVision(ModelResponse(text="x"))
+    obs = Observation(content=[Text(text="hi"), Image(data=b"\x89PNG", mime="image/png")])
+    import pytest
+
+    with pytest.raises(ValueError, match="vision"):
+        await LlmPolicy(provider).act(obs, [])

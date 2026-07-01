@@ -32,6 +32,13 @@ from .content_view import (
 )
 from .contracts import Budget, Event, Result, Status, TaskSpec
 from .effect import is_noop, surface_diff
+from .errors import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimited,
+    ProviderTimeout,
+    ProviderUnavailable,
+)
 from .escalation import ProblemContext, Repair
 from .events import (
     CHECKPOINT_MARKED,
@@ -165,6 +172,12 @@ __all__ = [
     "TrustedFrame",
     "Repair",
     "ProblemContext",
+    # neutral provider-error taxonomy (the ModelProvider port's error surface)
+    "ProviderError",
+    "ProviderAuthError",
+    "ProviderRateLimited",
+    "ProviderTimeout",
+    "ProviderUnavailable",
     # event bus + taxonomy + projections + sinks + codec
     "EventBus",
     "SubscriberFailure",

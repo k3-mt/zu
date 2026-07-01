@@ -31,9 +31,58 @@ scorer, so the weights can be tested without a single network call.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
-from zu_core.ports import ReputationProvider, ReputationVerdict
+from zu_core.ports import CAP_NET, ReputationProvider, ReputationVerdict
+
+
+class Signals(TypedDict, total=False):
+    """The hard-to-forge per-domain signal catalogue the scorer weighs.
+
+    A documentation/typing shape only (``total=False`` — a source supplies the
+    subset it can produce; an absent signal contributes nothing). The scorer reads
+    a plain ``dict`` so a new source can add a signal without a code change here;
+    this catalogue records the *intended* keys and which side of the two axes each
+    serves, so the breakdown is auditable and forge-resistance is legible.
+
+    Hard gates (a truthy value → REFUSE; ``aggregator_risk`` gates at/above its
+    threshold):
+        on_blocklist:   Safe Browsing / Spamhaus / PhishTank hit.
+        https_invalid:  no valid TLS — table stakes for commerce.
+        parked:         a parked / for-sale page, not a shop.
+        suspended:      registrar-suspended.
+        sinkholed:      DNS-sinkholed (known-bad).
+
+    Malicious axis (is this URL malicious/phishing?):
+        aggregator_risk: 0..100 threat-intel score (APIVoid/URLVoid/VirusTotal).
+
+    Real-shop axis (is this a real shop that ships?) — STRONG, hard-to-fake:
+        domain_age_days:        RDAP/WHOIS registrable-domain age.
+        review:                 {"count", "age_days"} third-party review depth+age.
+        company_registry_match: a company-registry (e.g. Companies House) match.
+        wayback_depth:          archived-snapshot count (established history).
+        established_platform:    served by a known commerce platform.
+        abused_tld:             on an abused-TLD list (a strong NEGATIVE).
+
+    WEAK, cheap-to-fake positives (necessary-not-sufficient):
+        https_valid / dmarc / spf: present-but-cheap; small positives only.
+    """
+
+    on_blocklist: bool
+    https_invalid: bool
+    parked: bool
+    suspended: bool
+    sinkholed: bool
+    aggregator_risk: int
+    domain_age_days: int
+    review: dict[str, int]
+    company_registry_match: bool
+    wayback_depth: int
+    established_platform: bool
+    abused_tld: bool
+    https_valid: bool
+    dmarc: bool
+    spf: bool
 
 
 @runtime_checkable
@@ -60,6 +109,56 @@ class StaticSignalSource:
 
     async def collect(self, domain: str) -> dict[str, Any]:
         return dict(self._signals.get(domain, {}))
+
+
+# The default egress envelope for the live fetcher — the FREE signal APIs the issue
+# names. It is a declaration, not a connection pool: a deployment narrows or widens
+# it, and a SandboxBackend bounds the real connection to exactly these hosts. Kept
+# generic — no merchant/domain constants — and intentionally ASN/hosting-reputation-
+# oriented rather than country-of-origin.
+LIVE_SIGNAL_HOSTS: frozenset[str] = frozenset(
+    {
+        "rdap.org",  # RDAP registrable-domain age
+        "safebrowsing.googleapis.com",  # Google Safe Browsing
+        "api.companieshouse.gov.uk",  # company-registry match
+        "archive.org",  # Wayback archive depth
+        "www.virustotal.com",  # aggregator (folded as a gate + feature)
+    }
+)
+
+
+class LiveSignalSource:
+    """The network-reaching :class:`SignalSource` — a thin, **network-gated** stub.
+
+    It declares its capability envelope HONESTLY (``capabilities = {CAP_NET}`` and
+    ``egress`` = the specific free-signal hosts it reaches) so its blast radius is
+    visible in its own code and a sandbox can bound it mechanically — the same
+    envelope discipline ``WebSearchRetrievalProvider`` follows. The actual HTTP
+    fetchers are deliberately NOT exercised offline: :meth:`collect` raises unless a
+    real ``fetch`` callable is injected, so nothing in the offline suite ever opens a
+    socket. A production deployment supplies ``fetch`` (an async
+    ``(domain, hosts) -> Signals``) that performs the RDAP/Safe-Browsing/Companies-
+    House/Wayback calls; the scorer is unchanged either way."""
+
+    name = "live"
+    capabilities: frozenset[str] = frozenset({CAP_NET})
+
+    def __init__(
+        self,
+        *,
+        fetch: Any | None = None,
+        egress: frozenset[str] = LIVE_SIGNAL_HOSTS,
+    ) -> None:
+        self._fetch = fetch
+        self.egress = egress
+
+    async def collect(self, domain: str) -> dict[str, Any]:
+        if self._fetch is None:  # pragma: no cover - network path, not exercised offline
+            raise RuntimeError(
+                "LiveSignalSource needs a real `fetch` (CAP_NET); it is a "
+                "network-gated stub and is never exercised offline."
+            )
+        return dict(await self._fetch(domain, self.egress))  # pragma: no cover
 
 
 # --- the scoring model — documented weights, applied deterministically --------
@@ -195,7 +294,7 @@ def score_signals(
             band="refuse", score=score, gate="low_trust",
             signals=breakdown, provenance=_prov_subset(provenance, breakdown),
         )
-    band = "trusted" if score >= trusted_at else "caution"
+    band: Literal["trusted", "caution"] = "trusted" if score >= trusted_at else "caution"
     return ReputationVerdict(
         band=band, score=score, gate=None,
         signals=breakdown, provenance=_prov_subset(provenance, breakdown),
