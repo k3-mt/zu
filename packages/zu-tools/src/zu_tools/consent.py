@@ -28,10 +28,10 @@ discipline + two-step / boundary handling carry over unchanged.
 
 from __future__ import annotations
 
-import re
-
 from zu_core.ports import ConnectedSurface, ConsentControl, SurfaceAction
 from zu_core.surface import SurfaceView
+
+from ._wholeword import contains_any, matches_whole_word
 
 # Accept wording, matched as WHOLE words/phrases (never a bare substring).
 _ACCEPT_PHRASES: tuple[str, ...] = (
@@ -56,28 +56,12 @@ _PANEL_MARKERS: tuple[str, ...] = (
 _CLICKABLE_ROLES: frozenset[str] = frozenset({"button", "link", "menuitem"})
 
 
-def _tokens(text: str) -> list[str]:
-    """Lowercase alphanumeric word tokens — the unit whole-word matching compares."""
-    return re.findall(r"[a-z0-9]+", text.lower())
-
-
-def _contains_phrase(tokens: list[str], phrase: list[str]) -> bool:
-    """Does ``phrase`` (a token list) occur as a contiguous run in ``tokens``? This
-    is the whole-word test: 'ok' matches ['ok'] but not ['bespoke']."""
-    n, m = len(tokens), len(phrase)
-    if m == 0 or m > n:
-        return False
-    return any(tokens[i : i + m] == phrase for i in range(n - m + 1))
-
-
 def _is_accept(label: str) -> bool:
-    tokens = _tokens(label)
-    return any(_contains_phrase(tokens, phrase.split()) for phrase in _ACCEPT_PHRASES)
+    return matches_whole_word(label, _ACCEPT_PHRASES)
 
 
 def _has_marker(label: str, markers: tuple[str, ...]) -> bool:
-    low = label.lower()
-    return any(m in low for m in markers)
+    return contains_any(label, markers)
 
 
 class WholeWordConsentResolver:

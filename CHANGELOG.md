@@ -7,6 +7,20 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — a CheckoutProceeder port: advance add-to-cart → checkout, short of the commit boundary (#117)
+The connected-surface family clears consent (#94) and satisfies variant selects (#95/#110) — the
+pre-add steps. The step right after add-to-cart (the mini-cart drawer's 'Checkout') was still left
+to the model, which stalled there. New port + reference impl, proven offline (no browser).
+- **`CheckoutProceeder`** (`zu.checkout_proceeders`) — `inspect(view) -> CheckoutState` (in_cart /
+  at_checkout / proceed_handle); `async proceed(surface) -> bool` advances one step, clicking the
+  post-add drawer 'Checkout' (or 'View cart' → 'Checkout') chosen by WHOLE-WORD accessible name.
+- **The commit boundary is absolute and structural**: the control is chosen from the ADVANCE
+  vocabulary with any committing control (place-order / pay / buy-now / complete-order) EXCLUDED, so
+  `proceed` can never cross the place-order/pay step regardless of the (fuzzy) `at_checkout` signal —
+  that step is the host's approval/vault boundary. A drift test single-sources the guarantee against
+  `zu_patterns` commit vocabulary. Reference impl `zu_tools.checkout.WholeWordCheckoutProceeder`.
+- Shared whole-word matching factored into `zu_tools._wholeword` (used by consent + checkout).
+
 ### Fixed — connected-surface variant selects: perceive + satisfy real WooCommerce products (#110)
 Adopting the connected-surface family downstream surfaced a perception regression vs a DOM walk:
 `CdpConnectedSurface` set **zero** variant selects on a real WooCommerce product. Two causes, two fixes.

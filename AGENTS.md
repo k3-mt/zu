@@ -92,6 +92,7 @@ Each port is a runtime-checkable `Protocol` in `zu_core.ports`. You implement a
 | a web surface over an external CDP target | `zu-tools` | `zu.connected_surfaces` | `ConnectedSurface` |
 | cookie/consent dismissal    | `zu-tools`       | `zu.consent_resolvers` | `ConsentResolver` |
 | required variant-select satisfaction | `zu-tools` | `zu.selection_satisfiers` | `SelectionSatisfier` |
+| add-to-cart → checkout advance | `zu-tools`    | `zu.checkout_proceeders` | `CheckoutProceeder` |
 
 The last four are the **upstream-conformance** seams (see
 [`zu-upstream-conformance.md`](zu-upstream-conformance.md) and the trusted-base
