@@ -18,20 +18,22 @@ from ._commerce import add_to_cart_handle, at_checkout, has_card_field, in_cart
 
 
 def funnel_phase(view: SurfaceView) -> FunnelPhase:
-    """Classify the surface — DEEPEST phase wins. A checkout page also shows a cart
-    'subtotal', and a product page that just added shows a drawer, so a shallower
-    signal must not shadow a deeper one: test payment → checkout → cart → product →
-    browsing in that order. Structural and content-free throughout."""
+    """Classify a SHOPPING surface onto the universal funnel rungs — DEEPEST phase wins. A checkout
+    page also shows a cart 'subtotal', and a product page that just added shows a drawer, so a
+    shallower signal must not shadow a deeper one: test commit → checkout → cart → product → entry in
+    that order. Structural and content-free. (The shopping signals map onto the shared rungs: card
+    fields → AT_COMMIT, a cart → ASSEMBLING, an add-to-cart → SELECTING — so a booking classifier
+    returning the same rungs is directly comparable.)"""
     if has_card_field(view):
-        return FunnelPhase.AT_PAYMENT
+        return FunnelPhase.AT_COMMIT
     if at_checkout(view):
         return FunnelPhase.AT_CHECKOUT
     if in_cart(view):
-        return FunnelPhase.IN_CART
+        return FunnelPhase.ASSEMBLING
     if add_to_cart_handle(view) is not None:
-        return FunnelPhase.ON_PRODUCT
+        return FunnelPhase.SELECTING
     if view.affordances or view.context:
-        return FunnelPhase.BROWSING
+        return FunnelPhase.ENTRY
     return FunnelPhase.UNKNOWN
 
 

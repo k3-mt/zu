@@ -137,11 +137,21 @@ def _partition(opts: list[SurfaceAffordance]) -> list[list[SurfaceAffordance]]:
     return [g for g in groups if len(g) >= 2]
 
 
+# NAV CHROME interleaved with options — a modal lists 'Go back' / 'Close' alongside the real
+# choices, and a positional 'first' would otherwise pick the chrome and back OUT of the step. So
+# chrome is never a candidate. Whole-word, content-free.
+_CHROME_RE = re.compile(
+    r"\b(close|cancel|dismiss|back|go\s*back|previous|prev|skip|not\s*now|no\s*thanks)\b",
+    re.IGNORECASE,
+)
+
+
 def _enabled_opts(group: list[SurfaceAffordance]) -> list[SurfaceAffordance]:
-    # A choosable option is enabled, addressable, and NEVER a committing control — choose_one
-    # must not be able to pick a pay / place-order / confirm-purchase control (the commit boundary
-    # is the host's approval line). A committing control in a run is simply not a candidate.
-    return [a for a in group if _enabled(a) and a.handle and not is_commit(a.label)]
+    # A choosable option is enabled, addressable, NOT a committing control (choose_one must not pick
+    # a pay / place-order / confirm control — the host's approval boundary), and NOT nav chrome (a
+    # close/back/skip that would abandon the step). Neither is a candidate.
+    return [a for a in group if _enabled(a) and a.handle
+            and not is_commit(a.label) and not _CHROME_RE.search(a.label or "")]
 
 
 def _target_group(view: SurfaceView) -> list[SurfaceAffordance] | None:
