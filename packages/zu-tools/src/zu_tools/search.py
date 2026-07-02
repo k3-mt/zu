@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -87,7 +88,61 @@ class ExaConnector:
         return out
 
 
-_CONNECTORS: dict[str, type[Any]] = {"exa": ExaConnector}
+class SearxngConnector:
+    """A self-hosted SearXNG metasearch — ``GET /search?format=json``, no key.
+
+    The base URL is ``$SEARXNG_URL`` (default ``http://127.0.0.1:8080``): a metasearch the operator
+    RUNS, aggregating several upstream engines (DuckDuckGo/Startpage/…), so discovery is controllable
+    and not a single paid API. The ``api_key*`` kwargs are accepted-and-ignored for connector-registry
+    parity (SearXNG needs no key); ``transport`` is the testability seam, as with :class:`ExaConnector`.
+    ``trust_env`` is on, so inside the sandbox the call routes through the egress proxy."""
+
+    default_url = "http://127.0.0.1:8080"
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key_env: str = "",       # unused (SearXNG needs no key); kept for registry-instantiation parity
+        api_key: str | None = None,  # unused
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = 20.0,
+        categories: str = "general",
+        language: str = "en",
+    ) -> None:
+        self._base = (base_url or os.environ.get("SEARXNG_URL") or self.default_url).rstrip("/")
+        self.host = urlsplit(self._base).hostname or "127.0.0.1"
+        self._transport = transport
+        self._timeout = timeout
+        self._categories = categories
+        self._language = language
+
+    async def search(self, query: str, num_results: int) -> list[dict[str, str]]:
+        params = {
+            "q": query,
+            "format": "json",
+            "categories": self._categories,
+            "language": self._language,
+        }
+        async with httpx.AsyncClient(
+            timeout=self._timeout, trust_env=True, transport=self._transport
+        ) as c:
+            r = await c.get(f"{self._base}/search", params=params)
+            r.raise_for_status()
+            data = r.json()
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in data.get("results", []) if isinstance(data, dict) else []:
+            url = (item.get("url") or "").strip()
+            if url and url not in seen:
+                seen.add(url)
+                out.append({"title": item.get("title") or "", "url": url})
+            if len(out) >= max(0, num_results):
+                break
+        return out
+
+
+_CONNECTORS: dict[str, type[Any]] = {"exa": ExaConnector, "searxng": SearxngConnector}
 
 
 class WebSearch:
