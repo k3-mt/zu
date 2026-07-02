@@ -256,6 +256,13 @@ class ChooseOne:
     __zu_interface__ = 1  # the interaction_primitives interface major this targets
     name = "choose_one"
     kind = "choose_one"
+    self_gating = True   # with NO hint it satisfies required variant groups for free
+    free_priority = 20
+    purpose = ("pick ONE option from an equivalent-option group — a variant swatch/radio "
+               "group or <select>, a slot day/time grid, a result/service list")
+    accepts_hint = True
+    hint_help = ("which option to choose: a positional word ('earliest'/'first'/'last') or "
+                 "a content-free token to match against the option names")
 
     def __init__(self, satisfier: FirstOptionSelectionSatisfier | None = None) -> None:
         self._satisfier = satisfier or FirstOptionSelectionSatisfier()

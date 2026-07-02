@@ -1,11 +1,19 @@
-"""primitives — the reference interaction-primitive family + composition runtime (#125).
+"""primitives — the reference interaction-primitive family + composition runtime (#125, #131).
 
 The four connected-surface resolvers (consent #94, selection #95, checkout #117, cart
-#122) plus the commit boundary, RE-EXPRESSED as ONE closed vocabulary of interchangeable
+#122) plus the commit boundary, RE-EXPRESSED as one vocabulary of interchangeable
 :class:`~zu_core.ports.InteractionPrimitive`\\ s, and a thin
 :class:`~zu_core.ports.PrimitiveRuntime` that dispatches ``{kind, hint}`` over them. The
 shipped resolvers do the heavy lifting; these ADAPT them to one uniform contract
-(inspect → apply → verify) so a host drives ONE loop instead of N hardcoded blocks:
+(inspect → apply → verify) so a host drives ONE loop instead of N hardcoded blocks.
+
+The vocabulary is OPEN (#131): a host may construct :class:`StandardPrimitiveRuntime` with
+its own primitives alongside (or instead of) these built-ins, and — because the free pass
+and the tool catalog are DERIVED from each primitive's ``self_gating`` / ``free_priority``
+/ ``purpose`` declarations rather than a hardcoded list — a host capability participates in
+both the reflex pass and the model's tool palette without editing this module.
+
+The built-ins:
 
   * ``dismiss``     wraps :class:`~zu_tools.consent.WholeWordConsentResolver` (#94).
   * ``choose_one``  is :class:`~zu_tools.choose.ChooseOne` (#125) — generalises
@@ -28,6 +36,7 @@ from zu_core.ports import (
     InteractionPrimitive,
     PrimitiveOutcome,
     PrimitivePlan,
+    PrimitiveTool,
     SurfaceAction,
 )
 from zu_core.surface import SurfaceAffordance, SurfaceView
@@ -55,6 +64,11 @@ class DismissPrimitive:
     __zu_interface__ = 1
     name = "dismiss"
     kind = "dismiss"
+    self_gating = True
+    free_priority = 10
+    purpose = "clear a consent/cookie/interstitial banner that is blocking the page"
+    accepts_hint = False
+    hint_help = ""
 
     def __init__(self, resolver: WholeWordConsentResolver | None = None) -> None:
         self._resolver = resolver or WholeWordConsentResolver()
@@ -90,6 +104,12 @@ class AdvancePrimitive:
     __zu_interface__ = 1
     name = "advance"
     kind = "advance"
+    self_gating = True
+    free_priority = 30
+    purpose = ("click the primary move-forward control — add-to-cart, or proceed-to-checkout "
+               "once in the cart; never a committing/pay control")
+    accepts_hint = False
+    hint_help = ""
 
     def __init__(
         self,
@@ -142,6 +162,11 @@ class CommitStopPrimitive:
     __zu_interface__ = 1
     name = "commit_stop"
     kind = "commit_stop"
+    self_gating = True
+    free_priority = 0   # the boundary GUARD — checked before any acting primitive
+    purpose = "stop at the irreversible commit/payment boundary and hand off for approval"
+    accepts_hint = False
+    hint_help = ""
 
     def inspect(self, view: SurfaceView, *, hint: str | None = None) -> PrimitivePlan:
         card = has_card_field(view)
@@ -217,6 +242,11 @@ class SearchPrimitive:
     __zu_interface__ = 1
     name = "search"
     kind = "search"
+    self_gating = False   # model-directed — needs a query, so it never fires for free
+    free_priority = 1000
+    purpose = "type a query into the page's search box and submit to load results"
+    accepts_hint = True
+    hint_help = "the search query to type into the box"
 
     def inspect(self, view: SurfaceView, *, hint: str | None = None) -> PrimitivePlan:
         found = _find_search_box(view)
@@ -251,21 +281,30 @@ class SearchPrimitive:
 
 # --- the composition runtime ------------------------------------------------- #
 
-# The order a host tries the SELF-GATING primitives each turn: the commit-boundary GUARD
-# first (stop before anything else if we are at the irreversible step), then dismiss an
-# interstitial, satisfy a required choice, advance the funnel. search + a HINTED
-# choose_one are model-directed, not free.
-_FREE_ORDER: tuple[str, ...] = ("commit_stop", "dismiss", "choose_one", "advance")
+
+def _self_gating(prim: InteractionPrimitive) -> bool:
+    """Does ``prim`` fire in the free reflex pass (no model direction)? Read defensively
+    so a primitive predating #131 (no declaration) simply never fires for free."""
+    return bool(getattr(prim, "self_gating", False))
+
+
+def _free_priority(prim: InteractionPrimitive) -> int:
+    """The free-pass order for ``prim`` (LOWER first); default late so an undeclared
+    primitive sorts after the declared built-ins."""
+    return int(getattr(prim, "free_priority", 1000))
 
 
 class StandardPrimitiveRuntime:
     """The reference :class:`~zu_core.ports.PrimitiveRuntime` — the thin composition layer
-    over the primitive family (#125). Holds one instance of each primitive keyed by
-    ``kind``; ``free`` reports the applicable self-gating plans in priority order, ``step``
-    runs one named primitive over the surface. Constructed with the five built-ins; a host
-    may pass its own set."""
+    over the primitive family (#125, #131). Holds one instance of each primitive keyed by
+    ``kind``; ``free`` reports the applicable self-gating plans in priority order, ``catalog``
+    describes every registered primitive as a model-invocable tool, ``step`` runs one named
+    primitive over the surface. Constructed with the five built-ins; a host may pass its own
+    set (its primitives participate in ``free`` and ``catalog`` via their declarations — no
+    edit to this class). By default the free pass is exactly
+    ``commit_stop → dismiss → choose_one → advance`` (search is model-directed)."""
 
-    __zu_interface__ = 1
+    __zu_interface__ = 2   # primitive_runtimes v2 (#131): adds catalog()
     name = "standard_primitive_runtime"
 
     def __init__(self, primitives: tuple[InteractionPrimitive, ...] | None = None) -> None:
@@ -274,20 +313,45 @@ class StandardPrimitiveRuntime:
             AdvancePrimitive(), CommitStopPrimitive(),
         )
         self._by_kind: dict[str, InteractionPrimitive] = {p.kind: p for p in prims}
+        # The self-gating primitives, in free-pass order — DERIVED from each primitive's
+        # declaration (#131), so a host-registered capability slots in by its free_priority
+        # instead of being invisible to a hardcoded list.
+        self._free_kinds: tuple[str, ...] = tuple(
+            p.kind for p in sorted(
+                (q for q in prims if _self_gating(q)), key=_free_priority)
+        )
 
     def get(self, kind: str) -> InteractionPrimitive | None:
         return self._by_kind.get(kind)
 
     def free(self, view: SurfaceView) -> tuple[PrimitivePlan, ...]:
         plans: list[PrimitivePlan] = []
-        for kind in _FREE_ORDER:
-            prim = self._by_kind.get(kind)
-            if prim is None:
-                continue
+        for kind in self._free_kinds:
+            prim = self._by_kind[kind]
             plan = prim.inspect(view)  # self-gating: no hint (choose_one -> variants)
             if plan.applicable:
                 plans.append(plan)
         return tuple(plans)
+
+    def catalog(self) -> tuple[PrimitiveTool, ...]:
+        """Every registered primitive as a :class:`~zu_core.ports.PrimitiveTool` — the
+        model's tool palette (#131). Self-gating primitives first (in free-pass order),
+        then the model-directed ones by kind, so the palette is deterministic."""
+        order = {k: i for i, k in enumerate(self._free_kinds)}
+        prims = sorted(
+            self._by_kind.values(),
+            key=lambda p: (order.get(p.kind, len(order)), p.kind),
+        )
+        return tuple(
+            PrimitiveTool(
+                kind=p.kind,
+                purpose=str(getattr(p, "purpose", "")),
+                accepts_hint=bool(getattr(p, "accepts_hint", False)),
+                hint_help=str(getattr(p, "hint_help", "")),
+                self_gating=_self_gating(p),
+            )
+            for p in prims
+        )
 
     async def step(
         self, surface: ConnectedSurface, kind: str, *, hint: str | None = None

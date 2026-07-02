@@ -12,10 +12,13 @@ from __future__ import annotations
 
 from zu_core.ports import (
     InteractionPrimitive,
+    PrimitiveOutcome,
+    PrimitivePlan,
     PrimitiveRuntime,
     SurfaceAction,
 )
 from zu_core.surface import SurfaceAffordance, SurfaceView
+from zu_tools.choose import ChooseOne
 from zu_tools.primitives import (
     AdvancePrimitive,
     CommitStopPrimitive,
@@ -205,3 +208,93 @@ async def test_step_runs_a_hinted_choose_one_on_a_slot_grid() -> None:
 async def test_step_on_an_unknown_kind_is_a_no_op() -> None:
     out = await StandardPrimitiveRuntime().step(ScriptedSurface(_TIMES), "teleport")
     assert out.progress == "no_op"
+
+
+# --- #131: an OPEN vocabulary — catalog + host-registered primitives ---------- #
+
+class _FakeProceed:
+    """A HOST capability (not a built-in): the 'proceed after a selection' glue, self-gating
+    at free_priority 25 — between choose_one (20) and advance (30). Fires on a 'Continue'."""
+
+    name = "proceed_after_select"
+    kind = "proceed_after_select"
+    self_gating = True
+    free_priority = 25
+    purpose = "click the forward control after a selection was made"
+    accepts_hint = False
+    hint_help = ""
+
+    def __init__(self) -> None:
+        self.applied = False
+
+    def inspect(self, view: SurfaceView, *, hint: str | None = None) -> PrimitivePlan:
+        h = next((a.handle for a in view.affordances
+                  if a.role == "button" and a.label.lower() == "continue"), None)
+        return PrimitivePlan(kind=self.kind, applicable=h is not None,
+                             handles=(h,) if h else ())
+
+    async def apply(self, surface: object, *, hint: str | None = None) -> PrimitiveOutcome:
+        self.applied = True
+        return PrimitiveOutcome(kind=self.kind, progress="advance")
+
+
+class _BareCapability:
+    """A primitive with NO #131 declarations — must still dispatch + catalog, but never
+    fire for free (undeclared self_gating defaults to False)."""
+
+    name = "peek"
+    kind = "peek"
+
+    def inspect(self, view: SurfaceView, *, hint: str | None = None) -> PrimitivePlan:
+        return PrimitivePlan(kind=self.kind, applicable=True)   # applicable, yet not self-gating
+
+    async def apply(self, surface: object, *, hint: str | None = None) -> PrimitiveOutcome:
+        return PrimitiveOutcome(kind=self.kind, progress="no_op")
+
+
+def test_catalog_describes_every_built_in_primitive() -> None:
+    cat = {t.kind: t for t in StandardPrimitiveRuntime().catalog()}
+    assert set(cat) == {"dismiss", "search", "choose_one", "advance", "commit_stop"}
+    assert cat["search"].self_gating is False and cat["search"].accepts_hint is True
+    assert cat["choose_one"].self_gating is True and cat["choose_one"].accepts_hint is True
+    assert cat["dismiss"].self_gating is True and cat["dismiss"].accepts_hint is False
+    assert all(cat[k].purpose for k in cat)   # every tool carries a one-line purpose
+
+
+def test_catalog_lists_self_gating_in_free_order_then_the_rest() -> None:
+    kinds = [t.kind for t in StandardPrimitiveRuntime().catalog()]
+    assert kinds[:4] == ["commit_stop", "dismiss", "choose_one", "advance"]
+    assert kinds[4] == "search"   # model-directed, after the self-gating ones
+
+
+def test_host_primitive_slots_into_free_by_priority() -> None:
+    rt = StandardPrimitiveRuntime((
+        DismissPrimitive(), ChooseOne(), AdvancePrimitive(),
+        CommitStopPrimitive(), _FakeProceed(),
+    ))
+    v = view(aff("cont", "button", "Continue"), aff("atb", "button", "Add to basket"))
+    kinds = [p.kind for p in rt.free(v)]
+    # free_priority 25 places it AFTER choose_one, BEFORE advance — no runtime edit needed.
+    assert "proceed_after_select" in kinds
+    assert kinds.index("proceed_after_select") < kinds.index("advance")
+
+
+def test_host_primitive_appears_in_the_catalog() -> None:
+    cat = {t.kind: t for t in StandardPrimitiveRuntime((DismissPrimitive(), _FakeProceed())).catalog()}
+    assert cat["proceed_after_select"].self_gating is True
+    assert cat["proceed_after_select"].purpose
+
+
+async def test_host_defined_kind_dispatches_via_step() -> None:
+    fp = _FakeProceed()
+    rt = StandardPrimitiveRuntime((fp, DismissPrimitive()))
+    out = await rt.step(ScriptedSurface(view(aff("cont", "button", "Continue"))),
+                        "proceed_after_select")
+    assert out.progress == "advance" and fp.applied is True
+
+
+def test_bare_capability_dispatches_and_catalogs_but_never_fires_free() -> None:
+    rt = StandardPrimitiveRuntime((_BareCapability(), DismissPrimitive()))
+    assert all(p.kind != "peek" for p in rt.free(_PRODUCT))   # not self-gating -> never free
+    cat = {t.kind: t for t in rt.catalog()}
+    assert cat["peek"].self_gating is False and cat["peek"].purpose == ""

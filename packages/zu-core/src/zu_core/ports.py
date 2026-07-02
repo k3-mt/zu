@@ -74,12 +74,16 @@ INTERFACE_VERSION: dict[str, int] = {
     "checkout_proceeders": 1,  # CheckoutProceeder — advance add-to-cart -> checkout, short of commit (#117)
     "cart_adders": 1,  # CartAdder — deterministic product -> cart, recognise/click/verify (#122)
     "funnel_phase_classifiers": 1,  # FunnelPhaseClassifier — where a page sits in the funnel (#121)
-    # The interaction-primitive family (#125): ONE closed vocabulary of generic,
-    # self-locating, verified moves (dismiss/search/choose_one/advance/commit_stop)
-    # the vertical resolvers above reduce to, plus the composition layer that drives
-    # them. Port shapes below; reference impls are plugins in zu-tools.
-    "interaction_primitives": 1,  # InteractionPrimitive — one generic verified move (#125)
-    "primitive_runtimes": 1,  # PrimitiveRuntime — dispatch {kind,hint} over the family (#125)
+    # The interaction-primitive family (#125, #131): an OPEN vocabulary of generic,
+    # self-locating, verified moves (built-ins dismiss/search/choose_one/advance/
+    # commit_stop) the vertical resolvers reduce to, plus the composition layer that
+    # drives them. A host registers its own primitives; each MAY declare self_gating/
+    # free_priority/purpose (optional, additive — v1 impls unaffected). Reference impls
+    # are plugins in zu-tools.
+    "interaction_primitives": 1,  # InteractionPrimitive — one generic verified move (#125; optional decls #131)
+    # v2 (#131): PrimitiveRuntime gains catalog() — describe every registered primitive as
+    # a model-invocable PrimitiveTool; free()/catalog() are derived from the registered set.
+    "primitive_runtimes": 2,  # PrimitiveRuntime — dispatch/free/catalog over the family (#125, #131)
 }
 
 # The attribute a plugin sets to declare the interface major it targets.
@@ -1417,8 +1421,12 @@ class FunnelPhaseClassifier(Protocol):
 # to {primitive, hint}; every mechanic (locate, execute, verify, report) is
 # deterministic here — 'the model isn't strong enough' is never the fix.
 
-#: The closed primitive vocabulary. A consumer switches on ``kind``; adding a verb
-#: is a deliberate edit here, not an open-ended string space.
+#: The REFERENCE primitive vocabulary — the built-in kinds a stock runtime ships. It is
+#: NOT closed: a host may register its own :class:`InteractionPrimitive`\\ s under new
+#: ``kind`` strings (a domain capability such as ``proceed_after_select`` or ``login``)
+#: and a :class:`PrimitiveRuntime` dispatches, free-orders, and catalogs them exactly like
+#: the built-ins. Switch on ``kind`` for the built-ins; treat an unknown kind as a host
+#: extension, not an error (#131).
 PRIMITIVE_KINDS: tuple[str, ...] = ("dismiss", "search", "choose_one", "advance", "commit_stop")
 
 #: The generic PROGRESS verdict a primitive reports — the content-free signal a
@@ -1460,6 +1468,25 @@ class PrimitiveOutcome(BaseModel):
     detail: str = ""
 
 
+class PrimitiveTool(BaseModel):
+    """One entry in a :meth:`PrimitiveRuntime.catalog` — a primitive described as a TOOL a
+    model may invoke (#131). It carries only what a model needs to CHOOSE and INVOKE the
+    primitive: its ``kind`` (the verb to emit), a one-line ``purpose`` (when to reach for
+    it), whether it ``accepts_hint`` and what a ``hint`` means, and whether it also fires
+    as a self-gating reflex. Content-free: never page prose. A host renders these as the
+    model's tool palette and dispatches the model's ``{kind, hint}`` through
+    :meth:`PrimitiveRuntime.step` — so the model can reason over EVERY registered
+    capability, not a hand-picked subset."""
+
+    model_config = {"frozen": True}
+
+    kind: str
+    purpose: str = ""
+    accepts_hint: bool = False
+    hint_help: str = ""
+    self_gating: bool = False
+
+
 @runtime_checkable
 class InteractionPrimitive(Protocol):
     """One generic, self-locating, VERIFIED interaction — the uniform contract the
@@ -1472,8 +1499,22 @@ class InteractionPrimitive(Protocol):
     drives the :class:`ConnectedSurface` to EXECUTE the move and VERIFY its success
     invariant, returning a :class:`PrimitiveOutcome`. A primitive NEVER crosses the
     commit boundary: ``commit_stop`` recognises it (and reports ``commit_stop``);
-    ``advance`` excludes committing controls by construction. ``kind`` is one of
-    :data:`PRIMITIVE_KINDS`."""
+    ``advance`` excludes committing controls by construction. ``kind`` is a built-in from
+    :data:`PRIMITIVE_KINDS` OR a host-defined extension (#131).
+
+    OPTIONAL declarations (read by a :class:`PrimitiveRuntime` via ``getattr`` with the
+    defaults below, so a primitive that omits them still works — it simply never fires
+    as a free reflex and catalogs with a bare purpose):
+
+    * ``self_gating: bool`` (default ``False``) — does this fire in the free reflex pass
+      WITHOUT model direction (dismiss a banner, satisfy required variants)? The four
+      self-gating built-ins are ``commit_stop``/``dismiss``/``choose_one``/``advance``;
+      ``search`` is model-directed only.
+    * ``free_priority: int`` (default ``1000``) — order within the free pass, LOWER first
+      (``commit_stop`` guards at 0). Host primitives slot in by choosing a priority.
+    * ``purpose: str`` — one-line "when to use", for the model catalog.
+    * ``accepts_hint: bool`` (default ``False``) / ``hint_help: str`` — whether ``apply``
+      takes a content-free ``hint`` and what it means."""
 
     name: str
     kind: str
@@ -1497,11 +1538,17 @@ class PrimitiveRuntime(Protocol):
     hint, ``advance`` the funnel) as content-free :class:`PrimitivePlan`\\ s, in the
     order a host should try them. ``step`` runs ONE named primitive (a model-directed
     ``{kind, hint}`` or a free plan's kind) over the surface and returns its outcome.
-    ``get`` resolves a kind to its primitive (``None`` for an unknown kind)."""
+    ``get`` resolves a kind to its primitive (``None`` for an unknown kind). ``catalog``
+    describes EVERY registered primitive as a :class:`PrimitiveTool` so a host can expose
+    the whole set to the model as an invocable tool palette (#131) — the free pass and the
+    catalog are both DERIVED from the registered primitives, so a host-registered
+    capability participates in both without editing the runtime."""
 
     def free(self, view: SurfaceView) -> tuple[PrimitivePlan, ...]: ...
 
     def get(self, kind: str) -> InteractionPrimitive | None: ...
+
+    def catalog(self) -> tuple[PrimitiveTool, ...]: ...
 
     async def step(
         self, surface: ConnectedSurface, kind: str, *, hint: str | None = None
