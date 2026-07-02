@@ -1354,19 +1354,30 @@ class CartAdder(Protocol):
 
 
 class FunnelPhase(str, Enum):
-    """Where a page sits in a purchase funnel — the content-free STATE the shipped
-    connected-surface resolvers are transitions OVER (#121). Derived purely from the
-    SHAPE a surface already carries (an add-to-cart control, a cart/'added' signal, a
-    checkout url / place-order control, a card field), never product prose. It powers
-    observability (a phase timeline; drift is a phase regression) and resilience
-    (revert on regression; don't escalate while the phase can still advance)."""
+    """Where a page sits in a COMMIT FUNNEL — the content-free STATE the connected-surface
+    resolvers transition OVER (#121). UNIVERSAL rungs, so ANY vertical maps onto them: a
+    per-vertical :class:`FunnelPhaseClassifier` reads its OWN structural signals and returns
+    a shared rung — shopping (add-to-cart → cart → checkout → card fields) and booking (a
+    service/slot choice → details → a confirm/book control) both progress ENTRY→…→AT_COMMIT.
+    Derived purely from page SHAPE, never prose. Powers observability (a phase timeline; drift
+    is a regression) and resilience (revert on regression; don't escalate while it can advance).
 
-    BROWSING = "browsing"        # a listing / category / search page — no product committed
-    ON_PRODUCT = "on_product"    # a product page — an add-to-cart control is present
-    IN_CART = "in_cart"          # the item is in the cart (cart badge / 'added' / mini-cart)
-    AT_CHECKOUT = "at_checkout"  # the checkout / shipping page — SHORT of place-order/pay
-    AT_PAYMENT = "at_payment"    # card / pay fields present — the COMMIT boundary
-    UNKNOWN = "unknown"          # nothing recognisable (an empty / non-commerce surface)
+    (Renamed from the shopping-specific ``BROWSING/ON_PRODUCT/IN_CART/AT_PAYMENT`` — #121 shipped
+    the vocabulary shopping-named; generalised here for the second vertical, booking.)"""
+
+    ENTRY = "entry"              # browsing / discovery / search — nothing selected yet
+    SELECTING = "selecting"      # choosing an item — a product (add-to-cart), a service/business/slot
+    ASSEMBLING = "assembling"    # the choice is locked, the order is being built (cart / selected slot)
+    AT_CHECKOUT = "at_checkout"  # the checkout / details step — SHORT of the commit
+    AT_COMMIT = "at_commit"      # the commit boundary — card/pay fields, or a confirm/book control
+    UNKNOWN = "unknown"          # nothing recognisable (an empty / off-funnel surface)
+
+    @property
+    def rank(self) -> int:
+        """Position in the funnel — higher is closer to the commit; ``UNKNOWN`` is ``-1``. Lets a
+        consumer tell an ADVANCE from a REGRESS without hardcoding the phase order."""
+        order = ("entry", "selecting", "assembling", "at_checkout", "at_commit")
+        return order.index(self.value) if self.value in order else -1
 
 
 @runtime_checkable

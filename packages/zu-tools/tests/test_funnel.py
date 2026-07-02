@@ -23,17 +23,17 @@ def test_classifier_conforms_and_matches_the_function() -> None:
 
 def test_browsing_is_a_listing_with_no_commerce_control() -> None:
     v = view(aff("link", "Dog collars"), aff("link", "Cat toys"), context=("Shop all",))
-    assert funnel_phase(v) == FunnelPhase.BROWSING
+    assert funnel_phase(v) == FunnelPhase.ENTRY
 
 
 def test_on_product_when_an_add_to_cart_control_is_present() -> None:
     v = view(aff("button", "Add to basket"), aff("link", "Home"))
-    assert funnel_phase(v) == FunnelPhase.ON_PRODUCT
+    assert funnel_phase(v) == FunnelPhase.SELECTING
 
 
 def test_in_cart_on_an_added_signal() -> None:
     v = view(aff("link", "View cart"), context=("Leather collar added to your cart", "Subtotal £24"))
-    assert funnel_phase(v) == FunnelPhase.IN_CART
+    assert funnel_phase(v) == FunnelPhase.ASSEMBLING
 
 
 def test_at_checkout_on_a_place_order_control() -> None:
@@ -48,7 +48,7 @@ def test_at_checkout_on_a_checkout_url() -> None:
 
 def test_at_payment_on_a_card_field() -> None:
     v = view(aff("textbox", "Card number", autocomplete="cc-number"), aff("button", "Pay"))
-    assert funnel_phase(v) == FunnelPhase.AT_PAYMENT
+    assert funnel_phase(v) == FunnelPhase.AT_COMMIT
 
 
 def test_deepest_phase_wins_over_shallower_signals() -> None:
@@ -59,7 +59,7 @@ def test_deepest_phase_wins_over_shallower_signals() -> None:
         aff("button", "Add to cart"),
         context=("Subtotal £24", "Order summary"),
     )
-    assert funnel_phase(v) == FunnelPhase.AT_PAYMENT
+    assert funnel_phase(v) == FunnelPhase.AT_COMMIT
 
 
 def test_unknown_on_an_empty_surface() -> None:
@@ -70,4 +70,4 @@ def test_phase_is_content_free_ignoring_product_prose() -> None:
     # The same structural shape classifies the same regardless of product wording.
     a = view(aff("button", "Add to cart"), context=("Artisan Leather Dog Collar — hand-stitched",))
     b = view(aff("button", "Add to cart"), context=("Bulk Nylon Cat Harness — 12 pack",))
-    assert funnel_phase(a) == funnel_phase(b) == FunnelPhase.ON_PRODUCT
+    assert funnel_phase(a) == funnel_phase(b) == FunnelPhase.SELECTING

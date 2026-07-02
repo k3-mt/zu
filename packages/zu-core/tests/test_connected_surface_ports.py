@@ -100,10 +100,15 @@ def test_protocols_are_structural_and_runtime_checkable() -> None:
 
 
 def test_funnel_phase_enum_values() -> None:
-    assert FunnelPhase.AT_PAYMENT.value == "at_payment"
+    assert FunnelPhase.AT_COMMIT.value == "at_commit"
     assert {p.value for p in FunnelPhase} == {
-        "browsing", "on_product", "in_cart", "at_checkout", "at_payment", "unknown",
+        "entry", "selecting", "assembling", "at_checkout", "at_commit", "unknown",
     }
+    # the universal rungs are ORDERED (higher = closer to commit) so a consumer detects
+    # advance vs regress without hardcoding the phase order; UNKNOWN is off-funnel (-1).
+    assert [FunnelPhase.ENTRY.rank, FunnelPhase.SELECTING.rank, FunnelPhase.ASSEMBLING.rank,
+            FunnelPhase.AT_CHECKOUT.rank, FunnelPhase.AT_COMMIT.rank] == [0, 1, 2, 3, 4]
+    assert FunnelPhase.UNKNOWN.rank == -1
 
 
 def test_value_objects_are_frozen() -> None:

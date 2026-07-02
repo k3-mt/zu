@@ -257,3 +257,13 @@ async def test_apply_hinted_card_that_selects_a_committing_control_is_refused() 
         SurfaceAffordance(handle="a2", role="button", label="Pay now", enclosing_label="Deposit"),
     )
     assert resolve(v, "Deposit") is None  # committing controls are not candidates
+
+
+def test_first_skips_interleaved_nav_chrome() -> None:
+    # A modal lists 'Go back'/'Close' alongside the real options (fresha's 'Select professional');
+    # a positional 'first' must pick the first REAL option, never the chrome that backs out.
+    v = view(aff("c", "button", "Close"), aff("b", "button", "Go back"),
+             aff("o1", "button", "Select — Aimée"), aff("o2", "button", "Select — Lorna"),
+             aff("o3", "button", "Select — Mel"))
+    chosen = resolve(v, "first")
+    assert chosen is not None and chosen.handle == "o1"          # chrome skipped
