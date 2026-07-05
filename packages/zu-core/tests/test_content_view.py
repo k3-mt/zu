@@ -482,6 +482,9 @@ async def test_content_read_emits_event_and_raises_taint() -> None:
 
 def test_surface_view_has_no_new_fields() -> None:
     # Content lives in a SEPARATE projection; the action view stays content-free.
+    # (covered_count is a structural occlusion COUNT — how many interactive
+    # controls the producer pruned as visually covered — never page prose, so the
+    # content-free invariant holds.)
     assert set(SurfaceView.model_fields) == {
         "title",
         "url",
@@ -489,6 +492,7 @@ def test_surface_view_has_no_new_fields() -> None:
         "context",
         "blind",
         "blind_reason",
+        "covered_count",
     }
     # The affordance carries perception STRUCTURE only — role/label/value/states plus the
     # locale-independent structural signals (input type / autocomplete token / submit-ness)

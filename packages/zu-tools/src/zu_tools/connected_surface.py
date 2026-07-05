@@ -18,6 +18,12 @@ reference :class:`~zu_core.ports.ConnectedSurface`:
     id so a same-origin child frame that already appears in the main tree is not
     double-counted — and runs Zu's deterministic reducer. The caller gets Zu's
     stable handles + blind detector, shadow/frame-flattened, from one call.
+    An AX tree carries NO paint order, so before reducing, perceive() runs an
+    OCCLUSION pass (geometry only, see ``_OVERLAY_PROBE_JS``): when a
+    full-viewport overlay is up, page-behind controls are hit-tested and the
+    covered ones pruned — so a covered control never becomes an affordance and a
+    primitive can never "click through" the overlay. No overlay ⇒ the pass costs
+    one ``Runtime.evaluate`` and nothing else.
   * ``act()`` resolves the opaque handle to its backend DOM node (an id that is
     global to the target — the SAME id regardless of which shadow root or frame
     the element lives in, which is exactly what "resolve across a boundary"
@@ -36,7 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 from zu_core.ports import SurfaceAction
 from zu_core.surface import SurfaceView
 
-from .action_surface import AxNode, normalize_axtree, reduce_surface
+from .action_surface import INTERACTIVE_ROLES, AxNode, normalize_axtree, reduce_surface
 from .surface_adapter import to_surface_view
 
 # The shipped verbs ``act()`` resolves. ``kind`` on a SurfaceAction is a free
@@ -129,6 +135,84 @@ def _is_ad_frame(url: str) -> bool:
     return any(m in low for m in _AD_FRAME_HOST_MARKERS)
 
 
+# --- occlusion pass ----------------------------------------------------------
+# ``Accessibility.getFullAXTree`` carries no z-order: a control UNDER a
+# full-viewport overlay (a consent wall, an interstitial) is indistinguishable
+# from an actionable one, so a consumer could click "through" the overlay and the
+# fingerprint-change verify would bless the punch-through. perceive() closes that
+# with GEOMETRY ONLY (element boxes, hit-testing, containment — never a URL, class
+# name or any site-shaped constant):
+#
+#   1. ONE cheap ``Runtime.evaluate`` pre-probe asks "is a full-viewport overlay
+#      up?" — the element stack at the viewport centre contains a fixed/sticky
+#      element of stacking z-index >= _OVERLAY_MIN_Z covering >= ~80% x 60% of the
+#      viewport (generic geometry thresholds for "an overlay", akin to the blind
+#      detector's unlabeled_ratio). No overlay ⇒ the whole pass is skipped: ZERO
+#      probe traffic on the common path.
+#   2. Overlay up ⇒ each interactive candidate node (has a ``node_id``, lives in
+#      the ROOT session — an OOPIF node is skipped because flat ``session_id``
+#      routing is not portable across transports) is hit-tested ONCE
+#      (``DOM.resolveNode`` + ``Runtime.callFunctionOn`` of ``_COVERED_FN``),
+#      capped at :data:`_MAX_OCCLUSION_PROBES` probes.
+#   3. ``_COVERED_FN`` verdicts: the box centre; a centre OUTSIDE the viewport is
+#      NOT covered (an unscrolled-to element is actionable via scrollIntoView —
+#      the probe point is deliberately never clamped to the viewport edge); else
+#      ``elementFromPoint`` in the element's OWN root, covered iff a hit exists
+#      and neither contains the other.
+#
+# Every failure fails OPEN (not covered): a broken probe must never hide a
+# control — over-perception is an escalation, silent under-perception is not.
+_MAX_OCCLUSION_PROBES = 120
+_OVERLAY_MIN_Z = 10
+
+_OVERLAY_PROBE_JS = (
+    "(() => { try {"
+    " const vw = window.innerWidth, vh = window.innerHeight;"
+    " if (!vw || !vh) { return false; }"
+    " let el = document.elementFromPoint(vw / 2, vh / 2);"
+    " while (el && el !== document.documentElement && el !== document.body) {"
+    "   const cs = getComputedStyle(el);"
+    "   if (cs.position === 'fixed' || cs.position === 'sticky') {"
+    "     const z = parseInt(cs.zIndex, 10);"
+    "     const r = el.getBoundingClientRect();"
+    f"    if (!isNaN(z) && z >= {_OVERLAY_MIN_Z}"
+    "        && r.width >= vw * 0.8 && r.height >= vh * 0.6) { return true; }"
+    "   }"
+    "   el = el.parentElement;"
+    " }"
+    " return false;"
+    " } catch (e) { return false; } })()"
+)
+
+# One generic occlusion hit-test, run ON the candidate element. Returns a small
+# VERDICT string so the harness-side rule ("only an in-viewport centre whose hit
+# belongs to a different subtree is covered") is explicit and testable:
+#   'covered'   — a hit exists at the centre and neither contains the other
+#   'clear'     — the element (or an ancestor/descendant) is what's at its centre
+#   'offscreen' — the centre lies outside the viewport: NOT covered by definition
+#                 (scrollIntoView reaches it; never clamp-and-probe)
+#   'zero' / 'nohit' / 'nowin' / 'error' — degenerate probes, all fail-open
+_COVERED_FN = (
+    "function(){ try {"
+    " const r = this.getBoundingClientRect();"
+    " if (!r.width || !r.height) { return 'zero'; }"
+    " const cx = r.left + r.width / 2, cy = r.top + r.height / 2;"
+    " const doc = this.ownerDocument || document;"
+    " const win = doc.defaultView;"
+    " if (!win) { return 'nowin'; }"
+    " if (cx < 0 || cy < 0 || cx >= win.innerWidth || cy >= win.innerHeight) {"
+    "   return 'offscreen';"
+    " }"
+    " const root = (this.getRootNode && this.getRootNode().elementFromPoint)"
+    "   ? this.getRootNode() : doc;"  # a shadow root hit-tests within itself
+    " const hit = root.elementFromPoint(cx, cy);"
+    " if (!hit) { return 'nohit'; }"
+    " if (this.contains(hit) || hit.contains(this)) { return 'clear'; }"
+    " return 'covered';"
+    " } catch (e) { return 'error'; } }"
+)
+
+
 @runtime_checkable
 class CdpTarget(Protocol):
     """The one method a host's CDP connection must expose: send a Chrome DevTools
@@ -183,6 +267,7 @@ class CdpConnectedSurface:
         # per-tree, and iframe nodes carry their session id for the act path.
         ax_nodes = await self._page_ax_nodes()
         ax_nodes.extend(await self._iframe_ax_nodes())
+        await self._mark_covered(ax_nodes)
         title, url = await self._title_url()
         surface = reduce_surface(
             ax_nodes, title=title, url=url,
@@ -251,6 +336,62 @@ class CdpConnectedSurface:
         # A stale/unresolvable handle is an escalation, not a crash (§11.3): we
         # simply re-perceive; the caller sees the handle gone and re-captures.
         return await self.perceive()
+
+    # --- occlusion pass (see the block comment above _OVERLAY_PROBE_JS) -------
+
+    async def _mark_covered(self, nodes: list[AxNode]) -> None:
+        """Stamp ``covered=True`` on the interactive nodes an overlay occludes.
+        Skipped entirely — zero probe traffic — when no candidates exist or the ONE
+        ``Runtime.evaluate`` pre-probe says no full-viewport overlay is up. Only
+        root-session nodes with a ``node_id`` are probed (an OOPIF's flat session
+        routing is not portable across transports, so its nodes are left alone),
+        capped at :data:`_MAX_OCCLUSION_PROBES`. Probe failures leave a node
+        uncovered — fail-open, a broken probe never hides a control."""
+        candidates: list[tuple[AxNode, int]] = []
+        for n in nodes:
+            nid = n.node_id
+            if (
+                isinstance(nid, int) and n.session_id is None
+                and n.role in INTERACTIVE_ROLES and n.visible and not n.ignored
+            ):
+                candidates.append((n, nid))
+        if not candidates:
+            return
+        if not await self._overlay_up():
+            return  # the common path: no overlay, no probes
+        for node, nid in candidates[:_MAX_OCCLUSION_PROBES]:
+            node.covered = await self._probe_covered(nid)
+
+    async def _overlay_up(self) -> bool:
+        """The ONE cheap pre-probe: is a generic full-viewport overlay up? Any
+        failure reads as 'no overlay' — the pass then costs nothing further."""
+        try:
+            resp = await self._send(
+                "Runtime.evaluate",
+                {"expression": _OVERLAY_PROBE_JS, "returnByValue": True},
+            )
+        except Exception:  # noqa: BLE001 - a broken pre-probe reads as 'no overlay'
+            return False
+        result = resp.get("result") if isinstance(resp, dict) else None
+        return (result.get("value") is True) if isinstance(result, dict) else False
+
+    async def _probe_covered(self, node_id: int) -> bool:
+        """Hit-test ONE element (root session): covered iff the probe positively
+        verdicts 'covered'. Every other verdict — 'offscreen' (centre outside the
+        viewport: reachable via scrollIntoView, so NOT covered), degenerate probes,
+        resolution failures, raises — keeps the node (fail-open)."""
+        try:
+            resp = await self._send("DOM.resolveNode", {"backendNodeId": node_id})
+            obj = resp.get("object") if isinstance(resp, dict) else None
+            object_id = obj.get("objectId") if isinstance(obj, dict) else None
+            if not isinstance(object_id, str):
+                return False
+            out = await self._call_fn(object_id, _COVERED_FN)
+            result = out.get("result") if isinstance(out, dict) else None
+            verdict = result.get("value") if isinstance(result, dict) else None
+            return verdict == "covered"
+        except Exception:  # noqa: BLE001 - a broken probe must never hide a control
+            return False
 
     # --- CDP plumbing --------------------------------------------------------
 

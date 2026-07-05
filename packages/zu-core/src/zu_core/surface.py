@@ -89,6 +89,15 @@ class SurfaceView(BaseModel):
     context: tuple[str, ...] = ()
     blind: bool = False
     blind_reason: str | None = None
+    # How many interactive controls the producer PRUNED as visually COVERED (an
+    # element whose box centre hit-tests to another element's subtree — a page
+    # behind a full-viewport overlay). A structural occlusion COUNT, never page
+    # prose, so the view stays content-free. It lets a consumer tell "an overlay
+    # swallowed the page" (few/no affordances, covered_count high) from "a
+    # genuinely sparse page" (few affordances, covered_count 0). ``0`` for
+    # producers with no occlusion signal; additive and deliberately OUT of
+    # ``fingerprint`` so existing digests/fixtures are unaffected.
+    covered_count: int = 0
 
     def fingerprint(self) -> str:
         """A stable, content-free digest of the surface's SHAPE — the before/after

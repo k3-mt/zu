@@ -7,6 +7,29 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — occlusion-aware CDP perception (conduit e2e audit A7)
+The AX tree carries no paint order, so a control UNDER a full-viewport overlay (a consent wall, an
+interstitial) read exactly like an actionable one — a primitive could "click through" the overlay
+and the fingerprint-change verify would bless the punch-through.
+- **Occlusion pass in `CdpConnectedSurface.perceive()`** — geometry only, never a site constant:
+  ONE cheap `Runtime.evaluate` pre-probe asks "is a generic full-viewport overlay up?" (a
+  fixed/sticky element at the viewport centre, z-index ≥ 10, covering ≥ ~80%×60%); no overlay ⇒
+  zero further traffic. Overlay up ⇒ each interactive root-session node with a backend node id is
+  hit-tested once (`elementFromPoint` in its own root; covered iff the hit exists and neither
+  contains the other), capped at 120 probes. A box centre OUTSIDE the viewport is NOT covered — an
+  unscrolled-to element is reachable via scrollIntoView, so the probe point is never clamped.
+  Probe failures fail OPEN (kept): a broken probe never hides a control. OOPIF nodes are skipped
+  (flat `session_id` routing is not portable across transports).
+- **`AxNode.covered` (additive, default `False`)** — the producer-supplied occlusion bit.
+  `reduce_surface` prunes a covered node like an invisible one — it never becomes an affordance,
+  so `choose_one`/the satisfier/every option-group consumer excludes covered options BY
+  CONSTRUCTION and the fingerprint verify has nothing covered to bless — but COUNTS it:
+  `Surface.covered_count` / `SurfaceView.covered_count` (additive, out of `fingerprint`) carry how
+  many interactive controls the prune removed, and a page whose ONLY interactive controls were
+  covered reads as `blind` with an occlusion reason. "An overlay swallowed the page" is now
+  distinguishable from "a genuinely empty page", while a modal with its own live controls stays a
+  healthy (small) surface.
+
 ### Added — cross-origin iframe flattening + repeated-list disambiguation (#126, #127)
 Two booking-audit follow-ups that unblock the primitive family on real widget/aggregator sites.
 - **Cross-origin iframes (#126)** — `CdpConnectedSurface` flattened open shadow DOM + same-origin

@@ -40,4 +40,5 @@ def to_surface_view(s: Surface) -> SurfaceView:
         context=tuple(s.context),
         blind=s.blind,
         blind_reason=s.blind_reason,
+        covered_count=s.covered_count,
     )
