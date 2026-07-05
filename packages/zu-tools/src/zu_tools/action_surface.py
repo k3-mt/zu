@@ -19,7 +19,17 @@ The pipeline (§11.2), run over an accessibility tree rather than the raw DOM:
      smaller than the DOM, built to answer "what can a user do here".
   2. Filter to interactive + meaningful (actions, plus the headings/labels/errors
      an action needs); drop the rest.
-  3. Prune the invisible — ignored, off-screen, zero-area, hidden.
+  3. Prune the invisible — ignored, off-screen, zero-area, hidden — and the
+     COVERED (``AxNode.covered``: a producer-supplied occlusion bit for an
+     element hidden UNDER another, e.g. a page behind a full-viewport overlay).
+     Occlusion design choice: a covered control is pruned exactly like an
+     invisible one (it is not actionable where it stands, so it must never
+     become an affordance/option), but it is COUNTED — ``Surface.covered_count``
+     carries how many interactive controls the occlusion prune removed, and a
+     page whose ONLY interactive controls were covered reads as ``blind`` with
+     an occlusion reason. So "an overlay swallowed the page" is distinguishable
+     from "a genuinely empty page", while a modal WITH its own controls still
+     reads as a healthy (small) surface — which is the correct actionable set.
   4. Resolve a stable, human-meaningful label per element.
   5. Assign a stable, opaque handle (a1, a2 …) that maps back, harness-side, to a
      role+name locator. The model emits the handle, never a selector (§11.3).
@@ -120,6 +130,14 @@ class AxNode(BaseModel):
     # DOM.resolveNode / Runtime.callFunctionOn to the right session; never
     # model-visible. Additive, ``None`` by default.
     session_id: str | None = None
+    # The element is visually COVERED by another element (its box centre hit-tests
+    # to a different subtree — a page behind a full-viewport overlay). The AX tree
+    # itself carries no paint order, so this is producer-supplied (the connected
+    # surface's geometry-only occlusion probe). A covered node is pruned like an
+    # invisible one, but COUNTED (``Surface.covered_count``) so an all-covered page
+    # reads as occluded/blind, never as a healthy empty page. Additive, ``False``
+    # by default — offline fixtures and existing producers are unaffected.
+    covered: bool = False
 
 
 class Affordance(BaseModel):
@@ -149,6 +167,10 @@ class Surface(BaseModel):
     handle_map: dict[str, dict] = Field(default_factory=dict)
     blind: bool = False
     blind_reason: str | None = None
+    # Interactive controls pruned as visually COVERED (``AxNode.covered``) — the
+    # occlusion sibling of the blind counters. Additive; ``0`` when the producer
+    # supplied no occlusion signal, so existing fixtures are unaffected.
+    covered_count: int = 0
 
 
 def _label_of(node: AxNode) -> str:
@@ -205,10 +227,18 @@ def reduce_surface(
     context: list[str] = []
     unlabeled = 0
     interactive_seen = 0
+    covered_interactive = 0
     kept_any_content = False
 
     for node in nodes:
         if _is_pruned(node):
+            continue
+        if node.covered:
+            # Occluded — pruned like an invisible node (never an affordance), but
+            # counted: an all-covered page must read as occluded, not empty (see
+            # the module docstring's occlusion design choice).
+            if node.role in INTERACTIVE_ROLES:
+                covered_interactive += 1
             continue
         kept_any_content = True
         role = node.role
@@ -259,7 +289,15 @@ def reduce_surface(
 
     blind = False
     blind_reason: str | None = None
-    if not affordances and kept_any_content:
+    if not affordances and covered_interactive:
+        # The occlusion prune removed EVERY actionable control: the view is a page
+        # swallowed by an overlay, not a healthy empty page — signal it (§11.4).
+        blind = True
+        blind_reason = (
+            f"{covered_interactive} interactive element(s) are covered by an overlay "
+            "and none remain actionable — the view is occluded, not empty"
+        )
+    elif not affordances and kept_any_content:
         blind = True
         blind_reason = "page had content but the accessibility tree yielded no addressable actions"
     elif interactive_seen and (unlabeled / interactive_seen) > unlabeled_ratio:
@@ -277,6 +315,7 @@ def reduce_surface(
         handle_map=handle_map,
         blind=blind,
         blind_reason=blind_reason,
+        covered_count=covered_interactive,
     )
 
 

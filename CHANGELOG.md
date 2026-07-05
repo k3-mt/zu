@@ -7,6 +7,58 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — occlusion + trusted-click hardening (adversarial verification of the e2e audit fixes)
+Real-Chromium refutation of the two Added items below surfaced three regressions; all are geometry-
+/DOM-semantics-only, no site constants:
+- **The styled-label radio/checkbox pattern no longer reads as covered.** A visually-hidden
+  `<input>` (sr-only / opacity:0 / Bootstrap `.btn-check`) whose clickable proxy is its own
+  `<label>` hit-tests to that label — a sibling, not an ancestor — so the occlusion probe called it
+  `covered` and pruned the modal's OWN slot/variant grid (up to a wrongful `blind`). `_COVERED_FN`
+  now reads a hit that is (or is inside) the control's own `<label>` (`this.labels`, or a `<label>`
+  whose `.control` is the node) as the control's affordance = `clear`.
+- **The trusted click no longer dispatches at a stale off-viewport point.** `scrollIntoView` now
+  requests `behavior:'instant'` (a `scroll-behavior:smooth` site animated it async, so the next
+  `getBoxModel` read the pre-scroll box), and `_trusted_click` rejects a centre below/right of the
+  layout viewport (`Page.getLayoutMetrics`) and falls back to the synthetic click — which targets
+  the node itself — instead of pressing empty space where the widget never fires.
+- **The occlusion-probe cap is raised 120 → 400** so a link/nav/footer-dense page-behind (routinely
+  >120 interactive nodes) is fully covered before the cap bites; probes are still paid only under an
+  overlay, in document order (page-behind first).
+
+### Added — trusted-input click on the connected surface (conduit e2e audit A9)
+`CdpConnectedSurface.act()`'s click verb was a synthetic `this.click()` — `isTrusted:false`, which
+booking-widget-class UIs simply ignore (their handlers gate on genuine pointer input).
+- **Trusted click first** — the click path now scrolls the element into view, reads its box model
+  (`DOM.getBoxModel` by backend node id) and dispatches a REAL primary-button press+release
+  (`Input.dispatchMouseEvent`, `isTrusted:true`) at the box centre. It falls back to the synthetic
+  `this.click()` when the box model is unavailable/zero-area or the dispatch raises, so every
+  element stays clickable on every transport. `type`/`select`/`submit` mechanics are unchanged
+  (the native-setter dance is the right controlled-input approach), and `act()` still returns the
+  re-perceived view (the port contract).
+
+### Added — occlusion-aware CDP perception (conduit e2e audit A7)
+The AX tree carries no paint order, so a control UNDER a full-viewport overlay (a consent wall, an
+interstitial) read exactly like an actionable one — a primitive could "click through" the overlay
+and the fingerprint-change verify would bless the punch-through.
+- **Occlusion pass in `CdpConnectedSurface.perceive()`** — geometry only, never a site constant:
+  ONE cheap `Runtime.evaluate` pre-probe asks "is a generic full-viewport overlay up?" (a
+  fixed/sticky element at the viewport centre, z-index ≥ 10, covering ≥ ~80%×60%); no overlay ⇒
+  zero further traffic. Overlay up ⇒ each interactive root-session node with a backend node id is
+  hit-tested once (`elementFromPoint` in its own root; covered iff the hit exists and neither
+  contains the other), capped at 120 probes. A box centre OUTSIDE the viewport is NOT covered — an
+  unscrolled-to element is reachable via scrollIntoView, so the probe point is never clamped.
+  Probe failures fail OPEN (kept): a broken probe never hides a control. OOPIF nodes are skipped
+  (flat `session_id` routing is not portable across transports).
+- **`AxNode.covered` (additive, default `False`)** — the producer-supplied occlusion bit.
+  `reduce_surface` prunes a covered node like an invisible one — it never becomes an affordance,
+  so `choose_one`/the satisfier/every option-group consumer excludes covered options (within the
+  per-perceive probe cap) and the fingerprint verify has nothing covered to bless — but COUNTS it:
+  `Surface.covered_count` / `SurfaceView.covered_count` (additive, out of `fingerprint`) carry how
+  many interactive controls the prune removed, and a page whose ONLY interactive controls were
+  covered reads as `blind` with an occlusion reason. "An overlay swallowed the page" is now
+  distinguishable from "a genuinely empty page", while a modal with its own live controls stays a
+  healthy (small) surface.
+
 ### Added — cross-origin iframe flattening + repeated-list disambiguation (#126, #127)
 Two booking-audit follow-ups that unblock the primitive family on real widget/aggregator sites.
 - **Cross-origin iframes (#126)** — `CdpConnectedSurface` flattened open shadow DOM + same-origin

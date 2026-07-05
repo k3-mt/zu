@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from zu_core.ports import InteractionPrimitive, SurfaceAction
 from zu_core.surface import SurfaceAffordance, SurfaceView
+from zu_tools.action_surface import AxNode, reduce_surface
 from zu_tools.choose import ChooseOne, resolve
+from zu_tools.surface_adapter import to_surface_view
 
 
 def aff(handle: str, role: str, label: str, *, states: tuple[str, ...] = (),
@@ -257,6 +259,24 @@ async def test_apply_hinted_card_that_selects_a_committing_control_is_refused() 
         SurfaceAffordance(handle="a2", role="button", label="Pay now", enclosing_label="Deposit"),
     )
     assert resolve(v, "Deposit") is None  # committing controls are not candidates
+
+
+def test_covered_options_never_enter_groups() -> None:
+    # Occlusion holds BY CONSTRUCTION at this level: reduce_surface prunes covered
+    # options before grouping, so a strong group whose only unselected options sit
+    # under an overlay is simply not a group — choose_one is not applicable with no
+    # hint, and neither a token nor a positional hint can reach a covered option.
+    nodes = [
+        AxNode(role="radio", name="9:00", group="g:7", node_id=1, covered=True),
+        AxNode(role="radio", name="9:30", group="g:7", node_id=2, covered=True),
+        AxNode(role="button", name="Accept all", node_id=3),  # the overlay's own control
+    ]
+    v = to_surface_view(reduce_surface(nodes))
+
+    assert v.covered_count == 2
+    assert ChooseOne().inspect(v).applicable is False  # no unselected strong group left
+    assert resolve(v, "9:00") is None                  # a token hint can't reach a covered option
+    assert resolve(v, "first") is None                 # nor a positional one (a lone button ≠ group)
 
 
 def test_first_skips_interleaved_nav_chrome() -> None:

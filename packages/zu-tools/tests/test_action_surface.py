@@ -94,6 +94,35 @@ def test_not_blind_when_mostly_labeled() -> None:
     assert not s.blind  # 1/3 unlabeled, under threshold
 
 
+def test_covered_nodes_are_pruned_and_counted() -> None:
+    # A covered control (occluded under an overlay — producer-supplied bit) is
+    # pruned like an invisible one, but COUNTED, so the caller can tell an
+    # overlaid page from a sparse one. A modal with its own live controls stays
+    # a healthy (small) surface.
+    nodes = [
+        AxNode(role="button", name="Behind the overlay", covered=True),
+        AxNode(role="heading", name="Covered heading", covered=True),  # not interactive: uncounted
+        AxNode(role="button", name="Accept all"),
+    ]
+    s = reduce_surface(nodes)
+    assert [a.label for a in s.affordances] == ["Accept all"]
+    assert s.covered_count == 1
+    assert not s.blind
+
+
+def test_all_interactive_covered_is_blind_with_an_occlusion_reason() -> None:
+    # When the occlusion prune removes EVERY actionable control the view reads as
+    # occluded/blind — never as a healthy empty page.
+    nodes = [
+        AxNode(role="button", name="Book 9:00", covered=True),
+        AxNode(role="button", name="Book 9:30", covered=True),
+    ]
+    s = reduce_surface(nodes)
+    assert s.affordances == []
+    assert s.covered_count == 2
+    assert s.blind and s.blind_reason and "covered" in s.blind_reason
+
+
 def test_normalize_cdp_axtree() -> None:
     cdp = [
         {
