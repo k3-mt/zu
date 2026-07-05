@@ -27,6 +27,23 @@ def ax(role: str, name: str = "", *, node_id: int | None = None,
     return node
 
 
+def _snapshot(bounds: dict[int, list[float]]) -> dict:
+    """A minimal ``DOMSnapshot.captureSnapshot`` response for a box map: one document
+    whose ``layout.nodeIndex`` points at ``nodes.backendNodeId`` and whose
+    ``layout.bounds`` are the [x,y,w,h] boxes — the exact shape the surface decodes."""
+    backend_ids = list(bounds)
+    return {
+        "documents": [{
+            "nodes": {"backendNodeId": backend_ids},
+            "layout": {
+                "nodeIndex": list(range(len(backend_ids))),
+                "bounds": [bounds[b] for b in backend_ids],
+            },
+        }],
+        "strings": [],
+    }
+
+
 class FakeCdpTarget:
     """A minimal in-memory CDP endpoint. ``frames`` maps a frame id ("" = main) to
     its current AX node list; ``effects`` maps a backend node id to a callback that
@@ -34,11 +51,16 @@ class FakeCdpTarget:
     apply, modelled at the AX level."""
 
     def __init__(self, frames: dict[str, list[dict]], *, title: str = "", url: str = "",
-                 frame_tree: dict | None = None) -> None:
+                 frame_tree: dict | None = None,
+                 bounds: dict[int, list[float]] | None = None) -> None:
         self.frames = frames
         self.title = title
         self.url = url
         self.frame_tree = frame_tree
+        # backendDOMNodeId -> [x, y, w, h]; served as a DOMSnapshot.captureSnapshot so
+        # the surface stamps real geometry and prunes zero-area controls. None => the
+        # method returns nothing (the pre-fix fail-open path: every node kept).
+        self.bounds = bounds
         self.calls: list[tuple[str, dict]] = []
         self.effects: dict[int, Any] = {}
         self._obj_to_node: dict[str, Any] = {}
@@ -52,6 +74,8 @@ class FakeCdpTarget:
             return {"frameTree": self.frame_tree} if self.frame_tree else {}
         if method == "Accessibility.getFullAXTree":
             return {"nodes": list(self.frames.get(params.get("frameId", ""), []))}
+        if method == "DOMSnapshot.captureSnapshot":
+            return _snapshot(self.bounds) if self.bounds is not None else {}
         if method == "Target.getTargetInfo":
             return {"targetInfo": {"title": self.title, "url": self.url}}
         if method == "DOM.resolveNode":
@@ -104,6 +128,35 @@ async def test_perceive_flattens_across_frames_and_dedupes_by_backend_node() -> 
     target: FakeCdpTarget = surface._target  # type: ignore[assignment]
     ax_calls = [p.get("frameId", "") for m, p in target.calls if m == "Accessibility.getFullAXTree"]
     assert "" in ax_calls and "f2" in ax_calls
+
+
+async def test_perceive_prunes_invisible_controls_using_real_geometry() -> None:
+    # The #93/#126 bug on urban.co: a collapsed mega-menu link is ignored=false and 0x0,
+    # so getFullAXTree (no geometry) floods the surface and the model clicks an invisible
+    # 'Massage in Manchester' no-op. With a real box captured per session, perceive()
+    # drops it — while an on-screen and a BELOW-THE-FOLD control both survive.
+    frames = {"": [
+        ax("link", "Massage in Manchester", node_id=1),   # collapsed menu, 0x0
+        ax("button", "Book now", node_id=2),               # on-screen
+        ax("button", "Footer", node_id=3),                 # below the fold, real size
+    ]}
+    bounds = {
+        1: [10.0, 20.0, 0.0, 0.0],
+        2: [10.0, 100.0, 120.0, 40.0],
+        3: [10.0, 9000.0, 120.0, 40.0],  # large y, real w/h — a scroll away, not hidden
+    }
+    surface = CdpConnectedSurface(FakeCdpTarget(frames, bounds=bounds))
+    view = await surface.perceive()
+    assert _labels(view) == ["Book now", "Footer"]  # invisible link gone, below-fold kept
+
+
+async def test_perceive_fails_open_when_geometry_is_unavailable() -> None:
+    # No DOMSnapshot support (bounds=None => the method returns nothing): every control
+    # keeps bounds=None and survives — never hide a real control on a geometry gap.
+    frames = {"": [ax("link", "Massage in Manchester", node_id=1), ax("button", "Book", node_id=2)]}
+    surface = CdpConnectedSurface(FakeCdpTarget(frames, bounds=None))
+    view = await surface.perceive()
+    assert _labels(view) == ["Massage in Manchester", "Book"]
 
 
 async def test_perceive_falls_back_to_main_frame_when_no_frame_tree() -> None:
@@ -215,10 +268,16 @@ class FakeOopifTarget:
     _SESSION = "sess-iframe-1"
 
     def __init__(self, page_nodes: list[dict], iframe_nodes: list[dict],
-                 *, iframe_url: str = "https://cmp.example/booking") -> None:
+                 *, iframe_url: str = "https://cmp.example/booking",
+                 page_bounds: dict[int, list[float]] | None = None,
+                 iframe_bounds: dict[int, list[float]] | None = None) -> None:
         self.page_nodes = page_nodes
         self.iframe_nodes = iframe_nodes
         self.iframe_url = iframe_url
+        # Per-session geometry: the OOPIF's boxes only resolve in ITS session, so the
+        # surface must capture the snapshot there — proven by keying these separately.
+        self.page_bounds = page_bounds
+        self.iframe_bounds = iframe_bounds
         self.calls: list[tuple[str, dict, str | None]] = []
         self.effects: dict[tuple[str | None, int], Any] = {}
         self._obj: dict[str, tuple[str | None, Any]] = {}
@@ -241,6 +300,9 @@ class FakeOopifTarget:
             return {"sessionId": self._SESSION} if params.get("targetId") == "tid-1" else {}
         if method == "Accessibility.getFullAXTree":
             return {"nodes": list(self.iframe_nodes if session_id == self._SESSION else self.page_nodes)}
+        if method == "DOMSnapshot.captureSnapshot":
+            b = self.iframe_bounds if session_id == self._SESSION else self.page_bounds
+            return _snapshot(b) if b is not None else {}
         if method == "DOM.resolveNode":
             oid = f"obj-{session_id}-{params.get('backendNodeId')}"
             self._obj[oid] = (session_id, params.get("backendNodeId"))
@@ -284,6 +346,23 @@ async def test_perceive_includes_cross_origin_iframe_target_controls() -> None:
     # the ad iframe was never attached; the real one was
     attached = [p.get("targetId") for m, p, _ in target.calls if m == "Target.attachToTarget"]
     assert "tid-1" in attached and "ad-1" not in attached
+
+
+async def test_perceive_prunes_invisible_iframe_control_via_its_own_session_geometry() -> None:
+    # Geometry for an OOPIF control must be captured in the iframe's OWN session (a
+    # separate CDP target). Here the iframe carries a real 'Book 9:30' and a 0x0 hidden
+    # 'Book 8:00'; the snapshot served in the iframe session prunes only the hidden one.
+    target = FakeOopifTarget(
+        page_nodes=[ax("link", "Log in", node_id=1)],
+        iframe_nodes=[ax("button", "Book 9:30", node_id=50), ax("button", "Book 8:00", node_id=51)],
+        page_bounds={1: [0.0, 0.0, 80.0, 20.0]},
+        iframe_bounds={50: [0.0, 200.0, 100.0, 40.0], 51: [0.0, 0.0, 0.0, 0.0]},
+    )
+    view = await CdpConnectedSurface(target).perceive()
+    assert _labels(view) == ["Log in", "Book 9:30"]  # hidden 'Book 8:00' pruned
+    # The snapshot for the iframe control was captured in the iframe's session, not root.
+    snap_sessions = [s for m, _, s in target.calls if m == "DOMSnapshot.captureSnapshot"]
+    assert FakeOopifTarget._SESSION in snap_sessions and None in snap_sessions
 
 
 async def test_act_on_a_cross_origin_iframe_control_routes_to_its_session() -> None:
