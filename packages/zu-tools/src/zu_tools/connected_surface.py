@@ -64,7 +64,11 @@ _SELF_ADDRESSING_ROLES: frozenset[str] = frozenset({"combobox", "listbox"})
 
 # Bring the element into view before the trusted click reads its box model — the
 # same centring scroll the synthetic click always did, as its own step.
-_SCROLL_FN = "function(){ this.scrollIntoView({block:'center'}); }"
+# INSTANT, not smooth: a site with CSS ``scroll-behavior:smooth`` (Bootstrap sets it on :root
+# for every page) animates ``scrollIntoView`` asynchronously, so the very next ``getBoxModel``
+# reads the PRE-scroll box and the trusted press fires below the fold, on nothing. ``'instant'``
+# lands the scroll before the box is read; the ``_trusted_click`` in-viewport bound is the belt.
+_SCROLL_FN = "function(){ this.scrollIntoView({block:'center', behavior:'instant'}); }"
 
 # The SYNTHETIC click FALLBACK, crossing shadow/frame boundaries: the element is
 # resolved to a global objectId first, so ``this.click()`` fires inside whatever
@@ -174,7 +178,14 @@ def _is_ad_frame(url: str) -> bool:
 #
 # Every failure fails OPEN (not covered): a broken probe must never hide a
 # control — over-perception is an escalation, silent under-perception is not.
-_MAX_OCCLUSION_PROBES = 120
+#
+# The cap bounds probe traffic (it only spends when an overlay is actually up). Candidates are
+# probed in DOCUMENT order — page-behind controls come first, the overlay's own controls last —
+# so the cap only ever leaves LATE nodes unprobed-and-kept, which are the overlay's own on a
+# normal modal. Set high enough that a link/nav/footer-dense page-behind (routinely >120
+# interactive nodes) is still fully covered before the cap bites; each probe is one
+# callFunctionOn, paid only under an overlay.
+_MAX_OCCLUSION_PROBES = 400
 _OVERLAY_MIN_Z = 10
 
 _OVERLAY_PROBE_JS = (
@@ -220,6 +231,21 @@ _COVERED_FN = (
     " const hit = root.elementFromPoint(cx, cy);"
     " if (!hit) { return 'nohit'; }"
     " if (this.contains(hit) || hit.contains(this)) { return 'clear'; }"
+    # The styled-label radio/checkbox pattern: a visually-hidden <input> (sr-only / opacity:0 /
+    # .btn-check) whose clickable proxy is its OWN <label> — a SIBLING, not an ancestor, so the
+    # centre hit-tests to that label (or a span inside it). That is the control's own affordance,
+    # NOT occlusion by an overlay: a click on it drives the input. Bootstrap/Tailwind/MUI all
+    # ship this shape, and it renders the modal's own slot/variant grid — pruning it would blind
+    # the very flow the pass protects. Content-free: pure labelable-control DOM semantics.
+    " try {"
+    "   const lbls = this.labels ? Array.prototype.slice.call(this.labels) : [];"
+    "   for (let i = 0; i < lbls.length; i++) {"
+    "     const l = lbls[i];"
+    "     if (l === hit || l.contains(hit) || hit.contains(l)) { return 'clear'; }"
+    "   }"
+    "   const hl = hit.closest ? hit.closest('label') : null;"
+    "   if (hl && hl.control === this) { return 'clear'; }"
+    " } catch (e2) {}"
     " return 'covered';"
     " } catch (e) { return 'error'; } }"
 )
@@ -363,9 +389,11 @@ class CdpConnectedSurface:
 
     async def _trusted_click(self, node_id: int, session_id: str | None) -> bool:
         """One real (isTrusted) click at the element's box-model centre. True iff the
-        press+release were dispatched; any failure — no/degenerate box model, a raise
-        from the transport — returns False so the caller falls back to the synthetic
-        click (fail-open: the click always has an arm that fires)."""
+        press+release were dispatched; any failure — no/degenerate box model, a centre
+        OUTSIDE the layout viewport (a stale box under async scroll), a raise from the
+        transport — returns False so the caller falls back to the synthetic click
+        (fail-open: the click always has an arm that fires, and the synthetic one hits the
+        intended element regardless of where it sits)."""
         try:
             resp = await self._send(
                 "DOM.getBoxModel", {"backendNodeId": node_id}, session_id=session_id
@@ -381,6 +409,19 @@ class CdpConnectedSurface:
             x, y = sum(xs) / 4.0, sum(ys) / 4.0
             if x < 0 or y < 0:
                 return False  # centre off the viewport origin side — not dispatchable
+            # A centre BELOW/RIGHT of the layout viewport means the box is stale (the scroll
+            # hadn't landed when it was read) — dispatching there hits empty space and the
+            # widget never fires. Fall back to the synthetic click, which targets the node
+            # itself. `Page.getLayoutMetrics` is cheap; any failure skips the bound (fail-open).
+            try:
+                metrics = await self._send("Page.getLayoutMetrics", {}, session_id=session_id)
+                vp = metrics.get("cssLayoutViewport") if isinstance(metrics, dict) else None
+                vw = float(vp.get("clientWidth") or 0) if isinstance(vp, dict) else 0.0
+                vh = float(vp.get("clientHeight") or 0) if isinstance(vp, dict) else 0.0
+                if vw > 0 and vh > 0 and (x >= vw or y >= vh):
+                    return False
+            except Exception:  # noqa: BLE001 - can't read the viewport: skip the bound
+                pass
             for event in ("mousePressed", "mouseReleased"):
                 await self._send(
                     "Input.dispatchMouseEvent",

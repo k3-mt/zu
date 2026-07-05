@@ -55,6 +55,7 @@ class FakeCdpTarget:
         self.occlusion: dict[int, Any] = {}       # bid -> probe verdict (or Exception)
         self.box_models: dict[int, list[float]] = {}  # bid -> content quad (8 numbers)
         self.dispatch_error: Exception | None = None  # raised by Input.dispatchMouseEvent
+        self.layout_viewport: dict | None = None  # Page.getLayoutMetrics cssLayoutViewport
         self._obj_to_node: dict[str, Any] = {}
 
     async def send(
@@ -74,6 +75,8 @@ class FakeCdpTarget:
             box_bid = params.get("backendNodeId")
             quad = self.box_models.get(box_bid) if isinstance(box_bid, int) else None
             return {"model": {"content": list(quad)}} if quad else {}
+        if method == "Page.getLayoutMetrics":
+            return {"cssLayoutViewport": self.layout_viewport} if self.layout_viewport else {}
         if method == "Input.dispatchMouseEvent":
             if self.dispatch_error is not None:
                 raise self.dispatch_error
@@ -222,6 +225,41 @@ async def test_act_click_falls_back_on_zero_area_box_and_dispatch_raise() -> Non
     view2 = await surface2.perceive()
     await surface2.act(SurfaceAction(handle=view2.affordances[0].handle, kind="click"))
     assert clicked2 == ["go"]  # the raise was swallowed; the synthetic arm clicked
+
+
+async def test_act_click_falls_back_when_the_box_centre_is_below_the_viewport() -> None:
+    # F2: on a scroll-behavior:smooth site the scroll animates async, so getBoxModel can read a
+    # PRE-scroll box whose centre is below the fold. Dispatching a trusted press there hits empty
+    # space and the widget never fires. The in-viewport bound must reject it and fall back to the
+    # synthetic this.click(), which targets the node itself regardless of where it sits.
+    frames = {"": [ax("button", "Continue", node_id=10)]}
+    target = FakeCdpTarget(frames)
+    target.layout_viewport = {"clientWidth": 1280, "clientHeight": 720}
+    target.box_models[10] = [100, 3100, 300, 3100, 300, 3160, 100, 3160]  # centre y=3130, below
+    clicked: list[str] = []
+    target.effects[10] = lambda t, p: clicked.append("continue")
+    surface = CdpConnectedSurface(target)
+    view = await surface.perceive()
+    await surface.act(SurfaceAction(handle=view.affordances[0].handle, kind="click"))
+    assert clicked == ["continue"]  # the synthetic arm hit the node
+    assert not any(m == "Input.dispatchMouseEvent" for m, _ in target.calls)  # no blind press
+
+
+def test_scroll_step_is_instant_not_smooth() -> None:
+    # F2 root cause: an async (smooth) scroll is what leaves the box stale. The scroll step must
+    # request an INSTANT scroll so the box is settled before getBoxModel reads it.
+    from zu_tools.connected_surface import _SCROLL_FN
+    assert "behavior:'instant'" in _SCROLL_FN.replace(" ", "")
+
+
+def test_covered_probe_clears_a_control_hit_tested_to_its_own_label() -> None:
+    # F1: the styled-label radio/checkbox pattern (a visually-hidden <input> whose clickable
+    # proxy is its own <label> — Bootstrap/Tailwind/MUI) hit-tests to that label, a sibling.
+    # The occlusion probe must read that as the control's OWN affordance (clear), not occlusion,
+    # or it prunes the modal's own slot/variant grid. The JS logic is browser-only; pin it here.
+    from zu_tools.connected_surface import _COVERED_FN
+    src = _COVERED_FN.replace(" ", "")
+    assert "this.labels" in src and "hl.control===this" in src
 
 
 async def test_act_type_sends_value_through_native_setter() -> None:

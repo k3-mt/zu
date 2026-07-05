@@ -7,6 +7,24 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Fixed — occlusion + trusted-click hardening (adversarial verification of the e2e audit fixes)
+Real-Chromium refutation of the two Added items below surfaced three regressions; all are geometry-
+/DOM-semantics-only, no site constants:
+- **The styled-label radio/checkbox pattern no longer reads as covered.** A visually-hidden
+  `<input>` (sr-only / opacity:0 / Bootstrap `.btn-check`) whose clickable proxy is its own
+  `<label>` hit-tests to that label — a sibling, not an ancestor — so the occlusion probe called it
+  `covered` and pruned the modal's OWN slot/variant grid (up to a wrongful `blind`). `_COVERED_FN`
+  now reads a hit that is (or is inside) the control's own `<label>` (`this.labels`, or a `<label>`
+  whose `.control` is the node) as the control's affordance = `clear`.
+- **The trusted click no longer dispatches at a stale off-viewport point.** `scrollIntoView` now
+  requests `behavior:'instant'` (a `scroll-behavior:smooth` site animated it async, so the next
+  `getBoxModel` read the pre-scroll box), and `_trusted_click` rejects a centre below/right of the
+  layout viewport (`Page.getLayoutMetrics`) and falls back to the synthetic click — which targets
+  the node itself — instead of pressing empty space where the widget never fires.
+- **The occlusion-probe cap is raised 120 → 400** so a link/nav/footer-dense page-behind (routinely
+  >120 interactive nodes) is fully covered before the cap bites; probes are still paid only under an
+  overlay, in document order (page-behind first).
+
 ### Added — trusted-input click on the connected surface (conduit e2e audit A9)
 `CdpConnectedSurface.act()`'s click verb was a synthetic `this.click()` — `isTrusted:false`, which
 booking-widget-class UIs simply ignore (their handlers gate on genuine pointer input).
@@ -33,8 +51,8 @@ and the fingerprint-change verify would bless the punch-through.
   (flat `session_id` routing is not portable across transports).
 - **`AxNode.covered` (additive, default `False`)** — the producer-supplied occlusion bit.
   `reduce_surface` prunes a covered node like an invisible one — it never becomes an affordance,
-  so `choose_one`/the satisfier/every option-group consumer excludes covered options BY
-  CONSTRUCTION and the fingerprint verify has nothing covered to bless — but COUNTS it:
+  so `choose_one`/the satisfier/every option-group consumer excludes covered options (within the
+  per-perceive probe cap) and the fingerprint verify has nothing covered to bless — but COUNTS it:
   `Surface.covered_count` / `SurfaceView.covered_count` (additive, out of `fingerprint`) carry how
   many interactive controls the prune removed, and a page whose ONLY interactive controls were
   covered reads as `blind` with an occlusion reason. "An overlay swallowed the page" is now
