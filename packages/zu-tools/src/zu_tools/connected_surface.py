@@ -29,6 +29,10 @@ reference :class:`~zu_core.ports.ConnectedSurface`:
     the element lives in, which is exactly what "resolve across a boundary"
     needs), performs the verb, and RE-PERCEIVES so the returned view reflects the
     effect (or, for a stale handle, shows it gone — an escalation, not a crash).
+    The click verb dispatches REAL trusted input first (``Input.dispatchMouseEvent``
+    at the element's box-model centre — widgets that check ``isTrusted`` ignore a
+    synthetic ``.click()``), falling back to the synthetic click when no box model
+    is available.
 
 The transport is a tiny injectable :class:`CdpTarget` (one ``send`` method,
 exactly a raw devtools client / Playwright's ``CDPSession.send``), so the surface
@@ -58,9 +62,17 @@ _SUBMIT = "submit"
 # so we keep it in the surface instead of dropping it as blind (#110).
 _SELF_ADDRESSING_ROLES: frozenset[str] = frozenset({"combobox", "listbox"})
 
-# A click that crosses shadow/frame boundaries: the element is resolved to a
-# global objectId first, so ``this.click()`` fires inside whatever root it lives
-# in. (The pointer tool handles the isTrusted/hover case separately, §12.)
+# Bring the element into view before the trusted click reads its box model — the
+# same centring scroll the synthetic click always did, as its own step.
+_SCROLL_FN = "function(){ this.scrollIntoView({block:'center'}); }"
+
+# The SYNTHETIC click FALLBACK, crossing shadow/frame boundaries: the element is
+# resolved to a global objectId first, so ``this.click()`` fires inside whatever
+# root it lives in. The click verb tries REAL trusted input first (``_trusted_click``:
+# ``DOM.getBoxModel`` centre → ``Input.dispatchMouseEvent``, because widgets that
+# check ``event.isTrusted`` ignore a synthetic ``.click()``); this fallback keeps
+# every element clickable when no box model is available (detached/zero-area, a
+# transport that lacks the Input domain).
 _CLICK_FN = "function(){ this.scrollIntoView({block:'center'}); this.click(); }"
 
 # Set a field's value through the native setter so React/Vue controlled inputs
@@ -323,7 +335,7 @@ class CdpConnectedSurface:
         return out
 
     async def act(self, action: SurfaceAction) -> SurfaceView:
-        object_id, session_id = await self._resolve(action.handle)
+        object_id, node_id, session_id = await self._resolve(action.handle)
         if object_id is not None:
             if action.kind == _TYPE:
                 await self._call_fn(object_id, _TYPE_FN, [{"value": action.text or ""}], session_id)
@@ -332,10 +344,52 @@ class CdpConnectedSurface:
             elif action.kind == _SUBMIT:
                 await self._call_fn(object_id, _SUBMIT_FN, session_id=session_id)
             else:  # click — the default verb
-                await self._call_fn(object_id, _CLICK_FN, session_id=session_id)
+                await self._click(object_id, node_id, session_id)
         # A stale/unresolvable handle is an escalation, not a crash (§11.3): we
         # simply re-perceive; the caller sees the handle gone and re-captures.
         return await self.perceive()
+
+    async def _click(self, object_id: str, node_id: int | None, session_id: str | None) -> None:
+        """The click verb, TRUSTED input first: scroll the element into view, read its
+        box model, and dispatch a real primary-button press+release at the centre —
+        ``event.isTrusted`` is true, so widgets that ignore synthetic clicks (a React
+        slot grid listening for genuine pointer input) respond. Falls back to the
+        synthetic ``_CLICK_FN`` when the box model is unavailable/zero-area or the
+        dispatch fails, so every element stays clickable on every transport."""
+        await self._call_fn(object_id, _SCROLL_FN, session_id=session_id)
+        if node_id is not None and await self._trusted_click(node_id, session_id):
+            return
+        await self._call_fn(object_id, _CLICK_FN, session_id=session_id)
+
+    async def _trusted_click(self, node_id: int, session_id: str | None) -> bool:
+        """One real (isTrusted) click at the element's box-model centre. True iff the
+        press+release were dispatched; any failure — no/degenerate box model, a raise
+        from the transport — returns False so the caller falls back to the synthetic
+        click (fail-open: the click always has an arm that fires)."""
+        try:
+            resp = await self._send(
+                "DOM.getBoxModel", {"backendNodeId": node_id}, session_id=session_id
+            )
+            model = resp.get("model") if isinstance(resp, dict) else None
+            quad = model.get("content") if isinstance(model, dict) else None
+            if not isinstance(quad, list) or len(quad) < 8:
+                return False
+            xs = [float(quad[i]) for i in range(0, 8, 2)]
+            ys = [float(quad[i]) for i in range(1, 8, 2)]
+            if max(xs) - min(xs) <= 0 or max(ys) - min(ys) <= 0:
+                return False  # zero-area — nothing a pointer could hit
+            x, y = sum(xs) / 4.0, sum(ys) / 4.0
+            if x < 0 or y < 0:
+                return False  # centre off the viewport origin side — not dispatchable
+            for event in ("mousePressed", "mouseReleased"):
+                await self._send(
+                    "Input.dispatchMouseEvent",
+                    {"type": event, "x": x, "y": y, "button": "left", "clickCount": 1},
+                    session_id=session_id,
+                )
+            return True
+        except Exception:  # noqa: BLE001 - fail open: the synthetic click arm still fires
+            return False
 
     # --- occlusion pass (see the block comment above _OVERLAY_PROBE_JS) -------
 
@@ -452,22 +506,23 @@ class CdpConnectedSurface:
             return str(info.get("title", "")), str(info.get("url", ""))
         return "", ""
 
-    async def _resolve(self, handle: str) -> tuple[str | None, str | None]:
-        """Resolve an opaque handle to a live JS object id + its session, ACROSS
-        boundaries: the handle map carries the element's GLOBAL backend DOM-node id
-        (which ``DOM.resolveNode`` turns into an objectId regardless of shadow root /
-        frame) and, for an OOPIF control, the session it lives in (#126). ``(None,
+    async def _resolve(self, handle: str) -> tuple[str | None, int | None, str | None]:
+        """Resolve an opaque handle to a live JS object id + its backend node id + its
+        session, ACROSS boundaries: the handle map carries the element's GLOBAL backend
+        DOM-node id (which ``DOM.resolveNode`` turns into an objectId regardless of
+        shadow root / frame — and which the trusted click's ``DOM.getBoxModel`` needs)
+        and, for an OOPIF control, the session it lives in (#126). ``(None, None,
         None)`` (unknown handle / no node id) is a re-capture signal."""
         locator = self._handle_map.get(handle)
         node_id = locator.get("node_id") if isinstance(locator, dict) else None
         session_id = locator.get("session_id") if isinstance(locator, dict) else None
         session_id = session_id if isinstance(session_id, str) else None
         if not isinstance(node_id, int):
-            return None, None
+            return None, None, None
         resp = await self._send("DOM.resolveNode", {"backendNodeId": node_id}, session_id=session_id)
         obj = resp.get("object") if isinstance(resp, dict) else None
         object_id = obj.get("objectId") if isinstance(obj, dict) else None
-        return (object_id if isinstance(object_id, str) else None), session_id
+        return (object_id if isinstance(object_id, str) else None), node_id, session_id
 
     async def _call_fn(
         self, object_id: str, declaration: str, args: list[dict] | None = None,

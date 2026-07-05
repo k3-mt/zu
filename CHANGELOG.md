@@ -7,6 +7,17 @@ reaches its first tagged release.
 
 ## [Unreleased]
 
+### Added — trusted-input click on the connected surface (conduit e2e audit A9)
+`CdpConnectedSurface.act()`'s click verb was a synthetic `this.click()` — `isTrusted:false`, which
+booking-widget-class UIs simply ignore (their handlers gate on genuine pointer input).
+- **Trusted click first** — the click path now scrolls the element into view, reads its box model
+  (`DOM.getBoxModel` by backend node id) and dispatches a REAL primary-button press+release
+  (`Input.dispatchMouseEvent`, `isTrusted:true`) at the box centre. It falls back to the synthetic
+  `this.click()` when the box model is unavailable/zero-area or the dispatch raises, so every
+  element stays clickable on every transport. `type`/`select`/`submit` mechanics are unchanged
+  (the native-setter dance is the right controlled-input approach), and `act()` still returns the
+  re-perceived view (the port contract).
+
 ### Added — occlusion-aware CDP perception (conduit e2e audit A7)
 The AX tree carries no paint order, so a control UNDER a full-viewport overlay (a consent wall, an
 interstitial) read exactly like an actionable one — a primitive could "click through" the overlay

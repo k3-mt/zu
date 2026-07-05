@@ -3,14 +3,16 @@
 No browser: a ``FakeCdpTarget`` answers the handful of CDP methods the surface
 uses (``Page.getFrameTree``, ``Accessibility.getFullAXTree``,
 ``Target.getTargetInfo``, ``DOM.resolveNode``, ``Runtime.callFunctionOn``,
-``Runtime.evaluate``) from an in-memory, mutable set of AX-tree snapshots — so
-``perceive → act → perceive`` loops run for real. This mirrors
-``test_action_surface``'s fake-session pattern.
+``Runtime.evaluate``, ``DOM.getBoxModel``, ``Input.dispatchMouseEvent``) from an
+in-memory, mutable set of AX-tree snapshots — so ``perceive → act → perceive``
+loops run for real. This mirrors ``test_action_surface``'s fake-session pattern.
 
 The occlusion pass is scripted the same way: ``overlay`` answers the ONE
 ``Runtime.evaluate`` pre-probe; ``occlusion`` maps a backend node id to the
 per-node probe VERDICT ('covered'/'clear'/'offscreen'/…, or an Exception to
-raise).
+raise). The trusted click is scripted via ``box_models`` (backend node id →
+content quad); a dispatched ``mouseReleased`` at a quad's centre fires that
+node's act effect — real input hits whatever owns the point.
 """
 
 from __future__ import annotations
@@ -37,8 +39,9 @@ class FakeCdpTarget:
     """A minimal in-memory CDP endpoint. ``frames`` maps a frame id ("" = main) to
     its current AX node list; ``effects`` maps a backend node id to a callback that
     mutates ``frames`` when that node is acted on — the DOM effect a browser would
-    apply, modelled at the AX level. An effect fires on an ACT call only (a function
-    that clicks/dispatches events) — never on an occlusion probe."""
+    apply, modelled at the AX level. An effect fires on a CLICK-like call only: a
+    trusted ``mouseReleased`` at the node's box centre, or a synthetic function that
+    clicks/dispatches events — never on the scroll step or an occlusion probe."""
 
     def __init__(self, frames: dict[str, list[dict]], *, title: str = "", url: str = "",
                  frame_tree: dict | None = None) -> None:
@@ -50,6 +53,8 @@ class FakeCdpTarget:
         self.effects: dict[int, Any] = {}
         self.overlay = False                      # the Runtime.evaluate pre-probe answer
         self.occlusion: dict[int, Any] = {}       # bid -> probe verdict (or Exception)
+        self.box_models: dict[int, list[float]] = {}  # bid -> content quad (8 numbers)
+        self.dispatch_error: Exception | None = None  # raised by Input.dispatchMouseEvent
         self._obj_to_node: dict[str, Any] = {}
 
     async def send(
@@ -65,6 +70,21 @@ class FakeCdpTarget:
             return {"targetInfo": {"title": self.title, "url": self.url}}
         if method == "Runtime.evaluate":
             return {"result": {"value": self.overlay}}
+        if method == "DOM.getBoxModel":
+            box_bid = params.get("backendNodeId")
+            quad = self.box_models.get(box_bid) if isinstance(box_bid, int) else None
+            return {"model": {"content": list(quad)}} if quad else {}
+        if method == "Input.dispatchMouseEvent":
+            if self.dispatch_error is not None:
+                raise self.dispatch_error
+            if params.get("type") == "mouseReleased":
+                for hit_bid, hit_quad in self.box_models.items():
+                    cx, cy = sum(hit_quad[0::2]) / 4.0, sum(hit_quad[1::2]) / 4.0
+                    if abs(cx - params.get("x", -1)) < 0.5 and abs(cy - params.get("y", -1)) < 0.5:
+                        effect = self.effects.get(hit_bid)
+                        if effect is not None:
+                            effect(self, params)
+            return {}
         if method == "DOM.resolveNode":
             bid = params.get("backendNodeId")
             oid = f"obj-{bid}"
@@ -131,21 +151,77 @@ async def test_perceive_falls_back_to_main_frame_when_no_frame_tree() -> None:
     assert _labels(view) == ["Buy"]
 
 
-async def test_act_click_resolves_backend_node_and_reperceives_effect() -> None:
+async def test_act_click_dispatches_trusted_input_at_the_box_centre() -> None:
+    # The click contract (A9): REAL input first. The handle resolves to its GLOBAL
+    # backend node id, the element is scrolled into view, and a trusted
+    # mousePressed+mouseReleased (isTrusted:true in a real browser) lands at the
+    # box-model centre — the synthetic this.click() is NOT used.
     frames = {"": [ax("button", "Accept all", node_id=10), ax("button", "Buy", node_id=11)]}
     target = FakeCdpTarget(frames)
     target.effects[10] = target._remove(10)  # clicking Accept removes it
+    target.box_models[10] = [10, 20, 110, 20, 110, 60, 10, 60]  # centre (60, 40)
     surface = CdpConnectedSurface(target)
 
     view = await surface.perceive()
     accept = next(a for a in view.affordances if a.label == "Accept all")
     after = await surface.act(SurfaceAction(handle=accept.handle, kind="click"))
 
-    assert _labels(after) == ["Buy"]  # accept cleared, re-perceived
-    # It resolved the handle to its GLOBAL backend node id, then called a click fn.
+    assert _labels(after) == ["Buy"]  # accept cleared by the TRUSTED click, re-perceived
     assert ("DOM.resolveNode", {"backendNodeId": 10}) in target.calls
-    click = next(p for m, p in target.calls if m == "Runtime.callFunctionOn")
-    assert "this.click()" in click["functionDeclaration"]
+    assert ("DOM.getBoxModel", {"backendNodeId": 10}) in target.calls
+    mouse = [p for m, p in target.calls if m == "Input.dispatchMouseEvent"]
+    assert [p["type"] for p in mouse] == ["mousePressed", "mouseReleased"]
+    assert all(p["button"] == "left" and p["clickCount"] == 1 for p in mouse)
+    assert mouse[0]["x"] == 60 and mouse[0]["y"] == 40  # the box centre, not (0,0)
+    assert not any(
+        "this.click()" in p.get("functionDeclaration", "")
+        for m, p in target.calls if m == "Runtime.callFunctionOn"
+    )
+
+
+async def test_act_click_falls_back_to_synthetic_without_box_model() -> None:
+    # No box model (detached / a transport without the DOM box-model op): the click
+    # falls back to the synthetic this.click() arm and still takes effect.
+    frames = {"": [ax("button", "Accept all", node_id=10), ax("button", "Buy", node_id=11)]}
+    target = FakeCdpTarget(frames)
+    target.effects[10] = target._remove(10)
+    surface = CdpConnectedSurface(target)
+
+    view = await surface.perceive()
+    accept = next(a for a in view.affordances if a.label == "Accept all")
+    after = await surface.act(SurfaceAction(handle=accept.handle, kind="click"))
+
+    assert _labels(after) == ["Buy"]  # the synthetic fallback clicked it
+    assert not any(m == "Input.dispatchMouseEvent" for m, _ in target.calls)
+    assert any(
+        "this.click()" in p.get("functionDeclaration", "")
+        for m, p in target.calls if m == "Runtime.callFunctionOn"
+    )
+
+
+async def test_act_click_falls_back_on_zero_area_box_and_dispatch_raise() -> None:
+    # A degenerate (zero-area) box model is not trusted-clickable — synthetic arm.
+    frames = {"": [ax("button", "Go", node_id=10)]}
+    target = FakeCdpTarget(frames)
+    target.box_models[10] = [5, 5, 5, 5, 5, 5, 5, 5]
+    clicked: list[str] = []
+    target.effects[10] = lambda t, p: clicked.append("go")
+    surface = CdpConnectedSurface(target)
+    view = await surface.perceive()
+    await surface.act(SurfaceAction(handle=view.affordances[0].handle, kind="click"))
+    assert clicked == ["go"]  # via the synthetic arm
+    assert not any(m == "Input.dispatchMouseEvent" for m, _ in target.calls)
+
+    # And a dispatch that RAISES (transport without the Input domain) also falls back.
+    target2 = FakeCdpTarget({"": [ax("button", "Go", node_id=10)]})
+    target2.box_models[10] = [0, 0, 10, 0, 10, 10, 0, 10]
+    target2.dispatch_error = RuntimeError("Input domain unavailable")
+    clicked2: list[str] = []
+    target2.effects[10] = lambda t, p: clicked2.append("go")
+    surface2 = CdpConnectedSurface(target2)
+    view2 = await surface2.perceive()
+    await surface2.act(SurfaceAction(handle=view2.affordances[0].handle, kind="click"))
+    assert clicked2 == ["go"]  # the raise was swallowed; the synthetic arm clicked
 
 
 async def test_act_type_sends_value_through_native_setter() -> None:
