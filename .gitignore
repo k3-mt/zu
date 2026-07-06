@@ -51,6 +51,8 @@ track.json
 # Internal design / strategy docs — kept local, never in the public repo
 *.docx
 *.pdf
+*.xlsx
+.design-source/
 # BUILD.md is the internal build-sequence / deferred-gaps ledger — kept local.
 # (ARCHITECTURE.md is public: an onboarding agent needs the structural map.)
 docs/BUILD.md
