@@ -150,6 +150,37 @@ def test_normalize_cdp_axtree() -> None:
     assert "disabled" in s.affordances[0].states
 
 
+def test_normalize_stamps_real_geometry_prunes_zero_area_keeps_below_the_fold() -> None:
+    # The #93/#126 invisible-control fix at the reducer boundary: getFullAXTree has NO
+    # geometry, so a collapsed mega-menu link (ignored=false, 0x0) would otherwise flood
+    # the surface. With a real box map, the existing zero-area prune drops it — while a
+    # BELOW-THE-FOLD control (real w/h, just a large y) MUST survive.
+    cdp = [
+        {"role": {"value": "link"}, "name": {"value": "Massage in Manchester"},
+         "backendDOMNodeId": 1, "ignored": False},   # collapsed menu — 0x0
+        {"role": {"value": "button"}, "name": {"value": "Book now"},
+         "backendDOMNodeId": 2, "ignored": False},   # on-screen, real size
+        {"role": {"value": "button"}, "name": {"value": "Footer link"},
+         "backendDOMNodeId": 3, "ignored": False},   # far below the fold, real size
+        {"role": {"value": "button"}, "name": {"value": "No geometry"},
+         "backendDOMNodeId": 4, "ignored": False},   # absent from the box map => fail-open
+    ]
+    bounds = {
+        1: [10.0, 20.0, 0.0, 0.0],        # zero-area — invisible to a real user
+        2: [10.0, 100.0, 120.0, 40.0],    # visible
+        3: [10.0, 9000.0, 120.0, 40.0],   # huge y but real size — a scroll away, NOT hidden
+        # 4 deliberately omitted — no resolvable geometry
+    }
+    nodes = normalize_axtree(cdp, bounds_by_backend_id=bounds)
+    assert nodes[0].bounds == [10.0, 20.0, 0.0, 0.0]
+    assert nodes[3].bounds is None  # unmapped => None => kept
+
+    s = reduce_surface(nodes)
+    labels = [a.label for a in s.affordances]
+    assert "Massage in Manchester" not in labels        # zero-area pruned
+    assert labels == ["Book now", "Footer link", "No geometry"]  # below-fold + fail-open kept
+
+
 async def test_tool_reduce_op_with_nodes() -> None:
     tool = ActionSurface()
     out = await tool(None, op="reduce",

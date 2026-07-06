@@ -424,7 +424,13 @@ def _enclosing_labels(cdp_nodes: list[dict]) -> dict[str, str]:
     return out
 
 
-def normalize_axtree(cdp_nodes: list[dict], *, session_id: str | None = None) -> list[AxNode]:
+def normalize_axtree(
+    cdp_nodes: list[dict],
+    *,
+    session_id: str | None = None,
+    bounds_by_backend_id: dict[int, list[float]] | None = None,
+    geometry_complete: bool = False,
+) -> list[AxNode]:
     """Normalise the raw CDP ``Accessibility.getFullAXTree`` node list into
     :class:`AxNode` records, in document (pre-order) order as CDP returns them.
 
@@ -434,7 +440,22 @@ def normalize_axtree(cdp_nodes: list[dict], *, session_id: str | None = None) ->
     invalid. Placeholder/description/value are read from their AX properties. Each
     node is stamped with the id of its enclosing single-choice group container, when
     one is present (``group``, #120).
-    """
+
+    ``bounds_by_backend_id`` (optional) supplies REAL layout geometry — a map from a
+    node's ``backendDOMNodeId`` to its ``[x, y, w, h]`` box, captured once per CDP
+    session by a :class:`~zu_core.ports.ConnectedSurface` (getFullAXTree itself
+    carries no geometry). When present, a node's box is stamped onto ``bounds`` so the
+    reducer's existing zero-area prune can drop controls a real user cannot see (a
+    collapsed mega-menu link is ``ignored=false`` yet ``0×0``).
+
+    ``geometry_complete`` says the geometry map came from a SUCCESSFUL snapshot that
+    found rendered nodes. Because a snapshot's ``layout`` lists only laid-out nodes, a
+    control with a backend id that is ABSENT from a complete map was not rendered at all
+    (``display:none`` / detached — urban's mega-menu hides this way, with no ``0×0`` box
+    to catch): it is stamped zero-area so the reducer prunes it. Absent geometry with
+    ``geometry_complete=False`` (a failed/empty snapshot) keeps ``bounds=None`` —
+    fail-open: no geometry means KEEP, never hide a real control. Off by default, so the
+    offline reduce path is unchanged."""
     out: list[AxNode] = []
     group_of = _group_ancestors(cdp_nodes)
     enclosing_of = _enclosing_labels(cdp_nodes)
@@ -448,6 +469,19 @@ def normalize_axtree(cdp_nodes: list[dict], *, session_id: str | None = None) ->
         # handle across shadow/frame boundaries. Absent on older/partial trees.
         raw_node_id = n.get("backendDOMNodeId")
         node_id = raw_node_id if isinstance(raw_node_id, int) else None
+        # Real per-node geometry, when a connected surface captured it for this session.
+        # Absent id => None => kept (fail-open); a 0-area box => pruned as invisible.
+        bounds = (
+            bounds_by_backend_id.get(node_id)
+            if bounds_by_backend_id is not None and node_id is not None
+            else None
+        )
+        # A backend-id node ABSENT from a COMPLETE geometry map was never laid out
+        # (display:none / detached) — a control a real user cannot see. Stamp it zero-area
+        # so the reducer prunes it, just like a 0×0 box. (Only fires when the snapshot
+        # succeeded and found rendered nodes; a failed snapshot leaves bounds None = kept.)
+        if bounds is None and geometry_complete and node_id is not None:
+            bounds = [0.0, 0.0, 0.0, 0.0]
         nid = n.get("nodeId")
         group = group_of.get(nid) if isinstance(nid, str) else None
         enclosing = enclosing_of.get(nid) if isinstance(nid, str) else None
@@ -471,6 +505,7 @@ def normalize_axtree(cdp_nodes: list[dict], *, session_id: str | None = None) ->
                 visible=not bool(props.get("hidden", {}).get("value", False))
                 if isinstance(props.get("hidden"), dict) else True,
                 node_id=node_id,
+                bounds=bounds,
                 group=group,
                 enclosing_label=enclosing,
                 session_id=session_id,

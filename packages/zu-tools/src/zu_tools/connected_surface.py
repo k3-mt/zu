@@ -320,7 +320,8 @@ class CdpConnectedSurface:
 
     async def _page_ax_nodes(self) -> list[AxNode]:
         """The page target's AX nodes (root session): the main frame + same-origin
-        child frames, de-duplicated by global backend node id."""
+        child frames, de-duplicated by global backend node id, with real per-node
+        geometry stamped on so the reducer prunes controls a user cannot see."""
         seen: set[int] = set()
         raw: list[dict] = []
         for frame_id in await self._frame_ids():
@@ -338,7 +339,13 @@ class CdpConnectedSurface:
                         continue  # already collected from the main tree / another frame
                     seen.add(bid)
                 raw.append(n)
-        return normalize_axtree(raw)
+        # One geometry snapshot for the whole root session — its documents cover the
+        # main frame AND every same-origin child frame, keyed by the same global
+        # backend ids we just collected (#93/#126 invisible-control fix).
+        bounds, ok = await self._bounds_by_backend_id()
+        return normalize_axtree(
+            raw, bounds_by_backend_id=bounds, geometry_complete=ok and bool(bounds)
+        )
 
     async def _iframe_ax_nodes(self) -> list[AxNode]:
         """The AX nodes of each CROSS-ORIGIN iframe target (#126): attach to the
@@ -353,9 +360,15 @@ class CdpConnectedSurface:
             nodes = resp.get("nodes") if isinstance(resp, dict) else None
             if not isinstance(nodes, list):
                 continue
+            # Geometry MUST be captured in the node's OWNING session — an OOPIF is a
+            # separate CDP target, so its backend ids only resolve to boxes there.
+            bounds, ok = await self._bounds_by_backend_id(session_id)
             out.extend(
                 normalize_axtree(
-                    [n for n in nodes if isinstance(n, dict)], session_id=session_id
+                    [n for n in nodes if isinstance(n, dict)],
+                    session_id=session_id,
+                    bounds_by_backend_id=bounds,
+                    geometry_complete=ok and bool(bounds),
                 )
             )
         return out
@@ -528,6 +541,62 @@ class CdpConnectedSurface:
         resp = await self._send("Target.attachToTarget", {"targetId": target_id, "flatten": True})
         sid = resp.get("sessionId") if isinstance(resp, dict) else None
         return sid if isinstance(sid, str) else None
+
+    async def _bounds_by_backend_id(
+        self, session_id: str | None = None
+    ) -> tuple[dict[int, list[float]], bool]:
+        """Real per-node layout geometry for one CDP session: ``(backendDOMNodeId ->
+        [x, y, w, h], ok)``, from ONE ``DOMSnapshot.captureSnapshot`` (one call, not a
+        ``DOM.getBoxModel`` per node). ``getFullAXTree`` carries no geometry, so a
+        ``0×0`` but ``ignored=false`` control (a collapsed mega-menu link) otherwise
+        floods the surface; with a box on it, the reducer's zero-area prune drops it.
+
+        The snapshot ``layout`` array lists ONLY laid-out (rendered) nodes, so it is
+        BOTH the geometry source AND the render oracle: a control in the AX tree whose
+        backend id is ABSENT from a SUCCESSFUL snapshot was not laid out at all — it is
+        ``display:none`` / detached, i.e. invisible (urban's mega-menu hides this way, no
+        ``0×0`` box to catch). ``ok`` reports whether the snapshot succeeded, so the
+        reducer can prune those absentees when ``ok`` and keep them (fail-open) when not.
+        Boxes are full-document coordinates, so a below-the-fold control keeps its real
+        ``w/h`` (large ``y``, never clipped).
+
+        Fail-open by construction: a transport/browser without ``DOMSnapshot``, a
+        session-routing ``TypeError``, or any malformed payload yields ``({}, False)`` —
+        every node then keeps ``bounds=None`` and survives, exactly as before this fix."""
+        resp = await self._send(
+            "DOMSnapshot.captureSnapshot", {"computedStyles": []}, session_id=session_id
+        )
+        documents = resp.get("documents") if isinstance(resp, dict) else None
+        if not isinstance(documents, list):
+            return {}, False
+        out: dict[int, list[float]] = {}
+        for doc in documents:
+            if not isinstance(doc, dict):
+                continue
+            nodes = doc.get("nodes")
+            layout = doc.get("layout")
+            if not isinstance(nodes, dict) or not isinstance(layout, dict):
+                continue
+            backend_ids = nodes.get("backendNodeId")
+            node_index = layout.get("nodeIndex")
+            boxes = layout.get("bounds")
+            if not (isinstance(backend_ids, list) and isinstance(node_index, list)
+                    and isinstance(boxes, list)):
+                continue
+            for k, ni in enumerate(node_index):
+                if not isinstance(ni, int) or not 0 <= ni < len(backend_ids) or k >= len(boxes):
+                    continue
+                bid = backend_ids[ni]
+                box = boxes[k]
+                if not isinstance(bid, int) or not isinstance(box, list) or len(box) != 4:
+                    continue
+                try:
+                    xywh = [float(v) for v in box]
+                except (TypeError, ValueError):
+                    continue
+                # First laid-out box wins; a backend id is one element, one box.
+                out.setdefault(bid, xywh)
+        return out, True
 
     async def _frame_ids(self) -> list[str]:
         """``""`` (the main frame, no frameId — flattens its shadow roots + same-doc
