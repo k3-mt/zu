@@ -63,6 +63,9 @@ _CLEARED = view(aff("p", "link", "Product"))
 _PRODUCT = view(aff("atb", "button", "Add to basket"), aff("home", "link", "Home"))
 _DRAWER = view(aff("co", "button", "Checkout"), context=("added to cart", "Subtotal £24"))
 _CHECKOUT = view(aff("po", "button", "Place order"), url="shop/checkout")
+# A listing / search-results page: a persistent 'Checkout' in the header chrome, but the cart is
+# EMPTY (no add-to-cart target, no in_cart signal) — tesco.com search results.
+_LISTING = view(aff("co", "button", "Checkout"), aff("p1", "link", "Semi Skimmed Milk 2 Pints"))
 
 _PAYMENT = view(aff("cn", "textbox", "Card number", autocomplete="cc-number"),
                 aff("pay", "button", "Pay now"))
@@ -114,6 +117,13 @@ def test_advance_inspects_proceed_in_the_cart() -> None:
 
 def test_advance_is_inert_on_a_booking_slot_grid() -> None:
     assert AdvancePrimitive().inspect(_TIMES).applicable is False
+
+
+def test_advance_is_inert_on_a_listing_with_only_chrome_checkout_and_empty_cart() -> None:
+    # A search-results / listing page shows a persistent header 'Checkout', but nothing is in the
+    # cart (no add-to-cart target, no in_cart signal). advance must NOT self-fire and drag the
+    # drive off to an empty basket (observed on tesco.com search results).
+    assert AdvancePrimitive().inspect(_LISTING).applicable is False
 
 
 async def test_advance_adds_to_cart_then_proceeds() -> None:

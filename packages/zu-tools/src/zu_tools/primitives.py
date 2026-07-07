@@ -125,11 +125,19 @@ class AdvancePrimitive:
         if add is not None and not in_cart(view):
             return PrimitivePlan(kind=self.kind, applicable=True, handles=(add,),
                                  detail="add to cart")
-        adv = self._proceed.inspect(view).proceed_handle
-        return PrimitivePlan(
-            kind=self.kind, applicable=adv is not None,
-            handles=(adv,) if adv else (), detail="proceed to checkout" if adv else "",
-        )
+        # Proceed toward checkout ONLY when the cart actually holds something (``in_cart``). A
+        # persistent 'Checkout' / 'View basket' control in the page CHROME of a listing / search-
+        # results page (an EMPTY cart) would otherwise make ``advance`` self-fire and drag the
+        # drive off to an empty basket — observed on tesco.com search results: add_to_cart=None,
+        # in_cart=False, yet a header proceed control matched, so the reflex bounced away from the
+        # products. The cart-content gate keeps 'proceed' to the cart/drawer where it belongs;
+        # booking (no cart) stays inert.
+        if in_cart(view):
+            adv = self._proceed.inspect(view).proceed_handle
+            if adv is not None:
+                return PrimitivePlan(kind=self.kind, applicable=True, handles=(adv,),
+                                     detail="proceed to checkout")
+        return PrimitivePlan(kind=self.kind, applicable=False, handles=(), detail="")
 
     async def apply(
         self, surface: ConnectedSurface, *, hint: str | None = None
@@ -141,6 +149,10 @@ class AdvancePrimitive:
                 kind=self.kind, progress="advance" if took else "no_op",
                 detail="added to cart" if took else "add did not take",
             )
+        # Same cart-content gate as inspect(): never 'proceed to checkout' from an empty cart.
+        if not in_cart(view):
+            return PrimitiveOutcome(kind=self.kind, progress="no_op",
+                                    detail="empty cart — nothing to advance")
         moved = await self._proceed.proceed(surface)
         return PrimitiveOutcome(
             kind=self.kind, progress="advance" if moved else "no_op",
