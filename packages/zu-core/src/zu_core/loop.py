@@ -115,6 +115,24 @@ _REPLAY_DONE_NOTICE = (
 # data.source.fetched event), summarised in the harness.tool.returned event.
 _CONTENT_KEYS = ("html", "text", "content")
 
+
+def _carries_image(obs: object) -> bool:
+    """True iff a tool observation carries an IMAGE content part — the agent ingested rendered
+    pixels (a screenshot). Reading untrusted visual content is the same class of untrusted read as
+    reading page prose (a ``content_view``): the pixel channel is the INJECTABLE one, so ingesting
+    one must taint the run. STRUCTURAL and spoof-proof — it keys on the presence of image bytes in
+    the observation, never on the tool honestly setting ``_taint`` — and monotone toward caution.
+    Handles both a serialised part (``{"kind": "image", ...}``) and a typed ``Image`` part."""
+    if not isinstance(obs, dict):
+        return False
+    content = obs.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        (isinstance(p, dict) and p.get("kind") == "image") or getattr(p, "kind", None) == "image"
+        for p in content
+    )
+
 # In-band framing for untrusted external content (#77). When a tool reaches the
 # open internet (or otherwise ingests untrusted bytes), its content fields are
 # wrapped in these markers and prefaced with a model-facing notice BEFORE they
@@ -2154,6 +2172,18 @@ async def _invoke(
             await run.emit(
                 ev.TAINT_RAISED,
                 {"source": name, "detail": "agent read untrusted page content"},
+                parent=turn,
+                source=name,
+            )
+        # Ingesting an IMAGE (a screenshot / rendered pixels) is an untrusted-content read too — the
+        # pixel-first perception channel is the injectable one — so it taints the run, the same
+        # monotone stop content_view raises for page prose (pixel-first substrate §Additive-2). If
+        # content_view already raised taint above, raise_taint is idempotent and this does not
+        # re-emit; a pure image observation records the image-ingest reason.
+        elif _carries_image(obs) and run.raise_taint(name):
+            await run.emit(
+                ev.TAINT_RAISED,
+                {"source": name, "detail": "agent ingested an untrusted image (screenshot/pixels)"},
                 parent=turn,
                 source=name,
             )

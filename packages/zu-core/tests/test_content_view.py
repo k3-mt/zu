@@ -518,3 +518,52 @@ def test_surface_view_has_no_new_fields() -> None:
         "label_source",
         "role_source",
     }
+
+
+def test_carries_image_detects_image_parts() -> None:
+    from zu_core.content import Image
+    from zu_core.loop import _carries_image
+
+    # a serialised image content part
+    assert _carries_image({"content": [{"kind": "text", "text": "hi"},
+                                        {"kind": "image", "data": "b64", "mime": "image/png"}]})
+    # a typed Image part
+    assert _carries_image({"content": [Image(data=b"\x89PNG")]})
+    # no image -> no trigger
+    assert not _carries_image({"content": [{"kind": "text", "text": "hi"}]})
+    assert not _carries_image({"text": "just prose"})
+    assert not _carries_image({"error": "boom"})
+    assert not _carries_image("not a dict")
+
+
+class _ImageTool:
+    """A tool whose observation carries an image content part (a screenshot) — exercises the
+    loop's taint-on-image-ingest end to end."""
+
+    name = "screenshot"
+    tier = 1
+    schema = {"name": "screenshot", "parameters": {"type": "object", "properties": {}}}
+
+    async def __call__(self, ctx, **kwargs) -> dict:
+        return {"content": [{"kind": "image", "data": "iVBORw0KGgo=", "mime": "image/png"}]}
+
+
+async def test_image_ingest_raises_taint() -> None:
+    reg = Registry()
+    reg.register("tools", "screenshot", _ImageTool())
+    provider = ScriptedProvider.from_moves(
+        [
+            {"tool": "screenshot", "args": {}},
+            {"text": '{"done": true}', "finish": "stop"},
+        ]
+    )
+    bus = EventBus()
+    result = await run_task(TaskSpec(query="look at the page"), provider, reg, bus)
+    assert result.status == Status.SUCCESS
+
+    evs = await bus.query()
+    taints = [e for e in evs if e.type == ev.TAINT_RAISED]
+    # ingesting a screenshot taints the run, with the image-ingest reason recorded
+    assert taints and any("image" in str(e.payload.get("detail", "")) for e in taints)
+    # the run still completes; taint is a flag downstream gates read, not a halt
+    assert any(e.type == ev.TASK_COMPLETED for e in evs)
