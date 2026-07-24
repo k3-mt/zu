@@ -70,6 +70,24 @@ class SurfaceAffordance(BaseModel):
     # read 'Select', selectable only by their card heading. ``None`` when there is no
     # labelled enclosing container. Additive; out of ``fingerprint``.
     enclosing_label: str | None = None
+    # PROVENANCE of the label / role — HOW each was recovered, which sets its trust. ``None`` (the
+    # default) is the un-injectable structural rung: an accessibility-tree name / structural role.
+    # A producer that recovered the value from a screenshot MUST stamp it, so a consumer's clamp /
+    # quarantine / fenced-DATA door treats a pixel-read label as UNTRUSTED, injectable text (the
+    # LAW-2 tier-3 channel) while geometry and the closed-vocab role stay trusted-as-structure. This
+    # is the per-field version of a pixel producer's name-provenance sidecar, lifted onto the core
+    # currency so the trust tier travels WITH the field. Vocabulary (free strings, extensible):
+    #   ``structure`` — accessibility-tree / DOM structural (un-injectable; same as ``None``);
+    #   ``dom-card``  — a deterministic enclosing-card DOM read (un-injectable — a regex/DOM read,
+    #                   not a model, so it cannot be socially-engineered like a VLM reading pixels);
+    #   ``ocr``       — a LOCAL transcription of a painted region (un-injectable in the transcriber
+    #                   sense: it cannot be instruction-followed, though it is spoofable);
+    #   ``vlm``       — a remote VLM read of the screenshot (INJECTABLE — the tier-3 open channel).
+    # Additive and defaulted; OUT of ``fingerprint`` (provenance is not a selection effect), so
+    # existing producers, fixtures and digests are byte-for-byte unaffected. Monotone toward caution:
+    # it can only make a consumer treat MORE labels as untrusted, never fewer.
+    label_source: str | None = None
+    role_source: str | None = None
 
 
 class SurfaceView(BaseModel):
