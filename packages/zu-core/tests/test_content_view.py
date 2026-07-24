@@ -500,7 +500,10 @@ def test_surface_view_has_no_new_fields() -> None:
     # metadata, never page PROSE, so the action view stays content-free (Issue #45 added the
     # three structural signals; #120 added the group id — an opaque AX-container id;
     # #127 added the enclosing label — a name-class signal, the label of a control's
-    # own group box, never free page prose).
+    # own group box, never free page prose. M2 (pixel-first) added label_source/role_source
+    # — per-field PROVENANCE (how the label/role was recovered: structure|dom-card|ocr|vlm),
+    # a trust tag, never page prose; it keeps the content-free invariant and stays out of the
+    # fingerprint.
     assert set(SurfaceAffordance.model_fields) == {
         "handle",
         "role",
@@ -512,4 +515,6 @@ def test_surface_view_has_no_new_fields() -> None:
         "submits",
         "group",
         "enclosing_label",
+        "label_source",
+        "role_source",
     }
